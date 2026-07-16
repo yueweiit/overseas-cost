@@ -1,0 +1,11 @@
+# 中文用途：忽略 Python/Frappe 后端开发过程中不需要提交的临时文件。
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/

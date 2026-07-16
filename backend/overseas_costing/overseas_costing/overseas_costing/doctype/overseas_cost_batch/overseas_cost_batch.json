@@ -1,0 +1,298 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost Batch",
+  "module": "Overseas Costing",
+  "autoname": "hash",
+  "title_field": "batch_no",
+  "search_fields": "batch_no,customs_no,waybill_no,source_approval_no,source_instance_id,source_data_id",
+  "track_changes": 1,
+  "sort_field": "modified",
+  "sort_order": "DESC",
+  "field_order": [
+    "batch_no",
+    "customs_no",
+    "waybill_no",
+    "container_no",
+    "sea_bill_no",
+    "commercial_invoice_no",
+    "transport_mode",
+    "project_collection",
+    "source_type",
+    "source_file_name",
+    "source_sheet",
+    "source_range",
+    "source_data_id",
+    "source_approval_no",
+    "source_instance_id",
+    "source_dingtalk_url",
+    "source_approval_status",
+    "source_title",
+    "source_creator_name",
+    "source_creator_dept",
+    "source_created_at",
+    "source_finished_at",
+    "source_attachment_count",
+    "status",
+    "current_version",
+    "is_locked",
+    "confirm_status",
+    "writeback_status",
+    "writeback_time",
+    "writeback_message",
+    "erp_target_doc",
+    "version_count",
+    "item_count",
+    "total_goods_value",
+    "total_gross_weight_kg",
+    "estimated_total_cost_rmb",
+    "actual_total_cost_rmb",
+    "import_remark",
+    "source_remark",
+    "extra_json"
+  ],
+  "fields": [
+    {
+      "fieldname": "batch_no",
+      "fieldtype": "Data",
+      "label": "批次号",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "customs_no",
+      "fieldtype": "Data",
+      "label": "报关单号",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "waybill_no",
+      "fieldtype": "Data",
+      "label": "运单号",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "container_no",
+      "fieldtype": "Data",
+      "label": "柜号",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "sea_bill_no",
+      "fieldtype": "Data",
+      "label": "海运提单号",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "commercial_invoice_no",
+      "fieldtype": "Data",
+      "label": "商业发票号",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "transport_mode",
+      "fieldtype": "Select",
+      "label": "运输方式",
+      "options": "SEA\nAIR\nEXPRESS",
+      "default": "SEA",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "project_collection",
+      "fieldtype": "Data",
+      "label": "项目归集"
+    },
+    {
+      "fieldname": "source_type",
+      "fieldtype": "Select",
+      "label": "来源类型",
+      "options": "excel\noa_logistics\nerp_purchase\nmanual\nattachment_parse",
+      "default": "excel"
+    },
+    {
+      "fieldname": "source_file_name",
+      "fieldtype": "Data",
+      "label": "来源文件名"
+    },
+    {
+      "fieldname": "source_sheet",
+      "fieldtype": "Data",
+      "label": "来源Sheet"
+    },
+    {
+      "fieldname": "source_range",
+      "fieldtype": "Data",
+      "label": "来源区间"
+    },
+    {
+      "fieldname": "source_data_id",
+      "fieldtype": "Data",
+      "label": "来源数据ID"
+    },
+    {
+      "fieldname": "source_approval_no",
+      "fieldtype": "Data",
+      "label": "来源审批编号"
+    },
+    {
+      "fieldname": "source_instance_id",
+      "fieldtype": "Data",
+      "label": "来源实例ID"
+    },
+    {
+      "fieldname": "source_dingtalk_url",
+      "fieldtype": "Data",
+      "label": "来源钉钉链接"
+    },
+    {
+      "fieldname": "source_approval_status",
+      "fieldtype": "Data",
+      "label": "来源审批状态"
+    },
+    {
+      "fieldname": "source_title",
+      "fieldtype": "Data",
+      "label": "来源标题"
+    },
+    {
+      "fieldname": "source_creator_name",
+      "fieldtype": "Data",
+      "label": "来源发起人"
+    },
+    {
+      "fieldname": "source_creator_dept",
+      "fieldtype": "Data",
+      "label": "来源部门"
+    },
+    {
+      "fieldname": "source_created_at",
+      "fieldtype": "Datetime",
+      "label": "来源发起时间"
+    },
+    {
+      "fieldname": "source_finished_at",
+      "fieldtype": "Datetime",
+      "label": "来源完成时间"
+    },
+    {
+      "fieldname": "source_attachment_count",
+      "fieldtype": "Int",
+      "label": "来源附件数",
+      "read_only": 1
+    },
+    {
+      "fieldname": "status",
+      "fieldtype": "Select",
+      "label": "批次状态",
+      "options": "Draft\nImported\nDirty\nCalculated\nConfirmed\nWriteback Failed\nWritten Back",
+      "default": "Draft",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "current_version",
+      "fieldtype": "Link",
+      "label": "当前版本",
+      "options": "Overseas Cost Version"
+    },
+    {
+      "fieldname": "is_locked",
+      "fieldtype": "Check",
+      "label": "是否锁定"
+    },
+    {
+      "fieldname": "confirm_status",
+      "fieldtype": "Select",
+      "label": "确认状态",
+      "options": "Pending\nPartially Confirmed\nConfirmed",
+      "default": "Pending"
+    },
+    {
+      "fieldname": "writeback_status",
+      "fieldtype": "Select",
+      "label": "回写状态",
+      "options": "Not Started\nPending\nFailed\nSuccess",
+      "default": "Not Started"
+    },
+    {
+      "fieldname": "writeback_time",
+      "fieldtype": "Datetime",
+      "label": "回写时间",
+      "read_only": 1
+    },
+    {
+      "fieldname": "writeback_message",
+      "fieldtype": "Small Text",
+      "label": "回写消息",
+      "read_only": 1
+    },
+    {
+      "fieldname": "erp_target_doc",
+      "fieldtype": "Data",
+      "label": "ERP目标单据",
+      "read_only": 1
+    },
+    {
+      "fieldname": "version_count",
+      "fieldtype": "Int",
+      "label": "版本数",
+      "read_only": 1
+    },
+    {
+      "fieldname": "item_count",
+      "fieldtype": "Int",
+      "label": "明细行数",
+      "read_only": 1
+    },
+    {
+      "fieldname": "total_goods_value",
+      "fieldtype": "Currency",
+      "label": "总货值",
+      "read_only": 1
+    },
+    {
+      "fieldname": "total_gross_weight_kg",
+      "fieldtype": "Float",
+      "label": "总毛重KG",
+      "read_only": 1
+    },
+    {
+      "fieldname": "estimated_total_cost_rmb",
+      "fieldtype": "Currency",
+      "label": "暂估总成本RMB",
+      "read_only": 1
+    },
+    {
+      "fieldname": "actual_total_cost_rmb",
+      "fieldtype": "Currency",
+      "label": "实际总成本RMB",
+      "read_only": 1
+    },
+    {
+      "fieldname": "import_remark",
+      "fieldtype": "Small Text",
+      "label": "导入备注"
+    },
+    {
+      "fieldname": "source_remark",
+      "fieldtype": "Small Text",
+      "label": "源单备注"
+    },
+    {
+      "fieldname": "extra_json",
+      "fieldtype": "Long Text",
+      "label": "扩展JSON"
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "share": 1,
+      "print": 1,
+      "email": 1,
+      "export": 1
+    }
+  ]
+}

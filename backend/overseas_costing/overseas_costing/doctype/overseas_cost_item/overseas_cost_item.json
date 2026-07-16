@@ -1,0 +1,573 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost Item",
+  "module": "Overseas Costing",
+  "autoname": "hash",
+  "title_field": "material_code",
+  "search_fields": "material_code,product_name,spec_model,customs_no,waybill_no,hs_code,purchase_order_no",
+  "track_changes": 1,
+  "sort_field": "modified",
+  "sort_order": "DESC",
+  "field_order": [
+    "batch",
+    "version",
+    "row_no",
+    "excel_row_no",
+    "material_code",
+    "product_name",
+    "product_name_es",
+    "spec_model",
+    "unit",
+    "recipient",
+    "unit_price",
+    "purchase_currency",
+    "quantity",
+    "actual_shipped_qty",
+    "goods_value",
+    "import_name",
+    "hs_code",
+    "category",
+    "customs_no",
+    "waybill_no",
+    "container_no",
+    "sea_bill_no",
+    "commercial_invoice_no",
+    "purchase_order_no",
+    "china_misc_rmb",
+    "china_misc_mxn",
+    "china_ocean_usd",
+    "cc_rate",
+    "cc_anti_dumping",
+    "igi_rate",
+    "igi_amount",
+    "iva_rate",
+    "iva_amount",
+    "goods_value_ratio",
+    "dta",
+    "prv_duty",
+    "prv_iva",
+    "import_tax_total",
+    "revalidacion",
+    "maniobras",
+    "muellaje",
+    "entrega_mercancia",
+    "previo",
+    "service_aa",
+    "almacenajes",
+    "reconocimiento_aduanero",
+    "honorarios",
+    "complemento_maniobras",
+    "desconsolidacion",
+    "maniobra_falso",
+    "arrastre",
+    "patio_regulador",
+    "entrega_vacio",
+    "limpieza_contenedor",
+    "mexico_customs_mxn",
+    "mexico_customs_rmb",
+    "mexico_customs_usd",
+    "mexico_inland_mxn",
+    "mexico_misc_mxn",
+    "mexico_inland_misc_rmb",
+    "china_to_mexico_freight_rmb",
+    "gross_weight_kg",
+    "volume_m3",
+    "volume_weight_kg",
+    "chargeable_weight_kg",
+    "weight_ratio",
+    "freight_alloc_rmb",
+    "freight_alloc_mxn",
+    "total_logistics_mxn",
+    "alloc_price_mxn",
+    "total_cost_rmb",
+    "total_unit_rmb",
+    "project_collection",
+    "transport_mode",
+    "source_type",
+    "source_doc_no",
+    "source_file_name",
+    "source_attachment_id",
+    "parse_status",
+    "manual_override_flag",
+    "manual_override_reason",
+    "dingtalk_instance_id",
+    "dingtalk_official_url",
+    "source_remark",
+    "raw_excel_json",
+    "derived_json",
+    "extra_json"
+  ],
+  "fields": [
+    {
+      "fieldname": "batch",
+      "fieldtype": "Link",
+      "label": "所属批次",
+      "options": "Overseas Cost Batch",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "version",
+      "fieldtype": "Link",
+      "label": "所属版本",
+      "options": "Overseas Cost Version",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "row_no",
+      "fieldtype": "Int",
+      "label": "系统行号",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "excel_row_no",
+      "fieldtype": "Int",
+      "label": "Excel行号"
+    },
+    {
+      "fieldname": "material_code",
+      "fieldtype": "Data",
+      "label": "物料编码",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "product_name",
+      "fieldtype": "Data",
+      "label": "物料名称",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "product_name_es",
+      "fieldtype": "Data",
+      "label": "物料名称（西语）"
+    },
+    {
+      "fieldname": "spec_model",
+      "fieldtype": "Data",
+      "label": "规格型号"
+    },
+    {
+      "fieldname": "unit",
+      "fieldtype": "Data",
+      "label": "单位"
+    },
+    {
+      "fieldname": "recipient",
+      "fieldtype": "Data",
+      "label": "收件人"
+    },
+    {
+      "fieldname": "unit_price",
+      "fieldtype": "Currency",
+      "label": "单价"
+    },
+    {
+      "fieldname": "purchase_currency",
+      "fieldtype": "Data",
+      "label": "采购币种"
+    },
+    {
+      "fieldname": "quantity",
+      "fieldtype": "Float",
+      "label": "数量"
+    },
+    {
+      "fieldname": "actual_shipped_qty",
+      "fieldtype": "Float",
+      "label": "实际发货数量"
+    },
+    {
+      "fieldname": "goods_value",
+      "fieldtype": "Currency",
+      "label": "总货值"
+    },
+    {
+      "fieldname": "import_name",
+      "fieldtype": "Data",
+      "label": "海关进口名称"
+    },
+    {
+      "fieldname": "hs_code",
+      "fieldtype": "Data",
+      "label": "海关分类编码"
+    },
+    {
+      "fieldname": "category",
+      "fieldtype": "Data",
+      "label": "大类分类"
+    },
+    {
+      "fieldname": "customs_no",
+      "fieldtype": "Data",
+      "label": "报关单号",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "waybill_no",
+      "fieldtype": "Data",
+      "label": "中国到墨西哥运单号",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "container_no",
+      "fieldtype": "Data",
+      "label": "柜号"
+    },
+    {
+      "fieldname": "sea_bill_no",
+      "fieldtype": "Data",
+      "label": "海运提单号"
+    },
+    {
+      "fieldname": "commercial_invoice_no",
+      "fieldtype": "Data",
+      "label": "商业发票号"
+    },
+    {
+      "fieldname": "purchase_order_no",
+      "fieldtype": "Data",
+      "label": "采购单号"
+    },
+    {
+      "fieldname": "china_misc_rmb",
+      "fieldtype": "Currency",
+      "label": "中国运输及相关杂费RMB"
+    },
+    {
+      "fieldname": "china_misc_mxn",
+      "fieldtype": "Currency",
+      "label": "中国运输及相关杂费折合MXN"
+    },
+    {
+      "fieldname": "china_ocean_usd",
+      "fieldtype": "Currency",
+      "label": "中国海运USD"
+    },
+    {
+      "fieldname": "cc_rate",
+      "fieldtype": "Percent",
+      "label": "C.C税率"
+    },
+    {
+      "fieldname": "cc_anti_dumping",
+      "fieldtype": "Currency",
+      "label": "C.C反倾销附加税"
+    },
+    {
+      "fieldname": "igi_rate",
+      "fieldtype": "Percent",
+      "label": "IGI关税税率"
+    },
+    {
+      "fieldname": "igi_amount",
+      "fieldtype": "Currency",
+      "label": "IGI关税税额"
+    },
+    {
+      "fieldname": "iva_rate",
+      "fieldtype": "Percent",
+      "label": "IVA增值税税率"
+    },
+    {
+      "fieldname": "iva_amount",
+      "fieldtype": "Currency",
+      "label": "IVA增值税税额"
+    },
+    {
+      "fieldname": "goods_value_ratio",
+      "fieldtype": "Percent",
+      "label": "分摊比例货值比",
+      "read_only": 1
+    },
+    {
+      "fieldname": "dta",
+      "fieldtype": "Currency",
+      "label": "DTA海关递延税款"
+    },
+    {
+      "fieldname": "prv_duty",
+      "fieldtype": "Currency",
+      "label": "PRV从价税关税"
+    },
+    {
+      "fieldname": "prv_iva",
+      "fieldtype": "Currency",
+      "label": "PRV的IVA"
+    },
+    {
+      "fieldname": "import_tax_total",
+      "fieldtype": "Currency",
+      "label": "IMPUESTOS合计清关税费"
+    },
+    {
+      "fieldname": "revalidacion",
+      "fieldtype": "Currency",
+      "label": "REVALIDACION文件验证费"
+    },
+    {
+      "fieldname": "maniobras",
+      "fieldtype": "Currency",
+      "label": "MANIOBRAS码头操作费"
+    },
+    {
+      "fieldname": "muellaje",
+      "fieldtype": "Currency",
+      "label": "MUELLAJE码头作业费"
+    },
+    {
+      "fieldname": "entrega_mercancia",
+      "fieldtype": "Currency",
+      "label": "ENTREGA DE MERCANCIA配送费用"
+    },
+    {
+      "fieldname": "previo",
+      "fieldtype": "Currency",
+      "label": "PREVIO预检费用"
+    },
+    {
+      "fieldname": "service_aa",
+      "fieldtype": "Currency",
+      "label": "Servicios A.A.货代服务费"
+    },
+    {
+      "fieldname": "almacenajes",
+      "fieldtype": "Currency",
+      "label": "ALMACENAJES仓储费"
+    },
+    {
+      "fieldname": "reconocimiento_aduanero",
+      "fieldtype": "Currency",
+      "label": "RECONOCIMIENTO ADUANERO海关认证费"
+    },
+    {
+      "fieldname": "honorarios",
+      "fieldtype": "Currency",
+      "label": "HONORARIOS费用"
+    },
+    {
+      "fieldname": "complemento_maniobras",
+      "fieldtype": "Currency",
+      "label": "COMPLEMENTO DE MANIOBRAS操作辅助装置"
+    },
+    {
+      "fieldname": "desconsolidacion",
+      "fieldtype": "Currency",
+      "label": "DESCONSOLIDACION拆箱分货费用"
+    },
+    {
+      "fieldname": "maniobra_falso",
+      "fieldtype": "Currency",
+      "label": "MANIOBRA EN FALSO虚假操作费"
+    },
+    {
+      "fieldname": "arrastre",
+      "fieldtype": "Currency",
+      "label": "ARRASTRE拖运费"
+    },
+    {
+      "fieldname": "patio_regulador",
+      "fieldtype": "Currency",
+      "label": "PATIO REGULADOR监管堆场费"
+    },
+    {
+      "fieldname": "entrega_vacio",
+      "fieldtype": "Currency",
+      "label": "ENTREGA DE VACIO还箱费"
+    },
+    {
+      "fieldname": "limpieza_contenedor",
+      "fieldtype": "Currency",
+      "label": "LIMPIEZA DE CONTENEDOR集装箱清洁"
+    },
+    {
+      "fieldname": "mexico_customs_mxn",
+      "fieldtype": "Currency",
+      "label": "墨西哥清关费用MXN"
+    },
+    {
+      "fieldname": "mexico_customs_rmb",
+      "fieldtype": "Currency",
+      "label": "墨西哥清关费用RMB"
+    },
+    {
+      "fieldname": "mexico_customs_usd",
+      "fieldtype": "Currency",
+      "label": "墨西哥清关费用USD"
+    },
+    {
+      "fieldname": "mexico_inland_mxn",
+      "fieldtype": "Currency",
+      "label": "墨西哥内陆运输费用MXN"
+    },
+    {
+      "fieldname": "mexico_misc_mxn",
+      "fieldtype": "Currency",
+      "label": "墨西哥杂费MXN"
+    },
+    {
+      "fieldname": "mexico_inland_misc_rmb",
+      "fieldtype": "Currency",
+      "label": "墨西哥内陆运输加杂费RMB"
+    },
+    {
+      "fieldname": "china_to_mexico_freight_rmb",
+      "fieldtype": "Currency",
+      "label": "中国到墨西哥运费RMB"
+    },
+    {
+      "fieldname": "gross_weight_kg",
+      "fieldtype": "Float",
+      "label": "货重毛重KG"
+    },
+    {
+      "fieldname": "volume_m3",
+      "fieldtype": "Float",
+      "label": "体积m3"
+    },
+    {
+      "fieldname": "volume_weight_kg",
+      "fieldtype": "Float",
+      "label": "体积重KG"
+    },
+    {
+      "fieldname": "chargeable_weight_kg",
+      "fieldtype": "Float",
+      "label": "计费重KG"
+    },
+    {
+      "fieldname": "weight_ratio",
+      "fieldtype": "Percent",
+      "label": "分摊比例重量比",
+      "read_only": 1
+    },
+    {
+      "fieldname": "freight_alloc_rmb",
+      "fieldtype": "Currency",
+      "label": "中国到墨西哥运输费用分摊RMB",
+      "read_only": 1
+    },
+    {
+      "fieldname": "freight_alloc_mxn",
+      "fieldtype": "Currency",
+      "label": "中国到墨西哥运输费用分摊MXN",
+      "read_only": 1
+    },
+    {
+      "fieldname": "total_logistics_mxn",
+      "fieldtype": "Currency",
+      "label": "中国到墨西哥运输清关杂费MXN",
+      "read_only": 1
+    },
+    {
+      "fieldname": "alloc_price_mxn",
+      "fieldtype": "Currency",
+      "label": "分摊运输物流杂费到产品价格MXN",
+      "read_only": 1
+    },
+    {
+      "fieldname": "total_cost_rmb",
+      "fieldtype": "Currency",
+      "label": "综合成本RMB",
+      "read_only": 1
+    },
+    {
+      "fieldname": "total_unit_rmb",
+      "fieldtype": "Currency",
+      "label": "综合物品单价RMB",
+      "read_only": 1
+    },
+    {
+      "fieldname": "project_collection",
+      "fieldtype": "Data",
+      "label": "项目归集"
+    },
+    {
+      "fieldname": "transport_mode",
+      "fieldtype": "Select",
+      "label": "运输方式",
+      "options": "SEA\nAIR\nEXPRESS",
+      "default": "SEA"
+    },
+    {
+      "fieldname": "source_type",
+      "fieldtype": "Data",
+      "label": "来源类型"
+    },
+    {
+      "fieldname": "source_doc_no",
+      "fieldtype": "Data",
+      "label": "来源单号"
+    },
+    {
+      "fieldname": "source_file_name",
+      "fieldtype": "Data",
+      "label": "来源文件名"
+    },
+    {
+      "fieldname": "source_attachment_id",
+      "fieldtype": "Data",
+      "label": "来源附件ID"
+    },
+    {
+      "fieldname": "parse_status",
+      "fieldtype": "Select",
+      "label": "解析状态",
+      "options": "PENDING\nSUCCESS\nPARTIAL\nFAILED\nMANUAL",
+      "default": "PENDING"
+    },
+    {
+      "fieldname": "manual_override_flag",
+      "fieldtype": "Check",
+      "label": "人工覆盖标记"
+    },
+    {
+      "fieldname": "manual_override_reason",
+      "fieldtype": "Small Text",
+      "label": "人工覆盖原因"
+    },
+    {
+      "fieldname": "dingtalk_instance_id",
+      "fieldtype": "Data",
+      "label": "钉钉实例ID"
+    },
+    {
+      "fieldname": "dingtalk_official_url",
+      "fieldtype": "Small Text",
+      "label": "钉钉原单链接"
+    },
+    {
+      "fieldname": "source_remark",
+      "fieldtype": "Small Text",
+      "label": "源备注历史A列"
+    },
+    {
+      "fieldname": "raw_excel_json",
+      "fieldtype": "Long Text",
+      "label": "原始Excel映射JSON"
+    },
+    {
+      "fieldname": "derived_json",
+      "fieldtype": "Long Text",
+      "label": "计算中间结果JSON"
+    },
+    {
+      "fieldname": "extra_json",
+      "fieldtype": "Long Text",
+      "label": "扩展JSON"
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "share": 1,
+      "print": 1,
+      "email": 1,
+      "export": 1
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost Attachment",
+  "module": "Overseas Costing",
+  "autoname": "hash",
+  "title_field": "source_doc_no",
+  "track_changes": 1,
+  "sort_field": "modified",
+  "sort_order": "DESC",
+  "field_order": [
+    "batch",
+    "version",
+    "source_type",
+    "attachment_type",
+    "source_doc_no",
+    "file_name",
+    "file_url",
+    "parse_status",
+    "parse_result_json",
+    "mapped_result_json",
+    "remark"
+  ],
+  "fields": [
+    {
+      "fieldname": "batch",
+      "fieldtype": "Link",
+      "label": "所属批次",
+      "options": "Overseas Cost Batch",
+      "reqd": 1
+    },
+    {
+      "fieldname": "version",
+      "fieldtype": "Link",
+      "label": "所属版本",
+      "options": "Overseas Cost Version"
+    },
+    {
+      "fieldname": "source_type",
+      "fieldtype": "Select",
+      "label": "来源类型",
+      "options": "OA\nExcel\nManual\nVoucher\nAttachment",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "attachment_type",
+      "fieldtype": "Select",
+      "label": "附件类型",
+      "options": "Excel Main Table\nLogistics Bill\nCommercial Invoice\nPacking List\nTax Certificate\nOther",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "source_doc_no",
+      "fieldtype": "Data",
+      "label": "来源单号",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "file_url",
+      "fieldtype": "Attach",
+      "label": "附件地址"
+    },
+    {
+      "fieldname": "file_name",
+      "fieldtype": "Data",
+      "label": "文件名"
+    },
+    {
+      "fieldname": "parse_status",
+      "fieldtype": "Select",
+      "label": "解析状态",
+      "options": "Draft\nQueued\nParsed\nFailed",
+      "default": "Draft",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "parse_result_json",
+      "fieldtype": "Long Text",
+      "label": "解析结果JSON"
+    },
+    {
+      "fieldname": "mapped_result_json",
+      "fieldtype": "Long Text",
+      "label": "映射结果JSON"
+    },
+    {
+      "fieldname": "remark",
+      "fieldtype": "Small Text",
+      "label": "备注"
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "share": 1,
+      "print": 1,
+      "email": 1,
+      "export": 1
+    }
+  ]
+}

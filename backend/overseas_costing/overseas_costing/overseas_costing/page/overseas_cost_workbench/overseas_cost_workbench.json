@@ -1,0 +1,12 @@
+{
+  "doctype": "Page",
+  "name": "overseas-cost-workbench",
+  "module": "Overseas Costing",
+  "title": "海外采购综合成本核算",
+  "standard": "Yes",
+  "roles": [
+    {
+      "role": "System Manager"
+    }
+  ]
+}

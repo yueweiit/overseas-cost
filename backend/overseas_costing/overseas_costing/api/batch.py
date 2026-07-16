@@ -1,0 +1,98 @@
+"""
+中文用途：批次查询相关 API。
+
+对应一期最先要给前端使用的查询接口：
+1. 获取批次列表
+2. 获取批次详情
+3. 获取批次明细
+4. 获取版本列表
+"""
+
+from __future__ import annotations
+
+import frappe
+
+from overseas_costing.services import batch_service
+
+
+@frappe.whitelist()
+def get_batch_list(transport_mode: str = "SEA", status: str | None = None, keyword: str | None = None) -> dict:
+    """返回批次列表。"""
+
+    return batch_service.get_batch_list(
+        {
+            "transport_mode": transport_mode,
+            "status": status,
+            "keyword": keyword,
+        }
+    )
+
+
+@frappe.whitelist()
+def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
+    """返回单个批次的头部信息和摘要。"""
+
+    return batch_service.get_batch_detail(batch_name=batch_name, version_name=version_name)
+
+
+@frappe.whitelist()
+def get_batch_items(
+    batch_name: str,
+    version_name: str | None = None,
+    customs_no: str | None = None,
+    waybill_no: str | None = None,
+    material_code: str | None = None,
+    product_name: str | None = None,
+    import_name: str | None = None,
+    hs_code: str | None = None,
+    category: str | None = None,
+    keyword: str | None = None,
+) -> dict:
+    """返回批次下按 Excel 列顺序展示的明细行。"""
+
+    return batch_service.get_batch_items(
+        batch_name=batch_name,
+        version_name=version_name,
+        customs_no=customs_no,
+        waybill_no=waybill_no,
+        material_code=material_code,
+        product_name=product_name,
+        import_name=import_name,
+        hs_code=hs_code,
+        category=category,
+        keyword=keyword,
+    )
+
+
+@frappe.whitelist()
+def get_version_list(batch_name: str) -> dict:
+    """返回批次下的版本列表。"""
+
+    return batch_service.get_version_list(batch_name=batch_name)
+
+
+@frappe.whitelist()
+def get_audit_logs(batch_name: str, version_name: str | None = None, limit: int | str = 80) -> dict:
+    """返回批次修改记录，用于页面底部留痕展示。"""
+
+    return batch_service.get_audit_logs(batch_name=batch_name, version_name=version_name, limit=limit)
+
+
+@frappe.whitelist()
+def get_dingtalk_order_link(batch_name: str) -> dict:
+    """返回钉钉订单按钮使用的跳转信息。"""
+
+    return batch_service.get_dingtalk_order_link(batch_name=batch_name)
+
+
+@frappe.whitelist()
+def open_dingtalk_order(batch_name: str) -> None:
+    """直接重定向到钉钉审批页，供前端按钮 href 直接调用。"""
+
+    result = batch_service.get_dingtalk_order_link(batch_name=batch_name)
+    open_url = result.get("dingtalk_order", {}).get("open_url", "")
+    if not open_url:
+        frappe.throw("当前批次缺少钉钉实例ID或官方链接，无法打开钉钉订单。")
+
+    frappe.local.response["type"] = "redirect"
+    frappe.local.response["location"] = open_url

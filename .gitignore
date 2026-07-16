@@ -1,0 +1,42 @@
+# Python / Frappe
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Node / frontend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local runtime / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+*.tmp
+
+# Local data and generated imports
+*.db
+*.sqlite
+*.sqlite3
+data/*.xlsx
+data/*.xlsm
+data/*.xls
+data/*.csv
+
+# Local prototype reference kept outside first delivery repo because it has its own Git history
+frontend-demo/
+
+# Frappe bench/runtime artifacts should not be committed from app source
+sites/
+logs/
+env/
+assets/

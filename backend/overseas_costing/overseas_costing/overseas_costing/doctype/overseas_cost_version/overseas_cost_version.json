@@ -1,0 +1,119 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost Version",
+  "module": "Overseas Costing",
+  "autoname": "hash",
+  "title_field": "version_code",
+  "track_changes": 1,
+  "sort_field": "modified",
+  "sort_order": "DESC",
+  "field_order": [
+    "batch",
+    "version_code",
+    "version_type",
+    "status",
+    "is_current",
+    "source_type",
+    "fx_usd_to_rmb",
+    "fx_rmb_to_mxn",
+    "calculated_at",
+    "rule_snapshot_json",
+    "summary_snapshot_json",
+    "remark",
+    "created_by_name"
+  ],
+  "fields": [
+    {
+      "fieldname": "batch",
+      "fieldtype": "Link",
+      "label": "所属批次",
+      "options": "Overseas Cost Batch",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "version_code",
+      "fieldtype": "Data",
+      "label": "版本编码",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "version_type",
+      "fieldtype": "Select",
+      "label": "版本类型",
+      "options": "Estimated\nActual\nAdjustment",
+      "default": "Estimated",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "status",
+      "fieldtype": "Select",
+      "label": "版本状态",
+      "options": "Active\nConfirmed\nArchived",
+      "default": "Active",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "is_current",
+      "fieldtype": "Check",
+      "label": "是否当前版本"
+    },
+    {
+      "fieldname": "source_type",
+      "fieldtype": "Select",
+      "label": "来源类型",
+      "options": "Import\nClone\nManual",
+      "default": "Import"
+    },
+    {
+      "fieldname": "fx_usd_to_rmb",
+      "fieldtype": "Float",
+      "label": "USD兑RMB"
+    },
+    {
+      "fieldname": "fx_rmb_to_mxn",
+      "fieldtype": "Float",
+      "label": "RMB兑MXN"
+    },
+    {
+      "fieldname": "calculated_at",
+      "fieldtype": "Datetime",
+      "label": "最近试算时间",
+      "read_only": 1
+    },
+    {
+      "fieldname": "rule_snapshot_json",
+      "fieldtype": "Long Text",
+      "label": "规则快照JSON"
+    },
+    {
+      "fieldname": "summary_snapshot_json",
+      "fieldtype": "Long Text",
+      "label": "摘要快照JSON"
+    },
+    {
+      "fieldname": "remark",
+      "fieldtype": "Small Text",
+      "label": "备注"
+    },
+    {
+      "fieldname": "created_by_name",
+      "fieldtype": "Data",
+      "label": "创建人名称"
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "share": 1,
+      "print": 1,
+      "email": 1,
+      "export": 1
+    }
+  ]
+}

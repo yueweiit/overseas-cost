@@ -1,0 +1,111 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost Allocation Rule",
+  "module": "Overseas Costing",
+  "autoname": "hash",
+  "title_field": "rule_code",
+  "track_changes": 1,
+  "sort_field": "modified",
+  "sort_order": "DESC",
+  "field_order": [
+    "batch",
+    "version",
+    "rule_code",
+    "expense_category",
+    "allocation_basis",
+    "basis_field",
+    "currency",
+    "amount",
+    "priority_no",
+    "remark",
+    "is_enabled",
+    "is_active"
+  ],
+  "fields": [
+    {
+      "fieldname": "batch",
+      "fieldtype": "Link",
+      "label": "所属批次",
+      "options": "Overseas Cost Batch",
+      "reqd": 1
+    },
+    {
+      "fieldname": "version",
+      "fieldtype": "Link",
+      "label": "所属版本",
+      "options": "Overseas Cost Version",
+      "reqd": 1
+    },
+    {
+      "fieldname": "rule_code",
+      "fieldtype": "Data",
+      "label": "规则编码",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "expense_category",
+      "fieldtype": "Data",
+      "label": "费用类别",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "allocation_basis",
+      "fieldtype": "Select",
+      "label": "分摊依据",
+      "options": "goods_value\ngross_weight\nvolume",
+      "default": "goods_value"
+    },
+    {
+      "fieldname": "basis_field",
+      "fieldtype": "Data",
+      "label": "分摊基数字段"
+    },
+    {
+      "fieldname": "currency",
+      "fieldtype": "Data",
+      "label": "币种"
+    },
+    {
+      "fieldname": "amount",
+      "fieldtype": "Currency",
+      "label": "金额"
+    },
+    {
+      "fieldname": "priority_no",
+      "fieldtype": "Int",
+      "label": "优先级",
+      "default": 0
+    },
+    {
+      "fieldname": "remark",
+      "fieldtype": "Small Text",
+      "label": "备注"
+    },
+    {
+      "fieldname": "is_active",
+      "fieldtype": "Check",
+      "label": "是否启用",
+      "default": 1
+    },
+    {
+      "fieldname": "is_enabled",
+      "fieldtype": "Check",
+      "label": "参与重算",
+      "default": 1
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "share": 1,
+      "print": 1,
+      "email": 1,
+      "export": 1
+    }
+  ]
+}
