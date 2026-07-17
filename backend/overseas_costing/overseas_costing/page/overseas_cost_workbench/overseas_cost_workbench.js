@@ -766,12 +766,12 @@ class OverseasCostWorkbench {
   }
 
   renderTable() {
-    this.$root.find("[data-area='table-title']").text("报关/运单层级列表");
-    this.$root.find("[data-area='table-count']").text(`${this.visibleBatches.length} 个报关/运单块`);
+    this.$root.find("[data-area='table-title']").text("报关/来源单层级列表");
+    this.$root.find("[data-area='table-count']").text(`${this.visibleBatches.length} 个报关/来源单块`);
     this.updateHierarchySummary();
 
     if (!this.visibleBatches.length) {
-      this.$root.find("[data-area='table']").html(`<div class="ocw-muted ocw-table-empty">暂无匹配的报关/运单块</div>`);
+      this.$root.find("[data-area='table']").html(`<div class="ocw-muted ocw-table-empty">暂无匹配的报关/来源单块</div>`);
       return;
     }
 
@@ -792,8 +792,8 @@ class OverseasCostWorkbench {
         <thead>
           <tr>
             <th></th>
-            <th>报关单号</th>
-            <th>中国到墨西哥运单号</th>
+            <th>报关/来源单号</th>
+            <th>运单/物流单号</th>
             <th>SKU数</th>
             <th>中国杂费 RMB</th>
             <th>折合 MXN</th>
@@ -819,7 +819,7 @@ class OverseasCostWorkbench {
     const hasLoadedItems = Object.prototype.hasOwnProperty.call(this.batchItems, batch.name);
     const firstItem = items[0] || {};
     const sourceRange = this.sourceLabel(batch, firstItem);
-    const customsNo = batch.customs_no || firstItem.customs_no || "--";
+    const customsNo = batch.customs_no || firstItem.customs_no || batch.batch_no || firstItem.source_doc_no || "--";
     const waybillNo = batch.waybill_no || firstItem.waybill_no || "--";
     const itemCount = hasLoadedItems ? items.length : batch.item_count || 0;
     const totalGoodsValue = hasLoadedItems ? this.sumBatchNumber(batch.name, "goods_value") : batch.total_goods_value;
@@ -1220,6 +1220,7 @@ class OverseasCostWorkbench {
   buildDataCheckRows(batch, items) {
     const customsNo = batch.customs_no || this.firstLoadedValue(items, "customs_no");
     const waybillNo = batch.waybill_no || this.firstLoadedValue(items, "waybill_no");
+    const sourceNo = batch.batch_no || this.firstLoadedValue(items, "source_doc_no");
     const itemCount = items.length || Number(batch.item_count || 0);
     const goodsValue = items.length ? this.sumRowsNumber(items, "goods_value") : Number(batch.total_goods_value || 0);
     const grossWeight = items.length ? this.sumRowsNumber(items, "gross_weight_kg") : Number(batch.total_gross_weight_kg || 0);
@@ -1233,6 +1234,7 @@ class OverseasCostWorkbench {
     const baseMissing = [];
     if (!customsNo) baseMissing.push("报关单号");
     if (!waybillNo) baseMissing.push("运单号");
+    const hasSourceOnly = !customsNo && !waybillNo && this.hasText(sourceNo);
 
     const missingCode = this.countRows(items, (row) => !this.hasText(row.material_code));
     const missingName = this.countRows(items, (row) => !this.hasText(row.product_name));
@@ -1252,9 +1254,13 @@ class OverseasCostWorkbench {
       },
       {
         label: "批次基础字段",
-        status: baseMissing.length ? "待补" : "完整",
+        status: hasSourceOnly ? "待关联" : baseMissing.length ? "待补" : "完整",
         statusClass: baseMissing.length ? "ocw-check-warn" : "ocw-check-ok",
-        suggestion: baseMissing.length ? `缺少${baseMissing.join("、")}` : `${customsNo || "--"} / ${waybillNo || "--"}`,
+        suggestion: hasSourceOnly
+          ? `${sourceNo} 已作为来源单号，后续补报关/运单或物流单号`
+          : baseMissing.length
+          ? `缺少${baseMissing.join("、")}`
+          : `${customsNo || "--"} / ${waybillNo || "--"}`,
       },
       {
         label: "物料主数据",
