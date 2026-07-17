@@ -818,7 +818,7 @@ class OverseasCostWorkbench {
     const items = this.batchItems[batch.name] || [];
     const hasLoadedItems = Object.prototype.hasOwnProperty.call(this.batchItems, batch.name);
     const firstItem = items[0] || {};
-    const sourceRange = firstItem.source_range || firstItem.source_sheet || batch.source_sheet || "自动识别工作表";
+    const sourceRange = this.sourceLabel(batch, firstItem);
     const customsNo = batch.customs_no || firstItem.customs_no || "--";
     const waybillNo = batch.waybill_no || firstItem.waybill_no || "--";
     const itemCount = hasLoadedItems ? items.length : batch.item_count || 0;
@@ -870,6 +870,20 @@ class OverseasCostWorkbench {
         </td>
       </tr>
     `;
+  }
+
+  sourceLabel(batch, firstItem = {}) {
+    const explicit = firstItem.source_range || firstItem.source_sheet || batch.source_range || batch.source_sheet;
+    if (this.hasText(explicit)) return explicit;
+    const transportMode = String(batch.transport_mode || firstItem.transport_mode || "").toUpperCase();
+    const looksLikeLegacyYuewei =
+      transportMode === "SEA" ||
+      this.hasText(batch.customs_no) ||
+      this.hasText(firstItem.customs_no) ||
+      this.hasText(batch.waybill_no) ||
+      this.hasText(firstItem.waybill_no);
+    if (looksLikeLegacyYuewei) return "2026年YUEWEI";
+    return "来源工作表待识别";
   }
 
   renderChildTable(batch) {
