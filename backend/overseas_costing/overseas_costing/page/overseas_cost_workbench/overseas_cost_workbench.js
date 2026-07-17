@@ -42,6 +42,7 @@ class OverseasCostWorkbench {
     this.lastImportResult = null;
     this.lastRecalculateResult = null;
     this.lastImportedBatchNames = new Set();
+    this.isOpeningDingtalk = false;
   }
 
   init() {
@@ -686,24 +687,36 @@ class OverseasCostWorkbench {
       this.showPendingFeature("当前没有可打开的批次。");
       return;
     }
-    const popup = window.open("", "_blank", "noopener");
+    if (this.isOpeningDingtalk) return;
+    this.isOpeningDingtalk = true;
     try {
       const result = await this.call("overseas_costing.api.batch.get_dingtalk_order_link", {
         batch_name: batch.name,
       });
       const order = result.dingtalk_order || {};
-      const targetUrl = order.open_url || "https://oa.dingtalk.com/approval/home";
-      if (popup) {
-        popup.location.href = targetUrl;
-      } else {
-        window.open(targetUrl, "_blank", "noopener");
+      if (!order.can_open || !order.open_url) {
+        this.showPendingFeature("当前批次还没有关联钉钉审批链接，请先从国际物流单或采购支出单补来源信息。");
+        return;
       }
-      if (!order.open_url) {
-        this.showPendingFeature("当前批次还没有钉钉审批实例链接，已打开钉钉审批首页。");
+
+      if (order.open_mode === "desktop_protocol") {
+        window.location.href = order.open_url;
+        frappe.show_alert({ message: "正在唤起钉钉客户端", indicator: "blue" });
+        return;
+      }
+
+      const opened = window.open(order.open_url, "_blank", "noopener,noreferrer");
+      if (!opened) {
+        frappe.msgprint({
+          title: "钉钉订单",
+          message: `浏览器拦截了新窗口，请点击链接打开：<br><a href="${this.escape(order.open_url)}" target="_blank" rel="noopener noreferrer">${this.escape(order.open_url)}</a>`,
+          indicator: "orange",
+        });
       }
     } catch (error) {
-      if (popup) popup.close();
       this.showError(error);
+    } finally {
+      this.isOpeningDingtalk = false;
     }
   }
 
