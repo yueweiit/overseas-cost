@@ -107,8 +107,8 @@ class OverseasCostWorkbench {
             </button>
             <section class="ocw-scope-panel">
               <span>一期范围</span>
-              <strong>仅交付墨西哥海运</strong>
-              <p>空运、快递、电商暂不纳入当前批次核算闭环。</p>
+              <strong>先跑数据摘取和试算</strong>
+              <p>海运成本总表、空运/快递审批附件可先入库；费用口径缺失时后续补数。</p>
             </section>
           </aside>
 
@@ -218,7 +218,7 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='recalculate']", () => this.recalculate());
     this.$root.on("click", "[data-action='open-import']", () => this.openImportDialog());
     this.$root.on("click", "[data-action='file-parse']", () => this.showPendingFeature("附件解析入口已保留，下一步接入报关单、提单和完税凭证解析。"));
-    this.$root.on("click", "[data-action='show-scope']", () => this.showPendingFeature("一期当前只跑 2026年YUEWEI 墨西哥普通海运，海运双清暂不纳入默认导入。"));
+    this.$root.on("click", "[data-action='show-scope']", () => this.showPendingFeature("当前先支持成本总表和国际物流审批附件 Excel 的数据摘取；费用口径不完整时先落基础明细，后续由钉钉/凭证继续补数。"));
     this.$root.on("click", "[data-action='open-dingtalk']", () => this.openDingtalkOrder());
     this.$root.on("click", "[data-action='add-batch']", () => this.showPendingFeature("添加报关运单入口已保留，下一步接入新增保存接口。"));
     this.$root.on("click", "[data-action='toggle-batch']", (event) => this.toggleBatch($(event.currentTarget).attr("data-batch-name")));
@@ -273,7 +273,7 @@ class OverseasCostWorkbench {
     this.setTableLoading();
     try {
       const result = await this.call("overseas_costing.api.batch.get_batch_list", {
-        transport_mode: "SEA",
+        transport_mode: "",
       });
       this.batches = result.items || [];
       this.visibleBatches = this.batches.slice();
@@ -425,7 +425,7 @@ class OverseasCostWorkbench {
 
   openImportDialog() {
     const dialog = new frappe.ui.Dialog({
-      title: "导入成本 Excel",
+      title: "导入/解析 Excel 附件",
       fields: [
         {
           fieldtype: "HTML",
@@ -448,14 +448,14 @@ class OverseasCostWorkbench {
           fieldtype: "Data",
           fieldname: "source_sheet",
           label: "工作表名称",
-          default: "2026年YUEWEI",
-          description: "填写 Excel 底部的工作表标签名，需要与文件内名称一致。",
+          default: "",
+          description: "可留空自动识别。只有需要指定某个工作表时再填写 Excel 底部标签名。",
         },
         {
           fieldtype: "Check",
           fieldname: "include_double_clear",
-          label: "包含海运双清",
-          default: 0,
+          label: "包含双清/包税数据",
+          default: 1,
         },
       ],
       primary_action_label: "导入",
@@ -529,8 +529,8 @@ class OverseasCostWorkbench {
           source_name: this.fileNameFromRef(sourceRef) || "Yuewei Excel",
           file_path: values.file_path || null,
           file_url: fileUrl,
-          source_sheet: values.source_sheet || "2026年YUEWEI",
-          transport_keyword: "海运",
+          source_sheet: values.source_sheet || null,
+          transport_keyword: "",
           include_double_clear: values.include_double_clear ? 1 : 0,
           fx_rmb_to_mxn: 2.6,
         },
@@ -538,8 +538,10 @@ class OverseasCostWorkbench {
       );
       const selected = result.selected_summary || {};
       const importStats = this.summarizeImportResult(result);
+      const parser = result.parser_meta || {};
+      const parserHint = parser.sourceSheet ? `，工作表：${parser.sourceSheet}` : "";
       frappe.show_alert({
-        message: `导入完成：${selected.block_count || 0} 个批次，${selected.item_count || 0} 行；${importStats}`,
+        message: `导入完成：${selected.block_count || 0} 个批次，${selected.item_count || 0} 行${parserHint}；${importStats}`,
         indicator: "green",
       });
       this.lastImportResult = result;
@@ -722,7 +724,7 @@ class OverseasCostWorkbench {
     this.visibleBatches = [];
     this.batchItems = {};
     this.auditEvents = [];
-    this.$root.find("[data-area='hierarchy-summary']").text("暂无海运批次");
+    this.$root.find("[data-area='hierarchy-summary']").text("暂无批次");
     this.$root.find("[data-area='table']").html(`<div class="ocw-muted ocw-table-empty">暂无明细</div>`);
     this.$root.find("[data-area='table-title']").text("报关/运单层级列表");
     this.$root.find("[data-area='table-count']").text("");
@@ -816,7 +818,7 @@ class OverseasCostWorkbench {
     const items = this.batchItems[batch.name] || [];
     const hasLoadedItems = Object.prototype.hasOwnProperty.call(this.batchItems, batch.name);
     const firstItem = items[0] || {};
-    const sourceRange = firstItem.source_range || firstItem.source_sheet || batch.source_sheet || "2026年YUEWEI";
+    const sourceRange = firstItem.source_range || firstItem.source_sheet || batch.source_sheet || "自动识别工作表";
     const customsNo = batch.customs_no || firstItem.customs_no || "--";
     const waybillNo = batch.waybill_no || firstItem.waybill_no || "--";
     const itemCount = hasLoadedItems ? items.length : batch.item_count || 0;
@@ -1175,7 +1177,7 @@ class OverseasCostWorkbench {
       this.$root.find("[data-area='diff-panel']").html(`
         <div class="ocw-diff-table">
           <div class="ocw-diff-head"><span>检查项</span><span>当前状态</span><span>处理建议</span></div>
-          <div><span>当前批次</span><b class="ocw-check-warn">未选择</b><strong>先导入或查询一条海运批次</strong></div>
+          <div><span>当前批次</span><b class="ocw-check-warn">未选择</b><strong>先导入或查询一条批次</strong></div>
         </div>
       `);
       return;
@@ -1727,7 +1729,7 @@ class OverseasCostWorkbench {
   }
 
   transportLabel(value) {
-    if (!value) return "海运";
+    if (!value) return "未指定";
     const labels = {
       SEA: "海运",
       AIR: "空运",
@@ -1943,7 +1945,36 @@ class OverseasCostWorkbench {
   }
 
   showError(error) {
-    const message = error && error.message ? error.message : "操作失败";
-    frappe.msgprint({ title: "海外采购综合成本核算", message, indicator: "red" });
+    const message = this.normalizeErrorMessage(error);
+    const dialog = new frappe.ui.Dialog({
+      title: "操作失败",
+      fields: [
+        {
+          fieldtype: "HTML",
+          fieldname: "error_detail",
+          options: `
+            <div class="ocw-error-dialog">
+              <div class="ocw-error-title">海外采购综合成本核算</div>
+              <div class="ocw-error-message">${this.escape(message)}</div>
+            </div>
+          `,
+        },
+      ],
+      primary_action_label: "我知道了",
+      primary_action: () => dialog.hide(),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-error-modal");
+  }
+
+  normalizeErrorMessage(error) {
+    const raw = error && error.message ? error.message : error;
+    let message = raw ? String(raw) : "操作失败";
+    message = message.replace(/^Server Error\s*/i, "").trim() || "操作失败";
+    message = message.replace(/^ValueError:\s*/i, "");
+    if (message.includes("工作簿中不存在工作表")) {
+      message += "\n\n建议：工作表名称可以留空，由系统自动识别；只有一个工作表的文件会自动使用该工作表。";
+    }
+    return message;
   }
 }

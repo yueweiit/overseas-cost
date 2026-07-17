@@ -40,6 +40,15 @@ EXCEL_BLOCK_FIELD_MAP = {
 
 EXCEL_EXTRA_FIELD_MAP = {
     "sourceRow": "excel_row_no",
+    "sourceDocNo": "source_doc_no",
+    "purchaseOrderNo": "purchase_order_no",
+    "purchaseCurrency": "purchase_currency",
+    "productNameEs": "product_name_es",
+    "specModel": "spec_model",
+    "unit": "unit",
+    "actualShippedQty": "actual_shipped_qty",
+    "volumeM3": "volume_m3",
+    "sourceRemark": "source_remark",
     "ccRate": "cc_rate",
     "ccAntiDumping": "cc_anti_dumping",
     "igiRate": "igi_rate",
@@ -231,8 +240,8 @@ def map_yuewei_excel_block_item_to_item(block: dict, item_row, row_index: int | 
         "alloc_price_mxn": item[8] if len(item) > 8 else None,
         "total_unit_rmb": item[9] if len(item) > 9 else None,
         "goods_value_ratio": item[10] if len(item) > 10 else None,
-        "transport_mode": normalize_transport_mode(block.get("transportMode")),
-        "source_type": "EXCEL_MAIN",
+        "transport_mode": normalize_transport_mode(extra.get("transportMode") or block.get("transportMode")),
+        "source_type": extra.get("sourceType") or block.get("sourceType") or "EXCEL_MAIN",
     }
 
     legacy_excel_a = extra.get("excelA")

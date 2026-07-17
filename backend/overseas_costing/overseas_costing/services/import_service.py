@@ -217,8 +217,8 @@ def import_main_excel(
 def import_parsed_excel_blocks(
     source_name: str,
     blocks_json: str,
-    source_sheet: str = "2026年YUEWEI",
-    transport_keyword: str = "海运",
+    source_sheet: str | None = None,
+    transport_keyword: str = "",
     include_double_clear=False,
     batch_ids: str | None = None,
     limit: int | None = None,
@@ -275,8 +275,8 @@ def import_yuewei_excel_file(
     source_name: str | None = None,
     file_path: str | None = None,
     file_url: str | None = None,
-    source_sheet: str = "2026年YUEWEI",
-    transport_keyword: str = "海运",
+    source_sheet: str | None = None,
+    transport_keyword: str = "",
     include_double_clear=False,
     batch_ids: str | None = None,
     limit: int | None = None,
@@ -291,13 +291,15 @@ def import_yuewei_excel_file(
     """
 
     resolved_path = _resolve_excel_file_path(file_path=file_path, file_url=file_url)
+    source_sheet = (source_sheet or "").strip() or None
     meta, blocks = parse_yuewei_excel_workbook(resolved_path, sheet_name=source_sheet)
     resolved_source_name = source_name or Path(resolved_path).name
+    resolved_source_sheet = meta.get("sourceSheet") or source_sheet
 
     result = import_parsed_excel_blocks(
         source_name=resolved_source_name,
         blocks_json=json.dumps(blocks, ensure_ascii=False),
-        source_sheet=source_sheet,
+        source_sheet=resolved_source_sheet,
         transport_keyword=transport_keyword,
         include_double_clear=include_double_clear,
         batch_ids=batch_ids,
@@ -486,21 +488,25 @@ def _resolve_or_create_excel_batch(
     source_sheet: str | None,
     project_collection: str | None,
 ):
-    batch_no = _first_non_empty(block.get("id"), block.get("waybillNo"), source_name)
+    is_attachment_detail = block.get("sourceTemplate") == "oa_attachment_detail"
+    batch_no = _first_non_empty(block.get("batchNo"), block.get("id"), block.get("waybillNo"), source_name)
     existing_name = frappe.db.get_value("Overseas Cost Batch", {"batch_no": batch_no}, "name")
     source_meta = {key: value for key, value in block.items() if key != "items" and value not in (None, "")}
+    waybill_no = block.get("waybillNo") or ("" if is_attachment_detail else batch_no)
     values = {
         "batch_no": batch_no,
         "customs_no": block.get("customsNo") or "",
-        "waybill_no": block.get("waybillNo") or batch_no,
+        "waybill_no": waybill_no,
         "transport_mode": normalize_transport_mode(block.get("transportMode") or transport_mode) or "SEA",
         "project_collection": project_collection or block.get("projectCollection") or "",
         "source_type": "excel",
         "source_file_name": source_name,
         "source_sheet": source_sheet or block.get("sourceSheet") or "",
         "source_range": block.get("sourceRange") or "",
+        "source_approval_no": block.get("sourceApprovalNo") or "",
+        "source_instance_id": block.get("sourceInstanceId") or "",
         "status": "Imported",
-        "import_remark": "Imported from Yuewei Excel block JSON",
+        "import_remark": "Imported from Excel parser",
         "source_remark": block.get("remark") or "",
         "extra_json": _json_dumps(source_meta),
     }

@@ -62,7 +62,7 @@ def to_bool(value) -> bool:
 def select_excel_blocks(
     blocks: list[dict],
     *,
-    source_sheet: str = "2026年YUEWEI",
+    source_sheet: str | None = "2026年YUEWEI",
     transport_keyword: str = "海运",
     include_double_clear=False,
     batch_ids=None,

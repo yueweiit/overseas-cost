@@ -1,12 +1,14 @@
 """中文用途：真实 xlsx 成本总表解析测试。"""
 
+from pathlib import Path
+
 import pytest
 
 openpyxl = pytest.importorskip("openpyxl")
 
 from overseas_costing.services.import_service import import_yuewei_excel_file
 from overseas_costing.utils.excel_blocks import select_excel_blocks, summarize_excel_blocks
-from overseas_costing.utils.excel_workbook import parse_yuewei_sheet
+from overseas_costing.utils.excel_workbook import parse_yuewei_excel_workbook, parse_yuewei_sheet
 
 
 def _build_sample_workbook():
@@ -80,6 +82,119 @@ def _write_item_row(sheet, row_no: int, code: str, name: str, price: float, qty:
         sheet[f"{column}{row_no}"] = value
 
 
+def _build_oa_attachment_workbook():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "7月份钢化膜空运"
+    sheet.append(
+        [
+            "对应钉钉采购订单号",
+            "品目编码Item code",
+            "品牌",
+            "申报名称",
+            "申报单位",
+            "供应商supplier",
+            "中文品名 Chinese Name",
+            "是否开票/CI",
+            "海关编码 Customs code",
+            "英文品名 English product name",
+            "西语品名 Spanish name",
+            "规格，型号，品牌 Specification, model, brand",
+            "长m",
+            "宽m",
+            "高m",
+            "净重NW 件kg",
+            "毛重GW 件kg",
+            "单件CBM",
+            "个数（每件）Number(Every)",
+            "件数Number of pieces",
+            "总个数 The total number of",
+            "包装 Packing",
+            "总净重",
+            "总毛重Gross weight",
+            "总体积total capacity",
+            "单价 unit price",
+            "总价（RMB)",
+            "计划出货日期",
+            "备注 Remarks",
+            "出口方式",
+            "项目归属",
+        ]
+    )
+    sheet.append(
+        [
+            "202606220952000179521",
+            "FL004106",
+            "无品牌",
+            "钢化膜",
+            "个",
+            "麒麟",
+            "钢化膜",
+            "否",
+            "",
+            "Tempered film",
+            "Mica de celular",
+            "GALAXY A07",
+            0.49,
+            0.36,
+            0.2,
+            12.9,
+            13.4,
+            0.03528,
+            500,
+            1,
+            500,
+            "纸箱+编织袋",
+            12.9,
+            13.4,
+            0.03528,
+            1.2,
+            600,
+            "2026-07-05",
+            "买单",
+            "空运双清包税",
+            "贸易项目",
+        ]
+    )
+    sheet.append(
+        [
+            "202606301549000536602",
+            "FL004111",
+            "无品牌",
+            "太阳眼镜",
+            "个",
+            "线上",
+            "太阳眼镜",
+            "否",
+            "",
+            "sunglasses",
+            "gafas de sol",
+            "工业品电商",
+            0.35,
+            0.32,
+            0.46,
+            5.5,
+            6,
+            0.05152,
+            5,
+            1,
+            5,
+            "纸箱",
+            5.5,
+            6,
+            0.05152,
+            14.55,
+            72.75,
+            "2026-07-05",
+            "买单",
+            "空运双清包税",
+            "TK项目",
+        ]
+    )
+    sheet.append([None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 19.4, 0.0868, 15.75, 672.75])
+    return workbook
+
+
 def _parse_sample_blocks() -> tuple[dict, list[dict]]:
     workbook = _build_sample_workbook()
     try:
@@ -109,6 +224,38 @@ def test_parse_yuewei_excel_workbook_expands_merged_batch_fields() -> None:
     assert blocks[0]["transportMode"] == "海运"
     assert blocks[0]["items"][1][0] == "YL000058"
     assert blocks[0]["items"][1][11]["chinaToMexicoFreightRmb"] == 13976.3
+
+
+def test_parse_oa_attachment_detail_sheet_auto_detects_non_yuewei_sheet() -> None:
+    workbook = _build_oa_attachment_workbook()
+    file_path = Path("tmp_air_attachment_test.xlsx")
+    try:
+        workbook.save(file_path)
+        workbook.close()
+
+        meta, blocks = parse_yuewei_excel_workbook(file_path, sheet_name="2026年YUEWEI")
+    finally:
+        workbook.close()
+        if file_path.exists():
+            file_path.unlink()
+
+    assert meta["sourceSheet"] == "7月份钢化膜空运"
+    assert meta["parser"] == "oa_attachment_detail"
+    assert "已自动识别" in meta["warning"]
+    assert summarize_excel_blocks(blocks) == {
+        "block_count": 2,
+        "item_count": 2,
+        "batch_ids": ["202606220952000179521", "202606301549000536602"],
+    }
+    first_item = blocks[0]["items"][0]
+    assert blocks[0]["transportMode"] == "空运双清包税"
+    assert first_item[0] == "FL004106"
+    assert first_item[2] == 1.2
+    assert first_item[3] == 500
+    assert first_item[4] == 600
+    assert first_item[11]["purchaseOrderNo"] == "202606220952000179521"
+    assert first_item[11]["actualShippedQty"] == 500
+    assert first_item[11]["volumeM3"] == 0.03528
 
 
 def test_select_parsed_workbook_blocks_excludes_double_clear_by_default() -> None:

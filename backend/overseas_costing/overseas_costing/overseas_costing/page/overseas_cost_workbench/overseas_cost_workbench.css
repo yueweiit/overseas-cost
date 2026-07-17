@@ -1602,6 +1602,39 @@
   line-height: 1.45;
 }
 
+.ocw-error-modal .modal-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-width: min(760px, calc(100vw - 32px));
+}
+
+.ocw-error-modal .modal-body {
+  max-height: min(58vh, 460px);
+  overflow: auto;
+}
+
+.ocw-error-dialog {
+  display: grid;
+  gap: 10px;
+}
+
+.ocw-error-title {
+  color: #b42318;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.ocw-error-message {
+  padding: 12px;
+  color: #344054;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid #f5c2c7;
+  border-radius: 8px;
+  background: #fff7f7;
+}
+
 @media (min-width: 1600px) {
   .ocw-desk-fullwidth .page-body {
     padding-left: 16px !important;
