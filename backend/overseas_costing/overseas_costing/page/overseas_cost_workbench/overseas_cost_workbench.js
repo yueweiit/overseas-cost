@@ -222,7 +222,7 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='file-parse']", () => this.openFileParseDialog());
     this.$root.on("click", "[data-action='show-scope']", () => this.showPendingFeature("当前先支持成本总表和国际物流审批附件 Excel 的数据摘取；费用口径不完整时先落基础明细，后续由钉钉/凭证继续补数。"));
     this.$root.on("click", "[data-action='open-dingtalk']", (event) => this.openDingtalkOrder($(event.currentTarget).attr("data-batch-name")));
-    this.$root.on("click", "[data-action='add-batch']", () => this.showPendingFeature("添加报关运单入口已保留，下一步接入新增保存接口。"));
+    this.$root.on("click", "[data-action='add-batch']", () => this.openAddBatchDialog());
     this.$root.on("click", "[data-action='toggle-batch']", (event) => this.toggleBatch($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='expand-current']", () => this.setAllExpanded(true));
     this.$root.on("click", "[data-action='collapse-current']", () => this.setAllExpanded(false));
@@ -2259,6 +2259,74 @@ class OverseasCostWorkbench {
       delete this.batchItems[batch.name];
       this.expandedBatchNames.delete(batch.name);
       await this.loadBatches();
+    } catch (error) {
+      this.showError(error);
+    }
+  }
+
+  openAddBatchDialog() {
+    const dialog = new frappe.ui.Dialog({
+      title: "添加报关运单",
+      fields: [
+        { fieldtype: "Data", fieldname: "batch_no", label: "批次号/来源单号", reqd: 1 },
+        { fieldtype: "Data", fieldname: "customs_no", label: "报关单号" },
+        { fieldtype: "Data", fieldname: "waybill_no", label: "运单号/物流单号" },
+        { fieldtype: "Data", fieldname: "container_no", label: "柜号" },
+        { fieldtype: "Select", fieldname: "transport_mode", label: "运输方式", options: "海运\n空运\n快递", default: "海运" },
+        { fieldtype: "Data", fieldname: "project_collection", label: "项目归集" },
+        { fieldtype: "Data", fieldname: "source_approval_no", label: "钉钉审批编号" },
+        { fieldtype: "Data", fieldname: "source_dingtalk_url", label: "钉钉审批链接" },
+        { fieldtype: "Small Text", fieldname: "source_remark", label: "备注" },
+      ],
+      primary_action_label: "确认新增",
+      primary_action: (values) => {
+        const batchPayload = {
+          ...values,
+          batch_no: String(values.batch_no || "").trim(),
+          customs_no: String(values.customs_no || "").trim(),
+          waybill_no: String(values.waybill_no || "").trim(),
+          container_no: String(values.container_no || "").trim(),
+        };
+        const label = batchPayload.customs_no || batchPayload.waybill_no || batchPayload.batch_no;
+        frappe.confirm(
+          `
+            <div class="ocw-confirm-copy">
+              <h4>确认新增报关运单？</h4>
+              <p>将新增「${this.escape(label || "未命名批次")}」空白批次。</p>
+              <div class="ocw-confirm-note">新增后可继续添加物料或导入附件补数。</div>
+            </div>
+          `,
+          async () => {
+            dialog.hide();
+            await this.createBatch(batchPayload);
+          }
+        );
+      },
+    });
+    dialog.show();
+  }
+
+  async createBatch(batchPayload) {
+    try {
+      const result = await this.call(
+        "overseas_costing.api.batch.create_batch",
+        {
+          batch_payload: JSON.stringify(batchPayload),
+        },
+        true
+      );
+      if (!result.ok) throw new Error(result.message || "新增报关运单失败");
+      this.resetFilterValues();
+      this.activeBatchName = result.batch_name || "";
+      await this.loadBatches();
+      if (result.batch_name) {
+        const batch = this.findBatch(result.batch_name);
+        await this.loadBatchItems(result.batch_name, batch ? batch.current_version : result.version_name, true);
+        this.expandedBatchNames.add(result.batch_name);
+        this.renderTable();
+        this.updateSearchResult();
+      }
+      frappe.show_alert({ message: result.message || "报关运单已新增", indicator: "green" });
     } catch (error) {
       this.showError(error);
     }

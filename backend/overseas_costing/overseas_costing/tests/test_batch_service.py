@@ -1,9 +1,12 @@
 """中文用途：批次查询服务测试。"""
 
+import json
+
 from overseas_costing.services.batch_service import (
     _build_item_query_args,
     _normalize_item_query_filters,
     _normalize_limit,
+    create_batch,
     get_audit_logs,
     get_batch_items,
 )
@@ -47,6 +50,38 @@ def test_get_batch_items_dry_run_keeps_filters() -> None:
     assert result["filters"]["product_name"] == "TPU"
     assert result["filters"]["keyword"] == "YL000098"
     assert result["columns"][0]["fieldname"] == "material_code"
+
+
+def test_create_batch_dry_run_builds_manual_batch_and_version() -> None:
+    result = create_batch(
+        json.dumps(
+            {
+                "batch_no": "MANUAL-001",
+                "customs_no": "26 16 1681 6000151",
+                "waybill_no": "HPCU5155607",
+                "transport_mode": "海运",
+                "project_collection": "Yuewei",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["dry_run"] is True
+    assert result["batch"]["batch_no"] == "MANUAL-001"
+    assert result["batch"]["waybill_no"] == "HPCU5155607"
+    assert result["batch"]["transport_mode"] == "SEA"
+    assert result["batch"]["source_type"] == "manual"
+    assert result["version"]["version_code"] == "手工-MANUAL-001"
+    assert result["version"]["is_current"] == 1
+
+
+def test_create_batch_dry_run_requires_batch_no() -> None:
+    result = create_batch({"transport_mode": "空运"})
+
+    assert result["ok"] is False
+    assert result["dry_run"] is True
+    assert "批次号" in result["message"]
 
 
 def test_normalize_limit_keeps_audit_queries_bounded() -> None:

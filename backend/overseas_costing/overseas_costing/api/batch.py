@@ -29,6 +29,13 @@ def get_batch_list(transport_mode: str = "SEA", status: str | None = None, keywo
 
 
 @frappe.whitelist()
+def create_batch(batch_payload: str | None = None) -> dict:
+    """新增一个空的报关/运单批次。"""
+
+    return batch_service.create_batch(batch_payload=batch_payload)
+
+
+@frappe.whitelist()
 def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
     """返回单个批次的头部信息和摘要。"""
 

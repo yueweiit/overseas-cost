@@ -167,6 +167,8 @@ def writeback_to_erp(batch_name: str, version_name: str) -> dict:
 
 import json as _json
 
+from overseas_costing.utils.field_mapper import normalize_transport_mode
+
 EXCEL_COLUMNS = [
     {"excel_col": "A", "fieldname": "material_code", "label": "物料编码"},
     {"excel_col": "B", "fieldname": "product_name", "label": "产品名称"},
@@ -258,6 +260,136 @@ ITEM_FILTER_FIELDS = (
     "category",
 )
 ITEM_KEYWORD_FIELDS = ITEM_FILTER_FIELDS + ("project_collection", "transport_mode")
+DEFAULT_FX_RMB_TO_MXN = 2.6
+
+
+def _load_batch_payload(batch_payload: str | dict | None) -> dict:
+    if not batch_payload:
+        return {}
+    if isinstance(batch_payload, dict):
+        return dict(batch_payload)
+    loaded = _json.loads(batch_payload)
+    if not isinstance(loaded, dict):
+        raise ValueError("新增报关运单参数必须是对象。")
+    return loaded
+
+
+def _clean_payload_text(payload: dict, fieldname: str) -> str:
+    return str(payload.get(fieldname) or "").strip()
+
+
+def _build_manual_batch_values(payload: dict) -> dict:
+    batch_no = _clean_payload_text(payload, "batch_no")
+    values = {
+        "batch_no": batch_no,
+        "customs_no": _clean_payload_text(payload, "customs_no"),
+        "waybill_no": _clean_payload_text(payload, "waybill_no"),
+        "container_no": _clean_payload_text(payload, "container_no"),
+        "sea_bill_no": _clean_payload_text(payload, "sea_bill_no"),
+        "commercial_invoice_no": _clean_payload_text(payload, "commercial_invoice_no"),
+        "transport_mode": normalize_transport_mode(payload.get("transport_mode")) or "SEA",
+        "project_collection": _clean_payload_text(payload, "project_collection"),
+        "source_type": "manual",
+        "source_approval_no": _clean_payload_text(payload, "source_approval_no"),
+        "source_instance_id": _clean_payload_text(payload, "source_instance_id"),
+        "source_dingtalk_url": _clean_payload_text(payload, "source_dingtalk_url"),
+        "status": "Draft",
+        "confirm_status": "Pending",
+        "writeback_status": "Not Started",
+        "version_count": 1,
+        "item_count": 0,
+        "import_remark": _clean_payload_text(payload, "import_remark") or "前端手工新增报关运单",
+        "source_remark": _clean_payload_text(payload, "source_remark"),
+    }
+    return values
+
+
+def create_batch(batch_payload: str | dict | None = None) -> dict:
+    """新增一个空批次和默认当前版本，供后续手工加物料或文件补数。"""
+
+    try:
+        payload = _load_batch_payload(batch_payload)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "dry_run": frappe is None,
+            "message": f"新增报关运单参数解析失败：{exc}",
+        }
+
+    values = _build_manual_batch_values(payload)
+    if not values["batch_no"]:
+        return {
+            "ok": False,
+            "dry_run": frappe is None,
+            "message": "请填写批次号/来源单号。",
+        }
+
+    version_values = {
+        "version_code": f"手工-{values['batch_no']}",
+        "version_type": "Estimated",
+        "status": "Active",
+        "is_current": 1,
+        "source_type": "Manual",
+        "fx_rmb_to_mxn": DEFAULT_FX_RMB_TO_MXN,
+        "remark": "前端手工新增批次默认版本",
+    }
+
+    if frappe is None:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "batch": values,
+            "version": version_values,
+            "message": "当前未连接 Frappe，已返回新增报关运单预览。",
+        }
+
+    existing_name = frappe.db.get_value("Overseas Cost Batch", {"batch_no": values["batch_no"]}, "name")
+    if existing_name:
+        return {
+            "ok": False,
+            "batch_name": existing_name,
+            "message": f"批次号已存在：{values['batch_no']}。请直接查询或换一个批次号。",
+        }
+
+    batch_doc = frappe.get_doc({"doctype": "Overseas Cost Batch", **values}).insert(ignore_permissions=True)
+    version_doc = frappe.get_doc(
+        {
+            "doctype": "Overseas Cost Version",
+            "batch": batch_doc.name,
+            **version_values,
+        }
+    ).insert(ignore_permissions=True)
+    frappe.db.set_value(
+        "Overseas Cost Batch",
+        batch_doc.name,
+        {
+            "current_version": version_doc.name,
+            "version_count": 1,
+            "item_count": 0,
+        },
+        update_modified=False,
+    )
+    frappe.get_doc(
+        {
+            "doctype": "Overseas Cost Audit Log",
+            "batch": batch_doc.name,
+            "version": version_doc.name,
+            "action_type": "BATCH_EDIT",
+            "field_name": "batch",
+            "new_value": _json.dumps(values, ensure_ascii=False, default=str),
+            "operator_name": getattr(frappe.session, "user", "") if getattr(frappe, "session", None) else "",
+            "action_remark": "前端手工新增报关运单",
+        }
+    ).insert(ignore_permissions=True)
+    frappe.db.commit()
+
+    return {
+        "ok": True,
+        "batch_name": batch_doc.name,
+        "version_name": version_doc.name,
+        "batch_no": values["batch_no"],
+        "message": "报关运单已新增，可继续添加物料或导入附件补数。",
+    }
 
 
 def _resolve_batch_name(batch_name: str) -> str | None:
