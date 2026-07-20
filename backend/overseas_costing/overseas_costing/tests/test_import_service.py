@@ -18,6 +18,7 @@ from overseas_costing.services.import_service import (
     parse_packing_list_attachment,
     preview_tax_certificate_pdf,
     preview_yuewei_excel_file,
+    save_tax_certificate_parse_result,
 )
 
 
@@ -141,6 +142,40 @@ IVA 16.00000 1 0 32719
     assert result["validation"]["status"] == "failed"
     assert result["summary"]["needs_manual_review"] is True
     assert amount_check["status"] == "failed"
+
+
+def test_save_tax_certificate_parse_result_returns_dry_run_without_frappe() -> None:
+    sample_text = """
+Ped. 6000151
+9 17.79570 23540.000 160
+26  16  1681  6000151
+01/04/2026
+DTA 0 5532 PRV 0 330
+IVA/PRV 0 53 IVA 0 113244
+IGI/IGE 0 10724
+IMPORTE PAGADO:
+$129,883
+NUMERO / TIPO HPCU5155607 3
+PEDIMENTO REF: MZ260108
+39079101001 00 0 1 1 5,000.000 1 5,000.00000 CHN CHN
+PLASTICO TPU EN FORMAS PRIMARIAS
+IGI 0.00000 1 0 0
+IVA 16.00000 1 0 32719
+202871 40.57420202871
+********* FIN DE PEDIMENTO NUM. TOTAL DE PARTIDAS: CLAVE PREVALIDADOR: 01001****** ****** *********
+"""
+
+    result = save_tax_certificate_parse_result(
+        source_name="PD_MZ260108凭证.pdf",
+        text=sample_text,
+        batch_name="HPCU5155607",
+    )
+
+    assert result["ok"] is True
+    assert result["dry_run"] is True
+    assert result["saved"] is False
+    assert result["preview"]["header"]["pedimento_no"] == "26 16 1681 6000151"
+    assert result["preview"]["reconciliation"]["voucher"]["paid_total_mxn"] == 129883
 
 
 def test_tax_certificate_reconciliation_preview_calculates_difference_without_writeback() -> None:

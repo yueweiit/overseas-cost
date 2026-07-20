@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -98,6 +99,73 @@ def preview_tax_certificate_pdf(
     parsed["file_url"] = file_url or ""
     parsed["message"] = "完税凭证解析预览已生成，当前不会写入成本表。"
     return parsed
+
+
+def save_tax_certificate_parse_result(
+    *,
+    source_name: str | None = None,
+    file_path: str | None = None,
+    file_url: str | None = None,
+    text: str | None = None,
+    batch_name: str | None = None,
+) -> dict:
+    """保存完税凭证解析快照到附件记录，不写入成本字段。"""
+
+    parsed = preview_tax_certificate_pdf(
+        source_name=source_name,
+        file_path=file_path,
+        file_url=file_url,
+        text=text,
+        batch_name=batch_name,
+    )
+    reconciliation = parsed.get("reconciliation") or {}
+    matched_batch = reconciliation.get("batch") or {}
+    if not _has_frappe_db_context():
+        return {
+            "ok": True,
+            "dry_run": True,
+            "saved": False,
+            "preview": parsed,
+            "message": "当前未连接 Frappe，仅返回保存预览，不写入附件记录。",
+        }
+    if not matched_batch.get("name"):
+        return {
+            "ok": False,
+            "saved": False,
+            "preview": parsed,
+            "message": "未匹配到系统批次，暂不保存解析结果。请先确认报关单号或柜号。",
+        }
+
+    values = _build_tax_certificate_attachment_values(
+        parsed=parsed,
+        batch=matched_batch,
+        source_name=source_name,
+        file_path=file_path,
+        file_url=file_url,
+    )
+    existing_name = _find_existing_tax_certificate_attachment(values)
+    if existing_name:
+        doc = frappe.get_doc("Overseas Cost Attachment", existing_name)
+        for fieldname, value in values.items():
+            setattr(doc, fieldname, value)
+        doc.save(ignore_permissions=True)
+        action = "updated"
+    else:
+        doc = frappe.get_doc({"doctype": "Overseas Cost Attachment", **values}).insert(ignore_permissions=True)
+        action = "created"
+
+    frappe.db.commit()
+    parsed["saved_attachment_name"] = doc.name
+    return {
+        "ok": True,
+        "saved": True,
+        "action": action,
+        "attachment_name": doc.name,
+        "batch_name": matched_batch.get("name") or "",
+        "source_doc_no": values.get("source_doc_no") or "",
+        "preview": parsed,
+        "message": "完税凭证解析结果已保存到附件记录，未写入成本字段。",
+    }
 
 
 def extract_pdf_text(*, file_path: str | None = None, file_url: str | None = None) -> str:
@@ -514,6 +582,65 @@ def _summarize_system_tax_items(items: list[dict]) -> dict:
     }
 
 
+def _build_tax_certificate_attachment_values(
+    *,
+    parsed: dict,
+    batch: dict,
+    source_name: str | None = None,
+    file_path: str | None = None,
+    file_url: str | None = None,
+) -> dict:
+    header = parsed.get("header") or {}
+    parse_snapshot = {
+        "source_name": parsed.get("source_name") or source_name or "",
+        "parser": parsed.get("parser") or "",
+        "parse_targets": parsed.get("parse_targets") or [],
+        "summary": parsed.get("summary") or {},
+        "header": header,
+        "tax_totals": parsed.get("tax_totals") or {},
+        "line_items": parsed.get("line_items") or [],
+        "validation": parsed.get("validation") or {},
+    }
+    reconciliation_snapshot = parsed.get("reconciliation") or {}
+    file_ref = file_url or file_path or parsed.get("file_url") or parsed.get("file_path") or ""
+    file_name = source_name or parsed.get("file_name") or _file_name_from_ref(file_ref)
+    return {
+        "batch": batch.get("name") or "",
+        "version": batch.get("current_version") or "",
+        "source_type": "Voucher",
+        "attachment_type": "Tax Certificate",
+        "source_doc_no": header.get("pedimento_no") or header.get("pedimento_ref") or header.get("pedimento_short_no") or "",
+        "file_name": file_name,
+        "file_url": file_ref,
+        "parse_status": "Parsed",
+        "parse_result_json": _json_dumps(parse_snapshot),
+        "mapped_result_json": _json_dumps(reconciliation_snapshot),
+        "remark": "完税凭证解析快照，仅用于复核，未写入成本字段。",
+    }
+
+
+def _find_existing_tax_certificate_attachment(values: dict) -> str | None:
+    filters = {
+        "batch": values.get("batch"),
+        "attachment_type": "Tax Certificate",
+    }
+    if values.get("source_doc_no"):
+        filters["source_doc_no"] = values["source_doc_no"]
+    elif values.get("file_url"):
+        filters["file_url"] = values["file_url"]
+    else:
+        return None
+
+    rows = frappe.get_all(
+        "Overseas Cost Attachment",
+        filters=filters,
+        fields=["name"],
+        order_by="modified desc",
+        limit_page_length=1,
+    )
+    return rows[0]["name"] if rows else None
+
+
 def _find_tax_certificate_batch(header: dict, batch_name: str | None = None) -> dict | None:
     fields = [
         "name",
@@ -827,6 +954,10 @@ def _to_number(value) -> float | None:
 
 def _round_money(value, digits: int = 2) -> float:
     return round(float(value or 0), digits)
+
+
+def _json_dumps(value) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def _clean_spaces(value: str) -> str:

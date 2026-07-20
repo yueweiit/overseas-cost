@@ -160,6 +160,25 @@ def preview_tax_certificate_pdf(
 
 
 @frappe.whitelist()
+def save_tax_certificate_parse_result(
+    source_name: str | None = None,
+    file_path: str | None = None,
+    file_url: str | None = None,
+    text: str | None = None,
+    batch_name: str | None = None,
+) -> dict:
+    """保存进口完税凭证 PDF 解析结果，不写入成本明细。"""
+
+    return import_service.save_tax_certificate_parse_result(
+        source_name=source_name,
+        file_path=file_path,
+        file_url=file_url,
+        text=text,
+        batch_name=batch_name,
+    )
+
+
+@frappe.whitelist()
 def import_purchase_expense_oa(
     batch_name: str,
     source_instance_id: str | None = None,

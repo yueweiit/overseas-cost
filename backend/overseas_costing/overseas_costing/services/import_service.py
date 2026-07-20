@@ -391,6 +391,24 @@ def preview_tax_certificate_pdf(
     )
 
 
+def save_tax_certificate_parse_result(
+    source_name: str | None = None,
+    file_path: str | None = None,
+    file_url: str | None = None,
+    text: str | None = None,
+    batch_name: str | None = None,
+) -> dict:
+    """保存完税凭证解析结果到附件记录，不写成本字段。"""
+
+    return attachment_parse_service.save_tax_certificate_parse_result(
+        source_name=source_name,
+        file_path=file_path,
+        file_url=file_url,
+        text=text,
+        batch_name=batch_name,
+    )
+
+
 def _load_rows(rows_json: str | None) -> list[dict]:
     if not rows_json:
         return []
