@@ -131,7 +131,7 @@ def normalize_transport_mode(value):
         return "AIR"
     if "快递" in normalized or "express" in lowered or "correo" in lowered:
         return "EXPRESS"
-    return normalized
+    return None
 
 
 def map_oa_row_to_item(row: dict) -> dict:

@@ -123,8 +123,8 @@ class OverseasCostWorkbench {
                 <div class="ocw-head-actions">
                   <span class="ocw-summary-pill" data-area="hierarchy-summary">加载批次中</span>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="file-parse">文件解析</button>
+                  <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-categories">品类归类</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="open-import">Excel 导入</button>
-                  <button class="ocw-outline-btn ocw-mini-btn" data-action="open-dingtalk">钉钉订单</button>
                   <button class="ocw-primary-btn ocw-mini-btn" data-action="recalculate">重新试算</button>
                   <button class="ocw-primary-btn ocw-mini-btn" data-action="add-batch">+ 添加报关运单</button>
                 </div>
@@ -218,9 +218,10 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='clear-filters']", () => this.clearFilters());
     this.$root.on("click", "[data-action='recalculate']", () => this.recalculate());
     this.$root.on("click", "[data-action='open-import']", () => this.openImportDialog());
-    this.$root.on("click", "[data-action='file-parse']", () => this.showPendingFeature("附件解析入口已保留，下一步接入报关单、提单和完税凭证解析。"));
+    this.$root.on("click", "[data-action='preview-categories']", () => this.openCategoryPreviewDialog());
+    this.$root.on("click", "[data-action='file-parse']", () => this.openFileParseDialog());
     this.$root.on("click", "[data-action='show-scope']", () => this.showPendingFeature("当前先支持成本总表和国际物流审批附件 Excel 的数据摘取；费用口径不完整时先落基础明细，后续由钉钉/凭证继续补数。"));
-    this.$root.on("click", "[data-action='open-dingtalk']", () => this.openDingtalkOrder());
+    this.$root.on("click", "[data-action='open-dingtalk']", (event) => this.openDingtalkOrder($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='add-batch']", () => this.showPendingFeature("添加报关运单入口已保留，下一步接入新增保存接口。"));
     this.$root.on("click", "[data-action='toggle-batch']", (event) => this.toggleBatch($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='expand-current']", () => this.setAllExpanded(true));
@@ -424,73 +425,52 @@ class OverseasCostWorkbench {
     if (summary.total_cost_rmb !== undefined) batch.estimated_total_cost_rmb = summary.total_cost_rmb;
   }
 
-  openImportDialog() {
+  openFileParseDialog() {
     const dialog = new frappe.ui.Dialog({
-      title: "导入/解析 Excel 附件",
+      title: "文件解析预览",
       fields: [
         {
           fieldtype: "HTML",
-          fieldname: "file_picker",
+          fieldname: "file_parse",
           options: `
-            <div class="ocw-import-file-box">
-              <label class="ocw-import-file-label">上传 Excel 文件</label>
-              <div class="ocw-import-dropzone" data-import-dropzone="1" tabindex="0">
-                <input class="ocw-import-file-input" type="file" accept=".xlsx,.xlsm" />
-                <div class="ocw-import-drop-icon">XLSX</div>
+            <div class="ocw-file-parse-box">
+              <label class="ocw-import-file-label">上传完税凭证 PDF</label>
+              <div class="ocw-import-dropzone" data-voucher-dropzone="1" tabindex="0">
+                <input class="ocw-voucher-file-input" type="file" accept=".pdf" />
+                <div class="ocw-import-drop-icon">PDF</div>
                 <div>
-                  <strong data-area="import-file-name">拖放文件到这里，或点击选择</strong>
-                  <span>支持 .xlsx / .xlsm</span>
+                  <strong data-area="voucher-file-name">拖放 PDF 到这里，或点击选择</strong>
+                  <span>当前仅做完税凭证解析预览，不写入成本表。</span>
                 </div>
               </div>
+              <div class="ocw-import-preview-actions">
+                <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="preview-voucher">解析预览</button>
+                <span data-area="voucher-preview-status">选择文件后可先预览凭证字段。</span>
+              </div>
+              <div class="ocw-voucher-preview empty" data-area="voucher-preview">尚未解析</div>
             </div>
           `,
         },
-        {
-          fieldtype: "Data",
-          fieldname: "source_sheet",
-          label: "工作表名称",
-          default: "",
-          description: "可留空自动识别。只有需要指定某个工作表时再填写 Excel 底部标签名。",
-        },
-        {
-          fieldtype: "Check",
-          fieldname: "include_double_clear",
-          label: "包含双清/包税数据",
-          default: 1,
-        },
       ],
-      primary_action_label: "导入",
-      primary_action: async (values) => {
-        const file =
-          dialog.$wrapper.data("ocw-import-file") ||
-          dialog.$wrapper.find(".ocw-import-file-input").get(0)?.files?.[0] ||
-          null;
-        if (!file) {
-          frappe.msgprint("请先上传 Excel 文件。");
-          return;
-        }
-        const sourceRef = file.name || "";
-        if (!this.isExcelFileRef(sourceRef)) {
-          frappe.msgprint("请上传 .xlsx / .xlsm 格式的 Excel 文件。");
-          return;
-        }
-        dialog.hide();
-        await this.importExcel({ ...values, source_sheet: String(values.source_sheet || "").trim(), file });
-      },
+      primary_action_label: "关闭",
+      primary_action: () => dialog.hide(),
     });
     dialog.show();
-    this.bindImportDropzone(dialog);
+    dialog.$wrapper.addClass("ocw-voucher-modal");
+    this.bindVoucherDropzone(dialog);
   }
 
-  bindImportDropzone(dialog) {
-    const $dropzone = dialog.$wrapper.find("[data-import-dropzone='1']");
-    const $input = dialog.$wrapper.find(".ocw-import-file-input");
-    const $fileName = dialog.$wrapper.find("[data-area='import-file-name']");
+  bindVoucherDropzone(dialog) {
+    const $dropzone = dialog.$wrapper.find("[data-voucher-dropzone='1']");
+    const $input = dialog.$wrapper.find(".ocw-voucher-file-input");
+    const $fileName = dialog.$wrapper.find("[data-area='voucher-file-name']");
     const setFile = (file) => {
       if (!file) return;
-      dialog.$wrapper.data("ocw-import-file", file);
+      dialog.$wrapper.data("ocw-voucher-file", file);
+      dialog.$wrapper.removeData("ocw-voucher-upload");
       $fileName.text(file.name);
       $dropzone.addClass("has-file");
+      this.renderVoucherPreview(dialog, null, "empty");
     };
 
     $dropzone.on("click keydown", (event) => {
@@ -513,12 +493,426 @@ class OverseasCostWorkbench {
     $dropzone.on("drop", (event) => {
       setFile(event.originalEvent?.dataTransfer?.files?.[0]);
     });
+    dialog.$wrapper.on("click", "[data-action='preview-voucher']", (event) => {
+      event.preventDefault();
+      this.previewTaxCertificate(dialog).catch((error) => this.showError(error));
+    });
+  }
+
+  getVoucherDialogFile(dialog) {
+    return dialog.$wrapper.data("ocw-voucher-file") || dialog.$wrapper.find(".ocw-voucher-file-input").get(0)?.files?.[0] || null;
+  }
+
+  validateVoucherFile(file) {
+    if (!file) {
+      frappe.msgprint("请先上传完税凭证 PDF。");
+      return false;
+    }
+    if (!this.isPdfFileRef(file.name || "")) {
+      frappe.msgprint("请上传 .pdf 格式的完税凭证。");
+      return false;
+    }
+    return true;
+  }
+
+  async ensureVoucherFileUploaded(dialog, file) {
+    const uploaded = dialog.$wrapper.data("ocw-voucher-upload");
+    const sameFile =
+      uploaded &&
+      uploaded.file_url &&
+      uploaded.source_file_name === file.name &&
+      uploaded.source_file_size === file.size &&
+      uploaded.source_file_modified === file.lastModified;
+    if (sameFile) return uploaded;
+
+    const uploadResult = await this.uploadImportFile(file);
+    const normalized = {
+      ...uploadResult,
+      source_file_name: file.name,
+      source_file_size: file.size,
+      source_file_modified: file.lastModified,
+    };
+    dialog.$wrapper.data("ocw-voucher-upload", normalized);
+    return normalized;
+  }
+
+  async previewTaxCertificate(dialog) {
+    const file = this.getVoucherDialogFile(dialog);
+    if (!this.validateVoucherFile(file)) return;
+
+    this.renderVoucherPreview(dialog, null, "loading");
+    const uploaded = await this.ensureVoucherFileUploaded(dialog, file);
+    const result = await this.call(
+      "overseas_costing.api.import_api.preview_tax_certificate_pdf",
+      {
+        source_name: uploaded.file_name || file.name,
+        file_url: uploaded.file_url,
+      },
+      true
+    );
+    dialog.$wrapper.data("ocw-voucher-preview", result);
+    this.renderVoucherPreview(dialog, result, "ready");
+  }
+
+  renderVoucherPreview(dialog, result, state = "empty") {
+    const $preview = dialog.$wrapper.find("[data-area='voucher-preview']");
+    const $status = dialog.$wrapper.find("[data-area='voucher-preview-status']");
+    $preview.removeClass("empty loading ready warn failed");
+    if (state === "loading") {
+      $status.text("正在上传并解析 PDF...");
+      $preview.addClass("loading").text("解析中");
+      return;
+    }
+    if (!result) {
+      $status.text("选择文件后可先预览凭证字段。");
+      $preview.addClass("empty").text("尚未解析");
+      return;
+    }
+
+    const summary = result.summary || {};
+    const header = result.header || {};
+    const taxes = result.tax_totals || {};
+    const items = result.line_items || [];
+    const validation = result.validation || {};
+    const validationStatus = validation.status || (summary.tax_total_matches_paid_total ? "passed" : "review");
+    const statusText = validation.status_label || (summary.tax_total_matches_paid_total ? "通过" : "需复核");
+    const statusClass = this.voucherValidationPreviewClass(validationStatus);
+    const taxChips = [
+      ["DTA", taxes.dta_mxn],
+      ["PRV", taxes.prv_mxn],
+      ["PRV IVA", taxes.prv_iva_mxn],
+      ["IGI/IGE", taxes.igi_mxn],
+      ["IVA", taxes.iva_mxn],
+    ]
+      .map(([label, value]) => `<span>${this.escape(label)} ${this.escape(this.formatNumber(value || 0))}</span>`)
+      .join("");
+    const rows = items.slice(0, 30).map((row) => this.renderVoucherItemRow(row)).join("");
+    const moreText = items.length > 30 ? `<div class="ocw-voucher-more">仅展示前 30 条，共 ${this.escape(String(items.length))} 条。</div>` : "";
+    const declaredCount = summary.declared_item_count ?? "--";
+    const validationHtml = this.renderVoucherValidation(validation);
+
+    $status.text(`预览完成：校验${statusText}。`);
+    $preview.addClass(statusClass).html(`
+      <div class="ocw-voucher-validation-head ${this.escape(validationStatus)}">
+        <div>
+          <span>解析校验</span>
+          <strong>${this.escape(statusText)}</strong>
+        </div>
+        <p>${this.escape(this.voucherValidationMessage(validationStatus))}</p>
+      </div>
+      <div class="ocw-voucher-summary">
+        <div><span>报关单号</span><strong>${this.escape(header.pedimento_no || "--")}</strong></div>
+        <div><span>凭证参考号</span><strong>${this.escape(header.pedimento_ref || header.pedimento_short_no || "--")}</strong></div>
+        <div><span>柜号</span><strong>${this.escape(header.container_no || "--")}</strong></div>
+        <div><span>支付日期</span><strong>${this.escape(header.payment_date || "--")}</strong></div>
+        <div><span>汇率</span><strong>${this.escape(this.formatValue(header.exchange_rate || "--"))}</strong></div>
+        <div><span>毛重 KG</span><strong>${this.escape(this.formatValue(header.gross_weight_kg || "--"))}</strong></div>
+        <div><span>支付总额 MXN</span><strong>${this.escape(this.formatNumber(summary.paid_total_mxn || 0))}</strong></div>
+        <div><span>商品分项</span><strong>${this.escape(String(summary.item_count || items.length || 0))} / ${this.escape(String(declaredCount))}</strong></div>
+      </div>
+      <div class="ocw-voucher-tax-chips">${taxChips}</div>
+      ${validationHtml}
+      <div class="ocw-voucher-note">当前只做字段摘取预览；确认规则后再用于生成实际核算和多退少补对比。</div>
+      <div class="ocw-voucher-table-wrap">
+        <table class="ocw-voucher-table">
+          <thead>
+            <tr>
+              <th>序号</th>
+              <th>HS 编码</th>
+              <th>海关进口名称</th>
+              <th>数量</th>
+              <th>IGI 税率</th>
+              <th>IGI 税额</th>
+              <th>IVA 税率</th>
+              <th>IVA 税额</th>
+            </tr>
+          </thead>
+          <tbody>${rows || `<tr><td colspan="8">未识别到商品分项</td></tr>`}</tbody>
+        </table>
+      </div>
+      ${moreText}
+    `);
+  }
+
+  renderVoucherValidation(validation) {
+    const checks = (validation && validation.checks) || [];
+    if (!checks.length) return "";
+    const rows = checks.map((check) => this.renderVoucherValidationRow(check)).join("");
+    return `
+      <div class="ocw-voucher-validation-wrap">
+        <div class="ocw-voucher-validation-title">
+          <strong>校验明细</strong>
+          <span>通过 ${this.escape(String(validation.passed_count || 0))} · 需复核 ${this.escape(String(validation.review_count || 0))} · 失败 ${this.escape(String(validation.failed_count || 0))}</span>
+        </div>
+        <table class="ocw-voucher-validation-table">
+          <thead>
+            <tr>
+              <th>项目</th>
+              <th>状态</th>
+              <th>说明</th>
+              <th>期望值</th>
+              <th>识别值</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  renderVoucherValidationRow(check) {
+    const status = check.status || "review";
+    return `
+      <tr class="${this.escape(status)}">
+        <td>${this.escape(check.label || "--")}</td>
+        <td><span class="ocw-voucher-check-status ${this.escape(status)}">${this.escape(check.status_label || "--")}</span></td>
+        <td>${this.escape(check.message || "--")}</td>
+        <td>${this.escape(this.formatValidationValue(check.expected))}</td>
+        <td>${this.escape(this.formatValidationValue(check.actual))}</td>
+      </tr>
+    `;
+  }
+
+  voucherValidationPreviewClass(status) {
+    if (status === "failed") return "failed";
+    if (status === "review") return "warn";
+    return "ready";
+  }
+
+  voucherValidationMessage(status) {
+    if (status === "failed") return "关键字段或金额不一致，不能直接用于最终核算，需要人工复核。";
+    if (status === "review") return "基础解析已完成，但仍有字段需要人工确认。";
+    return "基础字段、金额合计和分项数量已通过当前规则校验。";
+  }
+
+  formatValidationValue(value) {
+    if (value === null || value === undefined || value === "") return "--";
+    if (typeof value === "number") return this.formatNumber(value);
+    if (Array.isArray(value)) return value.join("、");
+    if (typeof value === "object") return JSON.stringify(value);
+    return String(value);
+  }
+
+  renderVoucherItemRow(row) {
+    const taxes = row.taxes || {};
+    return `
+      <tr>
+        <td>${this.escape(row.row_no || "--")}</td>
+        <td>${this.escape(row.hs_code || "--")}</td>
+        <td title="${this.escape(row.import_name || "")}">${this.escape(row.import_name || "--")}</td>
+        <td>${this.escape(this.formatValue(row.quantity_umc || "--"))}</td>
+        <td>${this.escape(this.formatValue(taxes.igi_rate ?? "--"))}</td>
+        <td>${this.escape(this.formatNumber(taxes.igi_amount_mxn || 0))}</td>
+        <td>${this.escape(this.formatValue(taxes.iva_rate ?? "--"))}</td>
+        <td>${this.escape(this.formatNumber(taxes.iva_amount_mxn || 0))}</td>
+      </tr>
+    `;
+  }
+
+  openImportDialog() {
+    const dialog = new frappe.ui.Dialog({
+      title: "导入/解析 Excel 附件",
+      fields: [
+        {
+          fieldtype: "HTML",
+          fieldname: "file_picker",
+          options: `
+            <div class="ocw-import-file-box">
+              <label class="ocw-import-file-label">上传 Excel 文件</label>
+              <div class="ocw-import-dropzone" data-import-dropzone="1" tabindex="0">
+                <input class="ocw-import-file-input" type="file" accept=".xlsx,.xlsm" />
+                <div class="ocw-import-drop-icon">XLSX</div>
+                <div>
+                  <strong data-area="import-file-name">拖放文件到这里，或点击选择</strong>
+                  <span>支持 .xlsx / .xlsm</span>
+                </div>
+              </div>
+              <div class="ocw-import-preview-actions">
+                <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="preview-import">解析预览</button>
+                <span data-area="import-preview-status">选择文件后可先预览，不会写入数据。</span>
+              </div>
+              <div class="ocw-import-preview empty" data-area="import-preview">尚未解析</div>
+            </div>
+          `,
+        },
+        {
+          fieldtype: "Data",
+          fieldname: "source_sheet",
+          label: "工作表名称",
+          default: "",
+          description: "可留空自动识别。只有需要指定某个工作表时再填写 Excel 底部标签名。",
+        },
+        {
+          fieldtype: "Check",
+          fieldname: "include_double_clear",
+          label: "包含双清/包税数据",
+          default: 1,
+        },
+      ],
+      primary_action_label: "导入",
+      primary_action: async (values) => {
+        const file = this.getImportDialogFile(dialog);
+        if (!this.validateImportFile(file)) return;
+        const uploaded = dialog.$wrapper.data("ocw-import-upload") || {};
+        dialog.hide();
+        await this.importExcel({
+          ...values,
+          source_sheet: String(values.source_sheet || "").trim(),
+          file: uploaded.file_url ? null : file,
+          file_url: uploaded.file_url || null,
+          source_name: uploaded.file_name || file.name,
+        });
+      },
+    });
+    dialog.show();
+    this.bindImportDropzone(dialog);
+  }
+
+  bindImportDropzone(dialog) {
+    const $dropzone = dialog.$wrapper.find("[data-import-dropzone='1']");
+    const $input = dialog.$wrapper.find(".ocw-import-file-input");
+    const $fileName = dialog.$wrapper.find("[data-area='import-file-name']");
+    const setFile = (file) => {
+      if (!file) return;
+      dialog.$wrapper.data("ocw-import-file", file);
+      dialog.$wrapper.removeData("ocw-import-upload");
+      $fileName.text(file.name);
+      $dropzone.addClass("has-file");
+      this.renderImportPreview(dialog, null, "empty");
+    };
+
+    $dropzone.on("click keydown", (event) => {
+      if (event.type === "keydown" && !["Enter", " "].includes(event.key)) return;
+      event.preventDefault();
+      $input.trigger("click");
+    });
+    $input.on("click", (event) => event.stopPropagation());
+    $input.on("change", (event) => setFile(event.currentTarget.files?.[0]));
+    $dropzone.on("dragenter dragover", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      $dropzone.addClass("is-dragover");
+    });
+    $dropzone.on("dragleave dragend drop", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      $dropzone.removeClass("is-dragover");
+    });
+    $dropzone.on("drop", (event) => {
+      setFile(event.originalEvent?.dataTransfer?.files?.[0]);
+    });
+    dialog.$wrapper.on("click", "[data-action='preview-import']", (event) => {
+      event.preventDefault();
+      this.previewImportExcel(dialog).catch((error) => this.showError(error));
+    });
+  }
+
+  getImportDialogFile(dialog) {
+    return dialog.$wrapper.data("ocw-import-file") || dialog.$wrapper.find(".ocw-import-file-input").get(0)?.files?.[0] || null;
+  }
+
+  validateImportFile(file) {
+    if (!file) {
+      frappe.msgprint("请先上传 Excel 文件。");
+      return false;
+    }
+    if (!this.isExcelFileRef(file.name || "")) {
+      frappe.msgprint("请上传 .xlsx / .xlsm 格式的 Excel 文件。");
+      return false;
+    }
+    return true;
+  }
+
+  async ensureImportFileUploaded(dialog, file) {
+    const uploaded = dialog.$wrapper.data("ocw-import-upload");
+    const sameFile =
+      uploaded &&
+      uploaded.file_url &&
+      uploaded.source_file_name === file.name &&
+      uploaded.source_file_size === file.size &&
+      uploaded.source_file_modified === file.lastModified;
+    if (sameFile) return uploaded;
+
+    const uploadResult = await this.uploadImportFile(file);
+    const normalized = {
+      ...uploadResult,
+      source_file_name: file.name,
+      source_file_size: file.size,
+      source_file_modified: file.lastModified,
+    };
+    dialog.$wrapper.data("ocw-import-upload", normalized);
+    return normalized;
+  }
+
+  async previewImportExcel(dialog) {
+    const file = this.getImportDialogFile(dialog);
+    if (!this.validateImportFile(file)) return;
+
+    const values = dialog.get_values() || {};
+    this.renderImportPreview(dialog, null, "loading");
+    const uploaded = await this.ensureImportFileUploaded(dialog, file);
+    const result = await this.call(
+      "overseas_costing.api.import_api.preview_yuewei_excel_file",
+      {
+        source_name: uploaded.file_name || file.name,
+        file_url: uploaded.file_url,
+        source_sheet: String(values.source_sheet || "").trim() || null,
+        transport_keyword: "",
+        include_double_clear: values.include_double_clear ? 1 : 0,
+      },
+      true
+    );
+    dialog.$wrapper.data("ocw-import-preview", result);
+    this.renderImportPreview(dialog, result, "ready");
+  }
+
+  renderImportPreview(dialog, result, state = "empty") {
+    const $preview = dialog.$wrapper.find("[data-area='import-preview']");
+    const $status = dialog.$wrapper.find("[data-area='import-preview-status']");
+    $preview.removeClass("empty loading ready warn");
+    if (state === "loading") {
+      $status.text("正在上传并解析文件...");
+      $preview.addClass("loading").text("解析中");
+      return;
+    }
+    if (!result) {
+      $status.text("选择文件后可先预览，不会写入数据。");
+      $preview.addClass("empty").text("尚未解析");
+      return;
+    }
+
+    const parser = result.parser_meta || {};
+    const selected = result.selected_summary || {};
+    const source = result.source_summary || {};
+    const batchIds = selected.batch_ids || [];
+    const isEmpty = !Number(selected.block_count || 0);
+    const visibleBatches = batchIds.slice(0, 5).map((batchId) => `<span>${this.escape(batchId)}</span>`).join("");
+    const moreText = batchIds.length > 5 ? `<em>等 ${this.escape(String(batchIds.length))} 个</em>` : "";
+    $status.text(isEmpty ? "已解析，但当前筛选未命中可导入批次。" : "预览完成，确认无误后点击导入。");
+    $preview.addClass(isEmpty ? "warn" : "ready").html(`
+      <div class="ocw-import-preview-grid">
+        <div><span>工作表</span><strong>${this.escape(parser.sourceSheet || "--")}</strong></div>
+        <div><span>解析器</span><strong>${this.escape(this.parserLabel(parser.parser))}</strong></div>
+        <div><span>识别批次</span><strong>${this.escape(String(source.block_count || 0))}</strong></div>
+        <div><span>命中批次</span><strong>${this.escape(String(selected.block_count || 0))}</strong></div>
+        <div><span>SKU 行数</span><strong>${this.escape(String(selected.item_count || 0))}</strong></div>
+      </div>
+      <div class="ocw-import-preview-batches">${visibleBatches || "<span>无命中批次</span>"}${moreText}</div>
+    `);
+  }
+
+  parserLabel(parserName) {
+    const labels = {
+      oa_attachment_detail: "国际物流附件",
+      yuewei_cost_workbook: "成本总表",
+    };
+    return labels[parserName] || parserName || "--";
   }
 
   async importExcel(values) {
     try {
       let fileUrl = values.file_url || null;
-      let sourceRef = values.file ? values.file.name : values.file_url || values.file_path || "";
+      let sourceRef = values.source_name || (values.file ? values.file.name : values.file_url || values.file_path || "");
       if (values.file) {
         const uploadResult = await this.uploadImportFile(values.file);
         fileUrl = uploadResult.file_url || fileUrl;
@@ -676,17 +1070,154 @@ class OverseasCostWorkbench {
       .text(`试算完成：${parts.join("；")}`);
   }
 
+  async openCategoryPreviewDialog(batchName = "") {
+    const batch = batchName ? this.findBatch(batchName) : this.getVisibleActiveBatch();
+    if (!batch) {
+      this.showPendingFeature("当前没有可归类的批次，请先导入或查询一条数据。");
+      return;
+    }
+    this.activeBatchName = batch.name;
+
+    const dialog = new frappe.ui.Dialog({
+      title: "商品品类归类预览",
+      fields: [
+        {
+          fieldtype: "HTML",
+          fieldname: "category_preview",
+          options: `
+            <div class="ocw-category-preview" data-area="category-preview">
+              <div class="ocw-category-loading">正在分析当前批次物料...</div>
+            </div>
+          `,
+        },
+      ],
+      primary_action_label: "关闭",
+      primary_action: () => dialog.hide(),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-category-modal");
+
+    try {
+      const result = await this.call(
+        "overseas_costing.api.category.preview_batch_categories",
+        {
+          batch_name: batch.name,
+          version_name: batch.current_version,
+          limit: 500,
+        },
+        true
+      );
+      this.renderCategoryPreview(dialog, result, batch);
+    } catch (error) {
+      dialog.hide();
+      this.showError(error);
+    }
+  }
+
+  renderCategoryPreview(dialog, result, batch) {
+    const $target = dialog.$wrapper.find("[data-area='category-preview']");
+    if (!result || !result.ok) {
+      $target.html(`
+        <div class="ocw-category-empty">
+          <strong>暂时无法生成归类预览</strong>
+          <span>${this.escape((result && result.message) || "请确认当前批次已有物料明细。")}</span>
+        </div>
+      `);
+      return;
+    }
+
+    const items = result.items || [];
+    const summary = result.summary || {};
+    const categoryCounts = summary.category_counts || {};
+    const countChips = Object.keys(categoryCounts)
+      .map((category) => `<span>${this.escape(category)} ${this.escape(String(categoryCounts[category]))}</span>`)
+      .join("");
+    const rows = items.map((row) => this.renderCategoryPreviewRow(row)).join("");
+    const batchLabel = batch.waybill_no || batch.batch_no || batch.name;
+
+    $target.html(`
+      <div class="ocw-category-summary">
+        <div><span>当前批次</span><strong>${this.escape(batchLabel || "--")}</strong></div>
+        <div><span>物料行数</span><strong>${this.escape(String(summary.item_count || items.length || 0))}</strong></div>
+        <div><span>需复核</span><strong>${this.escape(String(summary.needs_review_count || 0))}</strong></div>
+        <div><span>待 AI 判断</span><strong>${this.escape(String(summary.ai_ready_count || 0))}</strong></div>
+      </div>
+      <div class="ocw-category-note">
+        当前仅生成建议，不自动写入“大类分类”，后续接入 AI 后仍保留人工复核。
+      </div>
+      <div class="ocw-category-counts">${countChips || "<span>暂无建议品类</span>"}</div>
+      <div class="ocw-category-table-wrap">
+        <table class="ocw-category-table">
+          <thead>
+            <tr>
+              <th>物料编码</th>
+              <th>中文品名</th>
+              <th>海关进口名称</th>
+              <th>海关分类编码</th>
+              <th>当前大类</th>
+              <th>建议品类</th>
+              <th>置信度</th>
+              <th>状态</th>
+              <th>原因</th>
+            </tr>
+          </thead>
+          <tbody>${rows || `<tr><td colspan="9">当前批次暂无物料明细</td></tr>`}</tbody>
+        </table>
+      </div>
+    `);
+  }
+
+  renderCategoryPreviewRow(row) {
+    const status = this.categoryStatusInfo(row);
+    return `
+      <tr class="${this.escape(status.rowClass)}">
+        <td>${this.escape(row.material_code || "--")}</td>
+        <td title="${this.escape(row.product_name || "")}">${this.escape(row.product_name || "--")}</td>
+        <td title="${this.escape(row.import_name || "")}">${this.escape(row.import_name || "--")}</td>
+        <td>${this.escape(row.hs_code || "--")}</td>
+        <td>${this.escape(row.current_category || "--")}</td>
+        <td><strong>${this.escape(row.suggested_category || "--")}</strong></td>
+        <td>${this.escape(this.formatConfidence(row.confidence))}</td>
+        <td><span class="ocw-category-status ${this.escape(status.className)}">${this.escape(status.label)}</span></td>
+        <td title="${this.escape(row.reason || "")}">${this.escape(row.reason || "--")}</td>
+      </tr>
+    `;
+  }
+
+  categoryStatusInfo(row) {
+    if (row.ai_ready) {
+      return { label: "待 AI 判断", className: "ai", rowClass: "needs-ai" };
+    }
+    if (row.needs_review) {
+      return { label: "需复核", className: "review", rowClass: "needs-review" };
+    }
+    return { label: "可采用", className: "ok", rowClass: "" };
+  }
+
+  formatConfidence(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return "--";
+    const normalized = number > 1 ? number / 100 : number;
+    return `${Math.round(normalized * 100)}%`;
+  }
+
   isExcelFileRef(value) {
     const text = String(value || "").split("?")[0].toLowerCase();
     return text.endsWith(".xlsx") || text.endsWith(".xlsm");
   }
 
-  async openDingtalkOrder() {
-    const batch = this.getActiveBatch();
+  isPdfFileRef(value) {
+    const text = String(value || "").split("?")[0].toLowerCase();
+    return text.endsWith(".pdf");
+  }
+
+  async openDingtalkOrder(batchName = "") {
+    const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
     if (!batch) {
       this.showPendingFeature("当前没有可打开的批次。");
       return;
     }
+    this.activeBatchName = batch.name;
     if (this.isOpeningDingtalk) return;
     this.isOpeningDingtalk = true;
     try {
@@ -861,8 +1392,11 @@ class OverseasCostWorkbench {
         <td class="ocw-money-cell">${this.escape(this.formatValue(this.firstBatchValue(batch.name, "china_ocean_usd")))}</td>
         <td class="ocw-money-cell">${this.escape(this.formatValue(totalGoodsValue))}</td>
         <td class="ocw-row-actions">
-          <button class="ocw-outline-btn ocw-mini-btn" data-action="refresh-batch" data-batch-name="${this.escape(batch.name)}">刷新数据</button>
-          <button class="ocw-danger-btn ocw-mini-btn" data-action="delete-batch" data-batch-name="${this.escape(batch.name)}">删除</button>
+          <div class="ocw-row-action-group">
+            <button class="ocw-outline-btn ocw-mini-btn" data-action="open-dingtalk" data-batch-name="${this.escape(batch.name)}">审批单</button>
+            <button class="ocw-outline-btn ocw-mini-btn" data-action="refresh-batch" data-batch-name="${this.escape(batch.name)}">刷新数据</button>
+            <button class="ocw-danger-btn ocw-mini-btn" data-action="delete-batch" data-batch-name="${this.escape(batch.name)}">删除</button>
+          </div>
         </td>
       </tr>
     `;

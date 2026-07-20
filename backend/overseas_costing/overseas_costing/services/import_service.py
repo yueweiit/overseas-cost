@@ -319,6 +319,49 @@ def import_yuewei_excel_file(
     return result
 
 
+def preview_yuewei_excel_file(
+    source_name: str | None = None,
+    file_path: str | None = None,
+    file_url: str | None = None,
+    source_sheet: str | None = None,
+    transport_keyword: str = "",
+    include_double_clear=True,
+    batch_ids: str | None = None,
+    limit: int | None = None,
+) -> dict:
+    """预览真实 xlsx 解析结果，不写入数据库。"""
+
+    resolved_path = _resolve_excel_file_path(file_path=file_path, file_url=file_url)
+    source_sheet = (source_sheet or "").strip() or None
+    meta, blocks = parse_yuewei_excel_workbook(resolved_path, sheet_name=source_sheet)
+    resolved_source_sheet = meta.get("sourceSheet") or source_sheet
+    selected_blocks = select_excel_blocks(
+        blocks,
+        source_sheet=resolved_source_sheet,
+        transport_keyword=transport_keyword,
+        include_double_clear=include_double_clear,
+        batch_ids=batch_ids,
+        limit=limit,
+    )
+    return {
+        "ok": True,
+        "source_name": source_name or Path(resolved_path).name,
+        "file_path": str(resolved_path),
+        "file_url": file_url or "",
+        "parser_meta": meta,
+        "source_summary": summarize_excel_blocks(blocks),
+        "selected_summary": summarize_excel_blocks(selected_blocks),
+        "preview_batches": [_build_excel_block_preview(block) for block in selected_blocks[:20]],
+        "selection": {
+            "source_sheet": resolved_source_sheet or "",
+            "transport_keyword": transport_keyword or "",
+            "include_double_clear": to_bool(include_double_clear),
+            "batch_ids": batch_ids or "",
+            "limit": limit,
+        },
+    }
+
+
 def upload_attachment(batch_name: str, version_name: str | None = None, file_url: str | None = None) -> dict:
     return {
         "ok": True,
@@ -328,6 +371,22 @@ def upload_attachment(batch_name: str, version_name: str | None = None, file_url
         "file_url": file_url,
         "message": "附件登记骨架已创建，后续接 OCR / AI 解析。",
     }
+
+
+def preview_tax_certificate_pdf(
+    source_name: str | None = None,
+    file_path: str | None = None,
+    file_url: str | None = None,
+    text: str | None = None,
+) -> dict:
+    """预览解析进口完税凭证 PDF，不写库。"""
+
+    return attachment_parse_service.preview_tax_certificate_pdf(
+        source_name=source_name,
+        file_path=file_path,
+        file_url=file_url,
+        text=text,
+    )
 
 
 def _load_rows(rows_json: str | None) -> list[dict]:

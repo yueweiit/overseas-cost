@@ -75,3 +75,4 @@ def test_map_packing_list_row_to_item() -> None:
 def test_normalize_transport_mode() -> None:
     assert normalize_transport_mode("contenedor marítimo海运整柜") == "SEA"
     assert normalize_transport_mode("correo express快递") == "EXPRESS"
+    assert normalize_transport_mode("华峰正报") is None

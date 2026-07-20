@@ -332,6 +332,7 @@ ATTACHMENT_HEADER_ALIASES = {
     "unit": ("申报单位", "单位"),
     "supplier": ("供应商", "supplier"),
     "product_name": ("中文品名", "chinesename", "物料名称", "品名"),
+    "category": ("物料类别", "大类分类", "大类", "品类"),
     "invoice_flag": ("是否开票", "ci"),
     "hs_code": ("海关编码", "customscode", "hscode"),
     "product_name_en": ("英文品名", "englishproductname"),
@@ -399,24 +400,25 @@ def _read_attachment_row(worksheet, row_no: int, header_map: dict[str, int]) -> 
     for fieldname, col_no in header_map.items():
         row[fieldname] = _normalize_cell_value(worksheet.cell(row_no, col_no).value)
     export_mode = row.get("export_mode")
-    row["transport_mode"] = export_mode or _transport_from_sheet_name(worksheet.title)
+    row["transport_mode"] = _attachment_transport_mode(export_mode, worksheet.title)
     return row
 
 
 def _is_attachment_data_row(row: dict) -> bool:
-    key_values = [
-        row.get("purchase_order_no"),
-        row.get("material_code"),
-        row.get("product_name"),
-        row.get("import_name"),
-        row.get("quantity"),
-        row.get("goods_value"),
-    ]
-    if not any(value not in (None, "") for value in key_values):
+    if not _looks_like_material_code(row.get("material_code")):
         return False
-    if not any(row.get(field) not in (None, "") for field in ("material_code", "product_name", "import_name")):
+    return any(row.get(field) not in (None, "") for field in ("product_name", "import_name", "quantity", "goods_value"))
+
+
+def _looks_like_material_code(value) -> bool:
+    if value in (None, ""):
         return False
-    return True
+    text = str(value).strip()
+    if not text:
+        return False
+    has_ascii_letter = any("A" <= char.upper() <= "Z" for char in text)
+    has_digit = any(char.isdigit() for char in text)
+    return has_ascii_letter and has_digit
 
 
 def _transport_from_sheet_name(source_sheet: str) -> str:
@@ -427,10 +429,18 @@ def _transport_from_sheet_name(source_sheet: str) -> str:
     return "海运"
 
 
+def _attachment_transport_mode(export_mode, source_sheet: str) -> str:
+    text = str(export_mode or "").strip()
+    if any(keyword in text for keyword in ("海运", "空运", "快递", "express", "Express", "AIR", "Air", "air")):
+        return text
+    return _transport_from_sheet_name(source_sheet)
+
+
 def _build_attachment_item(row: dict, source_sheet: str) -> list:
     quantity = row.get("quantity") or row.get("qty_per_piece")
-    product_name = row.get("product_name") or row.get("import_name")
-    category = row.get("import_name")
+    declared_name = row.get("import_name")
+    product_name = row.get("product_name") or declared_name
+    source_remark = _join_remark(row.get("source_remark"), f"申报名称：{declared_name}" if declared_name else None)
     extra = {
         "excelA": row.get("material_code"),
         "sourceSheet": source_sheet,
@@ -447,7 +457,7 @@ def _build_attachment_item(row: dict, source_sheet: str) -> list:
         "projectCollection": row.get("project_collection"),
         "transportMode": row.get("transport_mode"),
         "purchaseCurrency": "RMB",
-        "sourceRemark": row.get("source_remark"),
+        "sourceRemark": source_remark,
         "supplier": row.get("supplier"),
         "packing": row.get("packing"),
         "plannedShipDate": row.get("planned_ship_date"),
@@ -458,11 +468,16 @@ def _build_attachment_item(row: dict, source_sheet: str) -> list:
         row.get("unit_price"),
         quantity,
         row.get("goods_value"),
-        row.get("import_name"),
+        None,
         row.get("hs_code"),
-        category,
+        row.get("category"),
         None,
         None,
         None,
         {key: value for key, value in extra.items() if value not in (None, "")},
     ]
+
+
+def _join_remark(*parts) -> str | None:
+    cleaned = [str(part).strip() for part in parts if part not in (None, "")]
+    return "；".join(cleaned) if cleaned else None

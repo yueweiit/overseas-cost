@@ -105,6 +105,31 @@ def import_yuewei_excel_file(
 
 
 @frappe.whitelist()
+def preview_yuewei_excel_file(
+    source_name: str | None = None,
+    file_path: str | None = None,
+    file_url: str | None = None,
+    source_sheet: str | None = None,
+    transport_keyword: str = "",
+    include_double_clear=1,
+    batch_ids: str | None = None,
+    limit: int | None = None,
+) -> dict:
+    """预览真实 xlsx 解析结果，不写入数据库。"""
+
+    return import_service.preview_yuewei_excel_file(
+        source_name=source_name,
+        file_path=file_path,
+        file_url=file_url,
+        source_sheet=source_sheet,
+        transport_keyword=transport_keyword,
+        include_double_clear=include_double_clear,
+        batch_ids=batch_ids,
+        limit=limit,
+    )
+
+
+@frappe.whitelist()
 def upload_attachment(batch_name: str, version_name: str | None = None, file_url: str | None = None) -> dict:
     """上传或登记附件，后续用于凭证解析。"""
 
@@ -112,6 +137,23 @@ def upload_attachment(batch_name: str, version_name: str | None = None, file_url
         batch_name=batch_name,
         version_name=version_name,
         file_url=file_url,
+    )
+
+
+@frappe.whitelist()
+def preview_tax_certificate_pdf(
+    source_name: str | None = None,
+    file_path: str | None = None,
+    file_url: str | None = None,
+    text: str | None = None,
+) -> dict:
+    """预览解析进口完税凭证 PDF，不写入成本明细。"""
+
+    return import_service.preview_tax_certificate_pdf(
+        source_name=source_name,
+        file_path=file_path,
+        file_url=file_url,
+        text=text,
     )
 
 

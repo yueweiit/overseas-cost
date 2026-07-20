@@ -253,9 +253,54 @@ def test_parse_oa_attachment_detail_sheet_auto_detects_non_yuewei_sheet() -> Non
     assert first_item[2] == 1.2
     assert first_item[3] == 500
     assert first_item[4] == 600
+    assert first_item[5] is None
+    assert first_item[7] is None
     assert first_item[11]["purchaseOrderNo"] == "202606220952000179521"
     assert first_item[11]["actualShippedQty"] == 500
     assert first_item[11]["volumeM3"] == 0.03528
+    assert first_item[11]["sourceRemark"] == "买单；申报名称：钢化膜"
+
+
+def test_parse_oa_attachment_detail_sheet_ignores_cost_calculation_rows() -> None:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "华峰装柜"
+    sheet.append(
+        [
+            "对应钉钉采购订单号",
+            "品目编码Item code",
+            "申报名称",
+            "申报单位",
+            "中文品名 Chinese Name",
+            "总个数 The total number of",
+            "单价 unit price",
+            "总价（RMB)",
+            "出口方式",
+            "项目归属",
+        ]
+    )
+    sheet.append(["202604150041000081318", "YL000098", "热塑性聚氨酯弹性体", "千克", "TPU", 10000, 3.05, 30500, "华峰正报", "亮甲2.0项目"])
+    sheet.append(["费用支出明细", "人民币", "比索", "换算人民币支出", "占比", None, None, None, None, None])
+    sheet.append(["海运费", 0, 0, None, None, None, None, None, None, None])
+    file_path = Path("tmp_raw_material_attachment_test.xlsx")
+    try:
+        workbook.save(file_path)
+        workbook.close()
+
+        meta, blocks = parse_yuewei_excel_workbook(file_path)
+    finally:
+        workbook.close()
+        if file_path.exists():
+            file_path.unlink()
+
+    assert meta["sourceSheet"] == "华峰装柜"
+    assert summarize_excel_blocks(blocks) == {
+        "block_count": 1,
+        "item_count": 1,
+        "batch_ids": ["202604150041000081318"],
+    }
+    assert blocks[0]["transportMode"] == "海运"
+    assert blocks[0]["items"][0][0] == "YL000098"
 
 
 def test_select_parsed_workbook_blocks_excludes_double_clear_by_default() -> None:
