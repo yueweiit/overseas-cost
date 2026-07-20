@@ -4,7 +4,11 @@
 
 from pathlib import Path
 
-from overseas_costing.services.attachment_parse_service import build_packing_list_parse_task
+from overseas_costing.services import attachment_parse_service
+from overseas_costing.services.attachment_parse_service import (
+    _build_tax_certificate_reconciliation,
+    build_packing_list_parse_task,
+)
 from overseas_costing.services.import_service import (
     _coerce_item_numeric_defaults,
     _ensure_supported_excel_path,
@@ -104,6 +108,8 @@ IVA 16.00000 1 0 5186
     assert result["line_items"][0]["hs_code"] == "39079101"
     assert result["line_items"][0]["import_name"] == "PLASTICO TPU EN FORMAS PRIMARIAS"
     assert result["line_items"][0]["taxes"]["iva_amount_mxn"] == 32719
+    assert result["reconciliation"]["status"] == "pending"
+    assert result["reconciliation"]["voucher"]["paid_total_mxn"] == 129883
 
 
 def test_preview_tax_certificate_pdf_flags_failed_validation_for_amount_mismatch() -> None:
@@ -135,6 +141,78 @@ IVA 16.00000 1 0 32719
     assert result["validation"]["status"] == "failed"
     assert result["summary"]["needs_manual_review"] is True
     assert amount_check["status"] == "failed"
+
+
+def test_tax_certificate_reconciliation_preview_calculates_difference_without_writeback() -> None:
+    parsed = {
+        "header": {
+            "pedimento_no": "26 16 1681 6000151",
+            "container_no": "HPCU5155607",
+            "payment_date": "01/04/2026",
+        },
+        "summary": {
+            "paid_total_mxn": 220,
+            "tax_total_sum_mxn": 220,
+            "item_count": 2,
+            "declared_item_count": 2,
+        },
+        "validation": {"status": "passed", "status_label": "通过"},
+    }
+    result = _build_tax_certificate_reconciliation(
+        parsed=parsed,
+        batch={
+            "name": "BATCH-001",
+            "batch_no": "HPCU5155607",
+            "customs_no": "26 16 1681 6000151",
+            "waybill_no": "HPCU5155607",
+            "item_count": 2,
+        },
+        items=[
+            {"row_no": 1, "import_tax_total": 120, "hs_code": "39079101"},
+            {"row_no": 2, "igi_amount": 30, "iva_amount": 40, "dta": 10, "hs_code": "39232991"},
+        ],
+    )
+
+    assert result["status"] == "review"
+    assert result["system"]["system_import_tax_total_mxn"] == 200
+    assert result["difference"]["tax_total_diff_mxn"] == 20
+    assert result["difference"]["direction_label"] == "凭证金额高于系统"
+    assert result["message"].startswith("对比结果仅用于复核")
+
+
+def test_tax_certificate_batch_lookup_prefers_voucher_header_over_requested_batch(monkeypatch) -> None:
+    class FakeFrappe:
+        @staticmethod
+        def get_all(_doctype, filters=None, **_kwargs):
+            if filters == {"customs_no": "26 16 1681 6000151"}:
+                return [
+                    {
+                        "name": "BATCH-CUSTOMS",
+                        "batch_no": "HPCU5155607",
+                        "customs_no": "26 16 1681 6000151",
+                        "waybill_no": "HPCU5155607",
+                    }
+                ]
+            if filters == {"name": "CURRENT-BATCH"}:
+                return [
+                    {
+                        "name": "CURRENT-BATCH",
+                        "batch_no": "202606301549000536602",
+                        "customs_no": "",
+                        "waybill_no": "",
+                    }
+                ]
+            return []
+
+    monkeypatch.setattr(attachment_parse_service, "frappe", FakeFrappe)
+
+    result = attachment_parse_service._find_tax_certificate_batch(
+        {"pedimento_no": "26 16 1681 6000151", "container_no": "HPCU5155607"},
+        batch_name="CURRENT-BATCH",
+    )
+
+    assert result["name"] == "BATCH-CUSTOMS"
+    assert result["customs_no"] == "26 16 1681 6000151"
 
 
 def test_build_packing_list_parse_task_defaults_to_multi_template_router() -> None:

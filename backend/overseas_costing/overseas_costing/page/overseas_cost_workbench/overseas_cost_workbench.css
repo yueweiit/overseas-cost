@@ -1720,6 +1720,43 @@
   background: #f9fbfb;
 }
 
+.ocw-voucher-target {
+  display: grid;
+  grid-template-columns: minmax(80px, auto) minmax(120px, 1fr);
+  gap: 4px 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--ocw-line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.ocw-voucher-target span {
+  color: var(--ocw-muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.ocw-voucher-target strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ocw-ink);
+  font-family: var(--ocw-mono);
+  font-size: 12px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocw-voucher-target em {
+  grid-column: 1 / -1;
+  color: var(--ocw-muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
 .ocw-voucher-file-input {
   position: absolute;
   width: 1px;
@@ -1896,6 +1933,105 @@
 .ocw-voucher-check-status.failed {
   color: #b71c1c;
   background: #ffe2e2;
+}
+
+.ocw-voucher-reconciliation {
+  display: grid;
+  gap: 8px;
+  overflow: hidden;
+  border: 1px solid var(--ocw-line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.ocw-voucher-reconciliation-head {
+  display: grid;
+  grid-template-columns: minmax(140px, 190px) minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--ocw-line);
+  background: #f7faf9;
+}
+
+.ocw-voucher-reconciliation-head span {
+  display: block;
+  color: var(--ocw-muted);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.ocw-voucher-reconciliation-head strong {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  margin-top: 3px;
+  padding: 3px 9px;
+  color: #0d7377;
+  font-size: 13px;
+  font-weight: 900;
+  border-radius: 999px;
+  background: var(--ocw-brand-soft);
+}
+
+.ocw-voucher-reconciliation.review .ocw-voucher-reconciliation-head strong,
+.ocw-voucher-reconciliation.pending .ocw-voucher-reconciliation-head strong {
+  color: #9a5b00;
+  background: #fff1d8;
+}
+
+.ocw-voucher-reconciliation.failed .ocw-voucher-reconciliation-head strong,
+.ocw-voucher-reconciliation.unmatched .ocw-voucher-reconciliation-head strong {
+  color: #b71c1c;
+  background: #ffe2e2;
+}
+
+.ocw-voucher-reconciliation-head p {
+  margin: 0;
+  color: var(--ocw-ink);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.ocw-voucher-reconciliation-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(110px, 1fr));
+  gap: 8px;
+  padding: 0 10px;
+}
+
+.ocw-voucher-reconciliation-grid div {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--ocw-line);
+  border-radius: 8px;
+  background: #fbfcfc;
+}
+
+.ocw-voucher-reconciliation-grid span {
+  display: block;
+  color: var(--ocw-muted);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.ocw-voucher-reconciliation-grid strong {
+  display: block;
+  min-width: 0;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--ocw-ink);
+  font-family: var(--ocw-mono);
+  font-size: 12px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocw-voucher-reconciliation-table {
+  margin: 0 10px 10px;
+  width: calc(100% - 20px);
 }
 
 .ocw-voucher-summary {

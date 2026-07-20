@@ -146,6 +146,7 @@ def preview_tax_certificate_pdf(
     file_path: str | None = None,
     file_url: str | None = None,
     text: str | None = None,
+    batch_name: str | None = None,
 ) -> dict:
     """预览解析进口完税凭证 PDF，不写入成本明细。"""
 
@@ -154,6 +155,7 @@ def preview_tax_certificate_pdf(
         file_path=file_path,
         file_url=file_url,
         text=text,
+        batch_name=batch_name,
     )
 
 

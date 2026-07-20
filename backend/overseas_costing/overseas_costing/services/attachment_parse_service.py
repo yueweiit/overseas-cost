@@ -286,7 +286,7 @@ def _build_tax_certificate_validation(*, header: dict, summary: dict, tax_totals
 def build_tax_certificate_reconciliation_preview(parsed: dict, batch_name: str | None = None) -> dict:
     """生成完税凭证与系统批次的对比预览，不写库。"""
 
-    if frappe is None:
+    if not _has_frappe_db_context():
         return _build_tax_certificate_reconciliation(
             parsed=parsed,
             batch=None,
@@ -540,12 +540,7 @@ def _find_tax_certificate_batch(header: dict, batch_name: str | None = None) -> 
         )
         return rows[0] if rows else None
 
-    for value in [batch_name]:
-        for fieldname in ("name", "batch_no", "customs_no", "waybill_no", "container_no"):
-            batch = first_by(fieldname, value)
-            if batch:
-                return batch
-
+    # 完税凭证本身识别出的报关单号/柜号最可信；页面当前批次只作为兜底。
     for fieldname, value in (
         ("customs_no", header.get("pedimento_no")),
         ("waybill_no", header.get("container_no")),
@@ -555,7 +550,22 @@ def _find_tax_certificate_batch(header: dict, batch_name: str | None = None) -> 
         batch = first_by(fieldname, value)
         if batch:
             return batch
+
+    for value in [batch_name]:
+        for fieldname in ("name", "batch_no", "customs_no", "waybill_no", "container_no"):
+            batch = first_by(fieldname, value)
+            if batch:
+                return batch
     return None
+
+
+def _has_frappe_db_context() -> bool:
+    if frappe is None:
+        return False
+    try:
+        return bool(getattr(frappe.local, "site", None)) and getattr(frappe, "db", None) is not None
+    except Exception:
+        return False
 
 
 def _public_batch_snapshot(batch: dict | None) -> dict:

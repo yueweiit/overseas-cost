@@ -426,6 +426,10 @@ class OverseasCostWorkbench {
   }
 
   openFileParseDialog() {
+    const batch = this.getVisibleActiveBatch() || this.getActiveBatch();
+    const batchName = batch ? batch.name : "";
+    const batchLabel = batch ? batch.customs_no || batch.waybill_no || batch.batch_no || batch.name : "未选择批次";
+    const batchHint = batch ? "解析后优先按凭证报关单号/柜号自动匹配，当前页面批次仅作为兜底。" : "解析后会按凭证报关单号/柜号自动尝试匹配批次。";
     const dialog = new frappe.ui.Dialog({
       title: "文件解析预览",
       fields: [
@@ -434,6 +438,11 @@ class OverseasCostWorkbench {
           fieldname: "file_parse",
           options: `
             <div class="ocw-file-parse-box">
+              <div class="ocw-voucher-target">
+                <span>当前对比批次</span>
+                <strong>${this.escape(batchLabel)}</strong>
+                <em>${this.escape(batchHint)}</em>
+              </div>
               <label class="ocw-import-file-label">上传完税凭证 PDF</label>
               <div class="ocw-import-dropzone" data-voucher-dropzone="1" tabindex="0">
                 <input class="ocw-voucher-file-input" type="file" accept=".pdf" />
@@ -457,6 +466,7 @@ class OverseasCostWorkbench {
     });
     dialog.show();
     dialog.$wrapper.addClass("ocw-voucher-modal");
+    dialog.$wrapper.data("ocw-voucher-batch-name", batchName);
     this.bindVoucherDropzone(dialog);
   }
 
@@ -547,6 +557,7 @@ class OverseasCostWorkbench {
       {
         source_name: uploaded.file_name || file.name,
         file_url: uploaded.file_url,
+        batch_name: dialog.$wrapper.data("ocw-voucher-batch-name") || "",
       },
       true
     );
@@ -590,8 +601,11 @@ class OverseasCostWorkbench {
     const moreText = items.length > 30 ? `<div class="ocw-voucher-more">仅展示前 30 条，共 ${this.escape(String(items.length))} 条。</div>` : "";
     const declaredCount = summary.declared_item_count ?? "--";
     const validationHtml = this.renderVoucherValidation(validation);
+    const reconciliation = result.reconciliation || {};
+    const reconciliationHtml = this.renderVoucherReconciliation(reconciliation);
+    const reconciliationText = reconciliation.status_label ? `，对比${reconciliation.status_label}` : "";
 
-    $status.text(`预览完成：校验${statusText}。`);
+    $status.text(`预览完成：校验${statusText}${reconciliationText}。`);
     $preview.addClass(statusClass).html(`
       <div class="ocw-voucher-validation-head ${this.escape(validationStatus)}">
         <div>
@@ -611,6 +625,7 @@ class OverseasCostWorkbench {
         <div><span>商品分项</span><strong>${this.escape(String(summary.item_count || items.length || 0))} / ${this.escape(String(declaredCount))}</strong></div>
       </div>
       <div class="ocw-voucher-tax-chips">${taxChips}</div>
+      ${reconciliationHtml}
       ${validationHtml}
       <div class="ocw-voucher-note">当前只做字段摘取预览；确认规则后再用于生成实际核算和多退少补对比。</div>
       <div class="ocw-voucher-table-wrap">
@@ -632,6 +647,57 @@ class OverseasCostWorkbench {
       </div>
       ${moreText}
     `);
+  }
+
+  renderVoucherReconciliation(reconciliation) {
+    if (!reconciliation || !Object.keys(reconciliation).length) return "";
+    const batch = reconciliation.batch || {};
+    const voucher = reconciliation.voucher || {};
+    const system = reconciliation.system || {};
+    const diff = reconciliation.difference || {};
+    const checks = reconciliation.checks || [];
+    const status = reconciliation.status || "pending";
+    const batchLabel = batch.customs_no || batch.waybill_no || batch.batch_no || batch.container_no || batch.name || "未匹配";
+    const declaredCount = voucher.declared_item_count ?? voucher.item_count ?? "--";
+    const checkRows = checks.map((check) => this.renderVoucherValidationRow(check)).join("");
+
+    return `
+      <div class="ocw-voucher-reconciliation ${this.escape(status)}">
+        <div class="ocw-voucher-reconciliation-head">
+          <div>
+            <span>多退少补对比预览</span>
+            <strong>${this.escape(reconciliation.status_label || "--")}</strong>
+          </div>
+          <p>${this.escape(reconciliation.message || "对比结果仅用于复核，不会自动写入成本。")}</p>
+        </div>
+        <div class="ocw-voucher-reconciliation-grid">
+          <div><span>匹配批次</span><strong>${this.escape(batchLabel)}</strong></div>
+          <div><span>凭证税费 MXN</span><strong>${this.escape(this.formatValidationValue(voucher.paid_total_mxn))}</strong></div>
+          <div><span>系统税费 MXN</span><strong>${this.escape(this.formatValidationValue(system.system_import_tax_total_mxn))}</strong></div>
+          <div><span>差额 MXN</span><strong>${this.escape(this.formatValidationValue(diff.tax_total_diff_mxn))}</strong></div>
+          <div><span>差额方向</span><strong>${this.escape(diff.direction_label || "--")}</strong></div>
+          <div><span>行数对比</span><strong>${this.escape(String(system.item_count || 0))} / ${this.escape(String(declaredCount))}</strong></div>
+          <div><span>税费来源</span><strong>${this.escape(system.tax_source || "--")}</strong></div>
+          <div><span>有税费行</span><strong>${this.escape(String(system.rows_with_tax_count || 0))}</strong></div>
+        </div>
+        ${
+          checkRows
+            ? `<table class="ocw-voucher-validation-table ocw-voucher-reconciliation-table">
+                <thead>
+                  <tr>
+                    <th>项目</th>
+                    <th>状态</th>
+                    <th>说明</th>
+                    <th>期望值</th>
+                    <th>识别值</th>
+                  </tr>
+                </thead>
+                <tbody>${checkRows}</tbody>
+              </table>`
+            : ""
+        }
+      </div>
+    `;
   }
 
   renderVoucherValidation(validation) {
