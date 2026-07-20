@@ -454,7 +454,6 @@ class OverseasCostWorkbench {
               </div>
               <div class="ocw-import-preview-actions">
                 <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="preview-voucher">解析预览</button>
-                <button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="save-voucher-parse" disabled>保存解析结果</button>
                 <span data-area="voucher-preview-status">选择文件后可先预览凭证字段。</span>
               </div>
               <div class="ocw-voucher-preview empty" data-area="voucher-preview">尚未解析</div>
@@ -481,6 +480,7 @@ class OverseasCostWorkbench {
     dialog.show();
     dialog.$wrapper.addClass("ocw-voucher-modal");
     dialog.$wrapper.data("ocw-voucher-batch-name", batchName);
+    this.updateVoucherPrimarySaveAction(dialog, false);
     this.bindVoucherDropzone(dialog);
     this.loadTaxCertificateRecords(dialog).catch((error) => this.showError(error));
   }
@@ -608,29 +608,34 @@ class OverseasCostWorkbench {
       return;
     }
 
-    const uploaded = await this.ensureVoucherFileUploaded(dialog, file);
-    const result = await this.call(
-      "overseas_costing.api.import_api.save_tax_certificate_parse_result",
-      {
-        source_name: uploaded.file_name || file.name,
-        file_url: uploaded.file_url,
-        batch_name: dialog.$wrapper.data("ocw-voucher-batch-name") || "",
-      },
-      true
-    );
+    this.updateVoucherPrimarySaveAction(dialog, false, "保存中");
+    let result;
+    try {
+      const uploaded = await this.ensureVoucherFileUploaded(dialog, file);
+      result = await this.call(
+        "overseas_costing.api.import_api.save_tax_certificate_parse_result",
+        {
+          source_name: uploaded.file_name || file.name,
+          file_url: uploaded.file_url,
+          batch_name: dialog.$wrapper.data("ocw-voucher-batch-name") || "",
+        },
+        true
+      );
+    } catch (error) {
+      this.updateVoucherPrimarySaveAction(dialog, canSave);
+      throw error;
+    }
     if (!result || !result.ok) {
       frappe.msgprint((result && result.message) || "保存解析结果失败。");
+      this.updateVoucherPrimarySaveAction(dialog, canSave);
       return;
     }
-    if (result.preview) {
-      dialog.$wrapper.data("ocw-voucher-preview", result.preview);
-      this.renderVoucherPreview(dialog, result.preview, "ready");
-    }
-    await this.loadTaxCertificateRecords(dialog);
     frappe.show_alert({
-      message: result.message || "完税凭证解析结果已保存。",
+      message: "保存完成，正在返回上一页。",
       indicator: "green",
     });
+    dialog.hide();
+    window.setTimeout(() => this.goBackAfterVoucherSave(), 450);
   }
 
   async loadTaxCertificateRecords(dialog) {
@@ -783,9 +788,8 @@ class OverseasCostWorkbench {
   renderVoucherPreview(dialog, result, state = "empty") {
     const $preview = dialog.$wrapper.find("[data-area='voucher-preview']");
     const $status = dialog.$wrapper.find("[data-area='voucher-preview-status']");
-    const $saveButton = dialog.$wrapper.find("[data-action='save-voucher-parse']");
     $preview.removeClass("empty loading ready warn failed");
-    $saveButton.prop("disabled", true).attr("title", "请先解析并匹配到系统批次");
+    this.updateVoucherPrimarySaveAction(dialog, false);
     if (state === "loading") {
       $status.text("正在上传并解析 PDF...");
       $preview.addClass("loading").text("解析中");
@@ -812,10 +816,10 @@ class OverseasCostWorkbench {
     const validationHtml = this.renderVoucherValidation(validation);
     const reconciliation = result.reconciliation || {};
     if (result.saved_attachment_name) reconciliation.saved_attachment_name = result.saved_attachment_name;
-    const reconciliationHtml = this.renderVoucherReconciliation(reconciliation);
+    const reconciliationHtml = this.renderVoucherReconciliation(reconciliation, { showSaveButton: false });
     const reconciliationText = reconciliation.status_label ? `，对比${reconciliation.status_label}` : "";
     const canSave = Boolean(reconciliation.batch && reconciliation.batch.name);
-    $saveButton.prop("disabled", !canSave).attr("title", canSave ? "保存解析快照到附件记录" : "未匹配到系统批次，暂不能保存");
+    this.updateVoucherPrimarySaveAction(dialog, canSave);
 
     $status.text(`预览完成：校验${statusText}${reconciliationText}。`);
     $preview.addClass(statusClass).html(`
@@ -859,6 +863,26 @@ class OverseasCostWorkbench {
       </div>
       ${moreText}
     `);
+  }
+
+  updateVoucherPrimarySaveAction(dialog, canSave, label = "保存解析结果") {
+    if (!dialog || !dialog.$wrapper) return;
+    const $primary = dialog.get_primary_btn ? dialog.get_primary_btn() : dialog.$wrapper.find(".modal-footer .btn-primary");
+    if (!$primary || !$primary.length) return;
+    $primary.text(label).prop("disabled", !canSave).attr("title", canSave ? "保存解析快照到附件记录" : "请先解析并匹配到系统批次");
+    if (canSave) {
+      $primary.show();
+    } else {
+      $primary.hide();
+    }
+  }
+
+  goBackAfterVoucherSave() {
+    if (window.history && window.history.length > 1) {
+      window.history.back();
+      return;
+    }
+    this.loadBatches();
   }
 
   renderVoucherTaxChips(taxes = {}) {
