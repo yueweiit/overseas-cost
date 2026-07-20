@@ -462,8 +462,14 @@ class OverseasCostWorkbench {
           `,
         },
       ],
-      primary_action_label: "关闭",
-      primary_action: () => dialog.hide(),
+      primary_action_label: "保存解析结果",
+      primary_action: async () => {
+        try {
+          await this.saveTaxCertificateParseResult(dialog);
+        } catch (error) {
+          this.showError(error);
+        }
+      },
     });
     dialog.show();
     dialog.$wrapper.addClass("ocw-voucher-modal");
@@ -575,6 +581,10 @@ class OverseasCostWorkbench {
     if (!this.validateVoucherFile(file)) return;
 
     const preview = dialog.$wrapper.data("ocw-voucher-preview") || {};
+    if (!preview.ok) {
+      frappe.msgprint("请先点击「解析预览」，确认凭证已匹配到系统批次后再保存。");
+      return;
+    }
     const canSave = Boolean(preview.reconciliation && preview.reconciliation.batch && preview.reconciliation.batch.name);
     if (!canSave) {
       frappe.msgprint("当前凭证还没有匹配到系统批次，暂不能保存解析结果。");
