@@ -1087,14 +1087,14 @@ class OverseasCostWorkbench {
         const file = this.getImportDialogFile(dialog);
         if (!this.validateImportFile(file)) return;
         const uploaded = dialog.$wrapper.data("ocw-import-upload") || {};
-        dialog.hide();
-        await this.importExcel({
+        const imported = await this.importExcel({
           ...values,
           source_sheet: String(values.source_sheet || "").trim(),
           file: uploaded.file_url ? null : file,
           file_url: uploaded.file_url || null,
           source_name: uploaded.file_name || file.name,
         });
+        if (imported) dialog.hide();
       },
     });
     dialog.show();
@@ -1276,8 +1276,10 @@ class OverseasCostWorkbench {
       this.resetFilterValues();
       await this.loadBatches();
       await this.focusImportedBatches(result, importStats);
+      return true;
     } catch (error) {
       this.showError(error);
+      return false;
     }
   }
 
