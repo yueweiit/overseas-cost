@@ -2370,8 +2370,8 @@ class OverseasCostWorkbench {
             </div>
           `,
           async () => {
-            dialog.hide();
-            await this.createMaterial(batch, itemPayload);
+            const created = await this.createMaterial(batch, itemPayload);
+            if (created) dialog.hide();
           }
         );
       },
@@ -2400,8 +2400,10 @@ class OverseasCostWorkbench {
       this.renderTable();
       this.updateSearchResult();
       frappe.show_alert({ message: result.message || "物料已新增", indicator: "green" });
+      return true;
     } catch (error) {
       this.showError(error);
+      return false;
     }
   }
 
