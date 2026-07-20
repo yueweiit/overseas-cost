@@ -631,11 +631,15 @@ class OverseasCostWorkbench {
       return;
     }
     frappe.show_alert({
-      message: "保存完成，正在返回上一页。",
+      message: "保存完成。",
       indicator: "green",
     });
-    dialog.hide();
-    window.setTimeout(() => this.goBackAfterVoucherSave(), 450);
+    try {
+      await this.loadTaxCertificateRecords(dialog);
+    } catch (error) {
+      this.showError(error);
+    }
+    this.resetVoucherDialogAfterSave(dialog);
   }
 
   async loadTaxCertificateRecords(dialog) {
@@ -877,12 +881,18 @@ class OverseasCostWorkbench {
     }
   }
 
-  goBackAfterVoucherSave() {
-    if (window.history && window.history.length > 1) {
-      window.history.back();
-      return;
-    }
-    this.loadBatches();
+  resetVoucherDialogAfterSave(dialog) {
+    if (!dialog || !dialog.$wrapper) return;
+    const $dropzone = dialog.$wrapper.find("[data-voucher-dropzone='1']");
+    const $input = dialog.$wrapper.find(".ocw-voucher-file-input");
+    dialog.$wrapper.removeData("ocw-voucher-file");
+    dialog.$wrapper.removeData("ocw-voucher-upload");
+    dialog.$wrapper.removeData("ocw-voucher-preview");
+    $dropzone.removeClass("has-file is-dragover");
+    dialog.$wrapper.find("[data-area='voucher-file-name']").text("拖放 PDF 到这里，或点击选择");
+    if ($input.length) $input.val("");
+    this.renderVoucherPreview(dialog, null, "empty");
+    dialog.$wrapper.find("[data-area='voucher-preview-status']").text("保存完成，可继续上传下一份凭证。");
   }
 
   renderVoucherTaxChips(taxes = {}) {
