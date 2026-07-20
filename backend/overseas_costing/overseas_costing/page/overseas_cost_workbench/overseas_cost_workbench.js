@@ -644,6 +644,7 @@ class OverseasCostWorkbench {
     const declaredCount = summary.declared_item_count ?? "--";
     const validationHtml = this.renderVoucherValidation(validation);
     const reconciliation = result.reconciliation || {};
+    if (result.saved_attachment_name) reconciliation.saved_attachment_name = result.saved_attachment_name;
     const reconciliationHtml = this.renderVoucherReconciliation(reconciliation);
     const reconciliationText = reconciliation.status_label ? `，对比${reconciliation.status_label}` : "";
     const canSave = Boolean(reconciliation.batch && reconciliation.batch.name);
@@ -704,6 +705,9 @@ class OverseasCostWorkbench {
     const batchLabel = batch.customs_no || batch.waybill_no || batch.batch_no || batch.container_no || batch.name || "未匹配";
     const declaredCount = voucher.declared_item_count ?? voucher.item_count ?? "--";
     const checkRows = checks.map((check) => this.renderVoucherValidationRow(check)).join("");
+    const saveButton = batch.name
+      ? `<button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="save-voucher-parse">${reconciliation.saved_attachment_name ? "已保存解析结果" : "保存解析结果"}</button>`
+      : `<button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="save-voucher-parse" disabled>保存解析结果</button>`;
 
     return `
       <div class="ocw-voucher-reconciliation ${this.escape(status)}">
@@ -712,7 +716,10 @@ class OverseasCostWorkbench {
             <span>多退少补对比预览</span>
             <strong>${this.escape(reconciliation.status_label || "--")}</strong>
           </div>
-          <p>${this.escape(reconciliation.message || "对比结果仅用于复核，不会自动写入成本。")}</p>
+          <div class="ocw-voucher-reconciliation-action">
+            <p>${this.escape(reconciliation.message || "对比结果仅用于复核，不会自动写入成本。")}</p>
+            ${saveButton}
+          </div>
         </div>
         <div class="ocw-voucher-reconciliation-grid">
           <div><span>匹配批次</span><strong>${this.escape(batchLabel)}</strong></div>

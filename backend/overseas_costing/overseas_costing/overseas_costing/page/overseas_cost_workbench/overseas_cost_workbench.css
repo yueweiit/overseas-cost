@@ -1994,6 +1994,22 @@
   line-height: 1.45;
 }
 
+.ocw-voucher-reconciliation-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ocw-voucher-reconciliation-action p {
+  min-width: 0;
+}
+
+.ocw-voucher-reconciliation-action .ocw-mini-btn {
+  flex: 0 0 auto;
+}
+
 .ocw-voucher-reconciliation-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(110px, 1fr));
