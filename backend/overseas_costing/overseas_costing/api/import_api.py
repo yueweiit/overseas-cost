@@ -179,6 +179,16 @@ def save_tax_certificate_parse_result(
 
 
 @frappe.whitelist()
+def list_tax_certificate_parse_records(batch_name: str | None = None, limit: int | None = 20) -> dict:
+    """查询已保存完税凭证解析记录摘要。"""
+
+    return import_service.list_tax_certificate_parse_records(
+        batch_name=batch_name,
+        limit=limit,
+    )
+
+
+@frappe.whitelist()
 def import_purchase_expense_oa(
     batch_name: str,
     source_instance_id: str | None = None,

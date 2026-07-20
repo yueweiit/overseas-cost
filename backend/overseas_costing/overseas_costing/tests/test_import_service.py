@@ -15,6 +15,7 @@ from overseas_costing.services.import_service import (
     _values_equal_for_import,
     import_main_excel,
     import_purchase_expense_oa,
+    list_tax_certificate_parse_records,
     parse_packing_list_attachment,
     preview_tax_certificate_pdf,
     preview_yuewei_excel_file,
@@ -176,6 +177,55 @@ IVA 16.00000 1 0 32719
     assert result["saved"] is False
     assert result["preview"]["header"]["pedimento_no"] == "26 16 1681 6000151"
     assert result["preview"]["reconciliation"]["voucher"]["paid_total_mxn"] == 129883
+
+
+def test_list_tax_certificate_parse_records_returns_empty_without_frappe() -> None:
+    result = list_tax_certificate_parse_records(batch_name="HPCU5155607")
+
+    assert result["ok"] is True
+    assert result["dry_run"] is True
+    assert result["items"] == []
+
+
+def test_tax_certificate_record_summary_extracts_business_fields() -> None:
+    row = {
+        "name": "ATT-001",
+        "batch": "BATCH-001",
+        "version": "VER-001",
+        "source_doc_no": "26 16 1681 6000151",
+        "file_name": "PD_MZ260108凭证.pdf",
+        "file_url": "/private/files/PD_MZ260108凭证.pdf",
+        "parse_status": "Parsed",
+        "modified": "2026-07-20 10:00:00",
+        "parse_result_json": attachment_parse_service._json_dumps(
+            {
+                "summary": {"item_count": 22, "declared_item_count": 22, "paid_total_mxn": 129883},
+                "header": {"pedimento_no": "26 16 1681 6000151", "container_no": "HPCU5155607", "payment_date": "01/04/2026"},
+                "validation": {"status": "passed", "status_label": "通过"},
+            }
+        ),
+        "mapped_result_json": attachment_parse_service._json_dumps(
+            {
+                "status": "review",
+                "status_label": "需复核",
+                "batch": {"name": "BATCH-001", "batch_no": "HPCU5155607", "customs_no": "26 16 1681 6000151"},
+                "system": {"system_import_tax_total_mxn": 130186},
+                "difference": {"tax_total_diff_mxn": -303, "direction_label": "凭证金额低于系统"},
+                "review_count": 1,
+                "passed_count": 3,
+            }
+        ),
+    }
+
+    result = attachment_parse_service._build_tax_certificate_record_summary(row)
+
+    assert result["name"] == "ATT-001"
+    assert result["customs_no"] == "26 16 1681 6000151"
+    assert result["container_no"] == "HPCU5155607"
+    assert result["paid_total_mxn"] == 129883
+    assert result["system_tax_total_mxn"] == 130186
+    assert result["tax_total_diff_mxn"] == -303
+    assert result["reconciliation_status_label"] == "需复核"
 
 
 def test_tax_certificate_reconciliation_preview_calculates_difference_without_writeback() -> None:

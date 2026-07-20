@@ -458,6 +458,13 @@ class OverseasCostWorkbench {
                 <span data-area="voucher-preview-status">选择文件后可先预览凭证字段。</span>
               </div>
               <div class="ocw-voucher-preview empty" data-area="voucher-preview">尚未解析</div>
+              <div class="ocw-voucher-records">
+                <div class="ocw-voucher-records-head">
+                  <strong>已保存解析记录</strong>
+                  <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="refresh-voucher-records">刷新</button>
+                </div>
+                <div class="ocw-voucher-record-list loading" data-area="voucher-records">加载中</div>
+              </div>
             </div>
           `,
         },
@@ -475,6 +482,7 @@ class OverseasCostWorkbench {
     dialog.$wrapper.addClass("ocw-voucher-modal");
     dialog.$wrapper.data("ocw-voucher-batch-name", batchName);
     this.bindVoucherDropzone(dialog);
+    this.loadTaxCertificateRecords(dialog).catch((error) => this.showError(error));
   }
 
   bindVoucherDropzone(dialog) {
@@ -517,6 +525,15 @@ class OverseasCostWorkbench {
     dialog.$wrapper.on("click", "[data-action='save-voucher-parse']", (event) => {
       event.preventDefault();
       this.saveTaxCertificateParseResult(dialog).catch((error) => this.showError(error));
+    });
+    dialog.$wrapper.on("click", "[data-action='refresh-voucher-records']", (event) => {
+      event.preventDefault();
+      this.loadTaxCertificateRecords(dialog).catch((error) => this.showError(error));
+    });
+    dialog.$wrapper.on("click", "[data-action='open-voucher-record']", (event) => {
+      event.preventDefault();
+      const recordName = $(event.currentTarget).attr("data-record-name");
+      if (recordName) frappe.set_route("Form", "Overseas Cost Attachment", recordName);
     });
   }
 
@@ -609,10 +626,67 @@ class OverseasCostWorkbench {
       dialog.$wrapper.data("ocw-voucher-preview", result.preview);
       this.renderVoucherPreview(dialog, result.preview, "ready");
     }
+    await this.loadTaxCertificateRecords(dialog);
     frappe.show_alert({
       message: result.message || "完税凭证解析结果已保存。",
       indicator: "green",
     });
+  }
+
+  async loadTaxCertificateRecords(dialog) {
+    const $records = dialog.$wrapper.find("[data-area='voucher-records']");
+    $records.removeClass("empty ready").addClass("loading").text("加载中");
+    const result = await this.call(
+      "overseas_costing.api.import_api.list_tax_certificate_parse_records",
+      {
+        batch_name: dialog.$wrapper.data("ocw-voucher-batch-name") || "",
+        limit: 10,
+      },
+      false
+    );
+    this.renderTaxCertificateRecords(dialog, result);
+  }
+
+  renderTaxCertificateRecords(dialog, result) {
+    const $records = dialog.$wrapper.find("[data-area='voucher-records']");
+    const items = (result && result.items) || [];
+    $records.removeClass("loading ready empty");
+    if (!items.length) {
+      $records.addClass("empty").text("暂无保存记录");
+      return;
+    }
+    const fallbackTip = result.fallback_recent ? `<div class="ocw-voucher-record-tip">当前批次暂无凭证记录，以下为最近保存记录。</div>` : "";
+    $records.addClass("ready").html(`
+      ${fallbackTip}
+      ${items.map((row) => this.renderTaxCertificateRecord(row)).join("")}
+    `);
+  }
+
+  renderTaxCertificateRecord(row) {
+    const batch = row.batch || {};
+    const statusClass = this.voucherValidationPreviewClass(row.reconciliation_status || row.validation_status || "review");
+    const batchLabel = batch.customs_no || batch.waybill_no || batch.batch_no || batch.name || "--";
+    const itemCount = `${row.item_count || 0} / ${row.declared_item_count ?? "--"}`;
+    return `
+      <div class="ocw-voucher-record ${this.escape(statusClass)}">
+        <div class="ocw-voucher-record-main">
+          <strong>${this.escape(row.source_doc_no || row.customs_no || "--")}</strong>
+          <span>${this.escape(batchLabel)} · ${this.escape(row.file_name || "--")}</span>
+        </div>
+        <div class="ocw-voucher-record-grid">
+          <div><span>状态</span><b>${this.escape(row.reconciliation_status_label || row.validation_status_label || row.parse_status || "--")}</b></div>
+          <div><span>凭证税费 MXN</span><b>${this.escape(this.formatValidationValue(row.paid_total_mxn))}</b></div>
+          <div><span>系统税费 MXN</span><b>${this.escape(this.formatValidationValue(row.system_tax_total_mxn))}</b></div>
+          <div><span>差额 MXN</span><b>${this.escape(this.formatValidationValue(row.tax_total_diff_mxn))}</b></div>
+          <div><span>差额方向</span><b>${this.escape(row.direction_label || "--")}</b></div>
+          <div><span>行数</span><b>${this.escape(itemCount)}</b></div>
+          <div><span>保存时间</span><b>${this.escape(this.formatValue(row.modified || row.creation || "--"))}</b></div>
+          <div>
+            <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="open-voucher-record" data-record-name="${this.escape(row.name)}">查看记录</button>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   renderVoucherPreview(dialog, result, state = "empty") {

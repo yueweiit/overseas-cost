@@ -1757,6 +1757,132 @@
   line-height: 1.4;
 }
 
+.ocw-voucher-records {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--ocw-line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.ocw-voucher-records-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ocw-voucher-records-head strong {
+  color: var(--ocw-ink);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.ocw-voucher-record-list {
+  display: grid;
+  gap: 8px;
+  min-height: 34px;
+}
+
+.ocw-voucher-record-list.loading,
+.ocw-voucher-record-list.empty {
+  place-items: center;
+  color: var(--ocw-muted);
+  font-size: 12px;
+  font-weight: 800;
+  border: 1px dashed var(--ocw-line);
+  border-radius: 8px;
+  background: #f7faf9;
+}
+
+.ocw-voucher-record-tip {
+  padding: 7px 9px;
+  color: #9a5b00;
+  font-size: 12px;
+  font-weight: 800;
+  border: 1px solid #ffe2ad;
+  border-radius: 8px;
+  background: #fffaf2;
+}
+
+.ocw-voucher-record {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid var(--ocw-line);
+  border-radius: 8px;
+  background: #fbfcfc;
+}
+
+.ocw-voucher-record.warn,
+.ocw-voucher-record.failed {
+  background: #fffaf2;
+}
+
+.ocw-voucher-record-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ocw-voucher-record-main strong,
+.ocw-voucher-record-main span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocw-voucher-record-main strong {
+  color: var(--ocw-ink);
+  font-family: var(--ocw-mono);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.ocw-voucher-record-main span {
+  color: var(--ocw-muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.ocw-voucher-record-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 6px;
+}
+
+.ocw-voucher-record-grid div {
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid #edf2f1;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.ocw-voucher-record-grid span {
+  display: block;
+  color: var(--ocw-muted);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.ocw-voucher-record-grid b {
+  display: block;
+  min-width: 0;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--ocw-ink);
+  font-family: var(--ocw-mono);
+  font-size: 12px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ocw-voucher-file-input {
   position: absolute;
   width: 1px;

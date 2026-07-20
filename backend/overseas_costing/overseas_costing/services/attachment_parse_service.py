@@ -168,6 +168,42 @@ def save_tax_certificate_parse_result(
     }
 
 
+def list_tax_certificate_parse_records(batch_name: str | None = None, limit: int | None = 20) -> dict:
+    """返回已保存完税凭证解析记录摘要，方便前端展示。"""
+
+    if not _has_frappe_db_context():
+        return {
+            "ok": True,
+            "dry_run": True,
+            "batch_name": batch_name or "",
+            "items": [],
+            "total": 0,
+            "message": "当前未连接 Frappe，返回空解析记录。",
+        }
+
+    resolved_batch = _find_tax_certificate_batch({}, batch_name=batch_name) if batch_name else None
+    requested_limit = max(1, min(int(limit or 20), 100))
+    records = _query_tax_certificate_attachment_records(
+        batch_name=resolved_batch.get("name") if resolved_batch else None,
+        limit=requested_limit,
+    )
+    fallback_recent = False
+    if batch_name and resolved_batch and not records:
+        records = _query_tax_certificate_attachment_records(limit=requested_limit)
+        fallback_recent = True
+
+    items = [_build_tax_certificate_record_summary(row) for row in records]
+    return {
+        "ok": True,
+        "batch_name": batch_name or "",
+        "resolved_batch": _public_batch_snapshot(resolved_batch),
+        "fallback_recent": fallback_recent,
+        "items": items,
+        "total": len(items),
+        "message": "完税凭证解析记录已返回。",
+    }
+
+
 def extract_pdf_text(*, file_path: str | None = None, file_url: str | None = None) -> str:
     """从 PDF 中抽取文本；运行环境没有 PDF 库时给出明确提示。"""
 
@@ -641,6 +677,75 @@ def _find_existing_tax_certificate_attachment(values: dict) -> str | None:
     return rows[0]["name"] if rows else None
 
 
+def _query_tax_certificate_attachment_records(*, batch_name: str | None = None, limit: int = 20) -> list[dict]:
+    filters = {
+        "source_type": "Voucher",
+        "attachment_type": "Tax Certificate",
+    }
+    if batch_name:
+        filters["batch"] = batch_name
+    return frappe.get_all(
+        "Overseas Cost Attachment",
+        filters=filters,
+        fields=[
+            "name",
+            "batch",
+            "version",
+            "source_doc_no",
+            "file_name",
+            "file_url",
+            "parse_status",
+            "parse_result_json",
+            "mapped_result_json",
+            "modified",
+            "creation",
+        ],
+        order_by="modified desc",
+        limit_page_length=limit,
+    )
+
+
+def _build_tax_certificate_record_summary(row: dict) -> dict:
+    parse_result = _json_loads(row.get("parse_result_json")) or {}
+    mapped_result = _json_loads(row.get("mapped_result_json")) or {}
+    header = parse_result.get("header") or {}
+    summary = parse_result.get("summary") or {}
+    validation = parse_result.get("validation") or {}
+    voucher = mapped_result.get("voucher") or {}
+    system = mapped_result.get("system") or {}
+    difference = mapped_result.get("difference") or {}
+    batch = mapped_result.get("batch") or {}
+    return {
+        "name": row.get("name") or "",
+        "batch": batch or {"name": row.get("batch") or ""},
+        "version": row.get("version") or "",
+        "source_doc_no": row.get("source_doc_no") or header.get("pedimento_no") or "",
+        "file_name": row.get("file_name") or parse_result.get("source_name") or "",
+        "file_url": row.get("file_url") or "",
+        "parse_status": row.get("parse_status") or "",
+        "modified": row.get("modified") or "",
+        "creation": row.get("creation") or "",
+        "customs_no": header.get("pedimento_no") or voucher.get("customs_no") or row.get("source_doc_no") or "",
+        "container_no": header.get("container_no") or voucher.get("container_no") or "",
+        "pedimento_ref": header.get("pedimento_ref") or voucher.get("pedimento_ref") or "",
+        "payment_date": header.get("payment_date") or voucher.get("payment_date") or "",
+        "paid_total_mxn": summary.get("paid_total_mxn") if summary.get("paid_total_mxn") is not None else voucher.get("paid_total_mxn"),
+        "tax_total_sum_mxn": summary.get("tax_total_sum_mxn"),
+        "system_tax_total_mxn": system.get("system_import_tax_total_mxn"),
+        "tax_total_diff_mxn": difference.get("tax_total_diff_mxn"),
+        "direction_label": difference.get("direction_label") or "",
+        "item_count": summary.get("item_count") or voucher.get("item_count") or 0,
+        "declared_item_count": summary.get("declared_item_count") or voucher.get("declared_item_count"),
+        "validation_status": validation.get("status") or summary.get("validation_status") or "",
+        "validation_status_label": validation.get("status_label") or summary.get("validation_status_label") or "",
+        "reconciliation_status": mapped_result.get("status") or "",
+        "reconciliation_status_label": mapped_result.get("status_label") or "",
+        "review_count": mapped_result.get("review_count") or 0,
+        "failed_count": mapped_result.get("failed_count") or 0,
+        "passed_count": mapped_result.get("passed_count") or 0,
+    }
+
+
 def _find_tax_certificate_batch(header: dict, batch_name: str | None = None) -> dict | None:
     fields = [
         "name",
@@ -958,6 +1063,16 @@ def _round_money(value, digits: int = 2) -> float:
 
 def _json_dumps(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def _json_loads(value) -> dict:
+    if not value:
+        return {}
+    try:
+        loaded = json.loads(value)
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _clean_spaces(value: str) -> str:
