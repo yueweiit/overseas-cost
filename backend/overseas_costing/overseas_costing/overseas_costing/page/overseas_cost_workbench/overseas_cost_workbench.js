@@ -2297,8 +2297,8 @@ class OverseasCostWorkbench {
             </div>
           `,
           async () => {
-            dialog.hide();
-            await this.createBatch(batchPayload);
+            const created = await this.createBatch(batchPayload);
+            if (created) dialog.hide();
           }
         );
       },
@@ -2327,8 +2327,10 @@ class OverseasCostWorkbench {
         this.updateSearchResult();
       }
       frappe.show_alert({ message: result.message || "报关运单已新增", indicator: "green" });
+      return true;
     } catch (error) {
       this.showError(error);
+      return false;
     }
   }
 
