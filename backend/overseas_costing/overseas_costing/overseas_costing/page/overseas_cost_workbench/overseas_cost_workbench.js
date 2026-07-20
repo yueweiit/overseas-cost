@@ -533,7 +533,7 @@ class OverseasCostWorkbench {
     dialog.$wrapper.on("click", "[data-action='open-voucher-record']", (event) => {
       event.preventDefault();
       const recordName = $(event.currentTarget).attr("data-record-name");
-      if (recordName) frappe.set_route("Form", "Overseas Cost Attachment", recordName);
+      if (recordName) this.openTaxCertificateRecordDialog(recordName).catch((error) => this.showError(error));
     });
   }
 
@@ -681,10 +681,101 @@ class OverseasCostWorkbench {
           <div><span>差额方向</span><b>${this.escape(row.direction_label || "--")}</b></div>
           <div><span>行数</span><b>${this.escape(itemCount)}</b></div>
           <div><span>保存时间</span><b>${this.escape(this.formatValue(row.modified || row.creation || "--"))}</b></div>
-          <div>
+          <div class="ocw-voucher-record-action">
             <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="open-voucher-record" data-record-name="${this.escape(row.name)}">查看记录</button>
           </div>
         </div>
+      </div>
+    `;
+  }
+
+  async openTaxCertificateRecordDialog(recordName) {
+    const result = await this.call(
+      "overseas_costing.api.import_api.get_tax_certificate_parse_record",
+      { record_name: recordName },
+      true
+    );
+    if (!result || !result.ok) {
+      frappe.msgprint((result && result.message) || "未能读取完税凭证解析记录。");
+      return;
+    }
+
+    const detailDialog = new frappe.ui.Dialog({
+      title: "完税凭证解析记录",
+      fields: [
+        {
+          fieldtype: "HTML",
+          fieldname: "voucher_record_detail",
+          options: this.renderTaxCertificateRecordDetail(result),
+        },
+      ],
+      primary_action_label: "关闭",
+      primary_action: () => detailDialog.hide(),
+    });
+    detailDialog.show();
+    detailDialog.$wrapper.addClass("ocw-voucher-modal ocw-voucher-record-modal");
+  }
+
+  renderTaxCertificateRecordDetail(result) {
+    const record = result.record_summary || {};
+    const parseResult = result.parse_result || {};
+    const mappedResult = result.mapped_result || {};
+    const header = parseResult.header || {};
+    const summary = parseResult.summary || {};
+    const taxes = parseResult.tax_totals || {};
+    const items = parseResult.line_items || [];
+    const validation = parseResult.validation || {};
+    const validationStatus = validation.status || record.validation_status || "review";
+    const validationText = validation.status_label || record.validation_status_label || "--";
+    const batch = record.batch || mappedResult.batch || {};
+    const batchLabel = batch.customs_no || batch.waybill_no || batch.batch_no || batch.container_no || batch.name || "--";
+    const itemCount = `${summary.item_count || items.length || record.item_count || 0} / ${summary.declared_item_count ?? record.declared_item_count ?? "--"}`;
+    const rows = items.map((row) => this.renderVoucherItemRow(row)).join("");
+
+    return `
+      <div class="ocw-voucher-record-detail">
+        <div class="ocw-voucher-validation-head ${this.escape(validationStatus)}">
+          <div>
+            <span>解析校验</span>
+            <strong>${this.escape(validationText)}</strong>
+          </div>
+          <p>这是已保存的解析快照，只用于复看和复核，不会重新解析文件或写入成本字段。</p>
+        </div>
+        <div class="ocw-voucher-summary">
+          <div><span>报关单号</span><strong>${this.escape(record.customs_no || header.pedimento_no || "--")}</strong></div>
+          <div><span>凭证参考号</span><strong>${this.escape(header.pedimento_ref || header.pedimento_short_no || record.pedimento_ref || "--")}</strong></div>
+          <div><span>柜号</span><strong>${this.escape(record.container_no || header.container_no || "--")}</strong></div>
+          <div><span>匹配批次</span><strong>${this.escape(batchLabel)}</strong></div>
+          <div><span>文件名</span><strong title="${this.escape(record.file_name || parseResult.source_name || "")}">${this.escape(record.file_name || parseResult.source_name || "--")}</strong></div>
+          <div><span>支付日期</span><strong>${this.escape(header.payment_date || record.payment_date || "--")}</strong></div>
+          <div><span>汇率</span><strong>${this.escape(this.formatValidationValue(header.exchange_rate))}</strong></div>
+          <div><span>毛重 KG</span><strong>${this.escape(this.formatValidationValue(header.gross_weight_kg))}</strong></div>
+          <div><span>支付总额 MXN</span><strong>${this.escape(this.formatValidationValue(summary.paid_total_mxn ?? record.paid_total_mxn))}</strong></div>
+          <div><span>税费合计 MXN</span><strong>${this.escape(this.formatValidationValue(summary.tax_total_sum_mxn ?? record.tax_total_sum_mxn))}</strong></div>
+          <div><span>保存时间</span><strong>${this.escape(this.formatValue(record.modified || record.creation || "--"))}</strong></div>
+          <div><span>商品分项</span><strong>${this.escape(itemCount)}</strong></div>
+        </div>
+        <div class="ocw-voucher-tax-chips">${this.renderVoucherTaxChips(taxes)}</div>
+        ${this.renderVoucherReconciliation(mappedResult, { showSaveButton: false })}
+        ${this.renderVoucherValidation(validation)}
+        <div class="ocw-voucher-table-wrap">
+          <table class="ocw-voucher-table">
+            <thead>
+              <tr>
+                <th>序号</th>
+                <th>HS 编码</th>
+                <th>海关进口名称</th>
+                <th>数量</th>
+                <th>IGI 税率</th>
+                <th>IGI 税额</th>
+                <th>IVA 税率</th>
+                <th>IVA 税额</th>
+              </tr>
+            </thead>
+            <tbody>${rows || `<tr><td colspan="8">未识别到商品分项</td></tr>`}</tbody>
+          </table>
+        </div>
+        <div class="ocw-voucher-more">共 ${this.escape(String(items.length || 0))} 条分项。</div>
       </div>
     `;
   }
@@ -714,15 +805,7 @@ class OverseasCostWorkbench {
     const validationStatus = validation.status || (summary.tax_total_matches_paid_total ? "passed" : "review");
     const statusText = validation.status_label || (summary.tax_total_matches_paid_total ? "通过" : "需复核");
     const statusClass = this.voucherValidationPreviewClass(validationStatus);
-    const taxChips = [
-      ["DTA", taxes.dta_mxn],
-      ["PRV", taxes.prv_mxn],
-      ["PRV IVA", taxes.prv_iva_mxn],
-      ["IGI/IGE", taxes.igi_mxn],
-      ["IVA", taxes.iva_mxn],
-    ]
-      .map(([label, value]) => `<span>${this.escape(label)} ${this.escape(this.formatNumber(value || 0))}</span>`)
-      .join("");
+    const taxChips = this.renderVoucherTaxChips(taxes);
     const rows = items.slice(0, 30).map((row) => this.renderVoucherItemRow(row)).join("");
     const moreText = items.length > 30 ? `<div class="ocw-voucher-more">仅展示前 30 条，共 ${this.escape(String(items.length))} 条。</div>` : "";
     const declaredCount = summary.declared_item_count ?? "--";
@@ -778,8 +861,21 @@ class OverseasCostWorkbench {
     `);
   }
 
-  renderVoucherReconciliation(reconciliation) {
+  renderVoucherTaxChips(taxes = {}) {
+    return [
+      ["DTA", taxes.dta_mxn],
+      ["PRV", taxes.prv_mxn],
+      ["PRV IVA", taxes.prv_iva_mxn],
+      ["IGI/IGE", taxes.igi_mxn],
+      ["IVA", taxes.iva_mxn],
+    ]
+      .map(([label, value]) => `<span>${this.escape(label)} ${this.escape(this.formatNumber(value || 0))}</span>`)
+      .join("");
+  }
+
+  renderVoucherReconciliation(reconciliation, options = {}) {
     if (!reconciliation || !Object.keys(reconciliation).length) return "";
+    const showSaveButton = options.showSaveButton !== false;
     const batch = reconciliation.batch || {};
     const voucher = reconciliation.voucher || {};
     const system = reconciliation.system || {};
@@ -789,9 +885,11 @@ class OverseasCostWorkbench {
     const batchLabel = batch.customs_no || batch.waybill_no || batch.batch_no || batch.container_no || batch.name || "未匹配";
     const declaredCount = voucher.declared_item_count ?? voucher.item_count ?? "--";
     const checkRows = checks.map((check) => this.renderVoucherValidationRow(check)).join("");
-    const saveButton = batch.name
-      ? `<button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="save-voucher-parse">${reconciliation.saved_attachment_name ? "已保存解析结果" : "保存解析结果"}</button>`
-      : `<button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="save-voucher-parse" disabled>保存解析结果</button>`;
+    const saveButton = !showSaveButton
+      ? ""
+      : batch.name
+        ? `<button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="save-voucher-parse">${reconciliation.saved_attachment_name ? "已保存解析结果" : "保存解析结果"}</button>`
+        : `<button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="save-voucher-parse" disabled>保存解析结果</button>`;
 
     return `
       <div class="ocw-voucher-reconciliation ${this.escape(status)}">

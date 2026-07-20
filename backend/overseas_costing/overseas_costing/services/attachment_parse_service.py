@@ -204,6 +204,66 @@ def list_tax_certificate_parse_records(batch_name: str | None = None, limit: int
     }
 
 
+def get_tax_certificate_parse_record(record_name: str | None = None) -> dict:
+    """返回单条完税凭证解析快照详情，不暴露原始 DocType 表单给业务页面。"""
+
+    if not record_name:
+        return {
+            "ok": False,
+            "message": "请传入要查看的解析记录。",
+        }
+
+    if not _has_frappe_db_context():
+        return {
+            "ok": False,
+            "dry_run": True,
+            "record_name": record_name,
+            "message": "当前未连接 Frappe，无法读取已保存的解析记录。",
+        }
+
+    if not frappe.db.exists("Overseas Cost Attachment", record_name):
+        return {
+            "ok": False,
+            "record_name": record_name,
+            "message": "未找到对应的完税凭证解析记录。",
+        }
+
+    fields = [
+        "name",
+        "batch",
+        "version",
+        "source_type",
+        "attachment_type",
+        "source_doc_no",
+        "file_name",
+        "file_url",
+        "parse_status",
+        "parse_result_json",
+        "mapped_result_json",
+        "modified",
+        "creation",
+    ]
+    row = frappe.db.get_value("Overseas Cost Attachment", record_name, fields, as_dict=True) or {}
+    row["name"] = row.get("name") or record_name
+    if row.get("source_type") != "Voucher" or row.get("attachment_type") != "Tax Certificate":
+        return {
+            "ok": False,
+            "record_name": record_name,
+            "message": "该附件记录不是完税凭证解析记录。",
+        }
+
+    parse_result = _json_loads(row.get("parse_result_json"))
+    mapped_result = _json_loads(row.get("mapped_result_json"))
+    return {
+        "ok": True,
+        "record_name": record_name,
+        "record_summary": _build_tax_certificate_record_summary(row),
+        "parse_result": parse_result,
+        "mapped_result": mapped_result,
+        "message": "完税凭证解析记录详情已返回。",
+    }
+
+
 def extract_pdf_text(*, file_path: str | None = None, file_url: str | None = None) -> str:
     """从 PDF 中抽取文本；运行环境没有 PDF 库时给出明确提示。"""
 

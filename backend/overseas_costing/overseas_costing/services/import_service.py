@@ -418,6 +418,12 @@ def list_tax_certificate_parse_records(batch_name: str | None = None, limit: int
     )
 
 
+def get_tax_certificate_parse_record(record_name: str | None = None) -> dict:
+    """查询单条完税凭证解析快照详情。"""
+
+    return attachment_parse_service.get_tax_certificate_parse_record(record_name=record_name)
+
+
 def _load_rows(rows_json: str | None) -> list[dict]:
     if not rows_json:
         return []

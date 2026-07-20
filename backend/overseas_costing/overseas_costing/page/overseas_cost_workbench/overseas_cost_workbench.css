@@ -1883,6 +1883,21 @@
   white-space: nowrap;
 }
 
+.ocw-voucher-record-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ocw-voucher-record-action .ocw-mini-btn {
+  width: 100%;
+}
+
+.ocw-voucher-record-detail {
+  display: grid;
+  gap: 10px;
+}
+
 .ocw-voucher-file-input {
   position: absolute;
   width: 1px;

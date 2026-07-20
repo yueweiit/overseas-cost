@@ -13,6 +13,7 @@ from overseas_costing.services.import_service import (
     _coerce_item_numeric_defaults,
     _ensure_supported_excel_path,
     _values_equal_for_import,
+    get_tax_certificate_parse_record,
     import_main_excel,
     import_purchase_expense_oa,
     list_tax_certificate_parse_records,
@@ -185,6 +186,14 @@ def test_list_tax_certificate_parse_records_returns_empty_without_frappe() -> No
     assert result["ok"] is True
     assert result["dry_run"] is True
     assert result["items"] == []
+
+
+def test_get_tax_certificate_parse_record_requires_frappe_context() -> None:
+    result = get_tax_certificate_parse_record(record_name="ATT-001")
+
+    assert result["ok"] is False
+    assert result["dry_run"] is True
+    assert result["record_name"] == "ATT-001"
 
 
 def test_tax_certificate_record_summary_extracts_business_fields() -> None:
