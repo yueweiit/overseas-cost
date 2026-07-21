@@ -731,6 +731,10 @@ class OverseasCostWorkbench {
       event.preventDefault();
       this.submitVoucherManualResolution(detailDialog, recordName).catch((error) => this.showError(error));
     });
+    detailDialog.$wrapper.on("change", "[data-field='resolution_confirm']", (event) => {
+      const checked = $(event.currentTarget).is(":checked");
+      detailDialog.$wrapper.find("[data-action='resolve-voucher-record']").prop("disabled", !checked);
+    });
   }
 
   renderTaxCertificateRecordDetail(result) {
@@ -888,8 +892,12 @@ class OverseasCostWorkbench {
             <span>处理备注</span>
             <input type="text" data-field="resolution_remark" value="${this.escape(resolution.remark || "")}" placeholder="例如：差额 303 为尾差，财务确认可接受" />
           </label>
+          <label class="ocw-voucher-resolution-confirm">
+            <input type="checkbox" data-field="resolution_confirm" />
+            <span>我确认按当前处理方式保存本次差异处理记录</span>
+          </label>
           <div class="ocw-voucher-resolution-actions">
-            <button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="resolve-voucher-record">提交处理结果</button>
+            <button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="resolve-voucher-record" disabled>提交处理结果</button>
           </div>
         </div>
         ${savedHtml}
@@ -903,6 +911,11 @@ class OverseasCostWorkbench {
     const action = $wrapper.find("[data-field='resolution_action']").val();
     const adjusted = String($wrapper.find("[data-field='adjusted_tax_total_mxn']").val() || "").trim();
     const remark = String($wrapper.find("[data-field='resolution_remark']").val() || "").trim();
+    const confirmed = $wrapper.find("[data-field='resolution_confirm']").is(":checked");
+    if (!confirmed) {
+      frappe.msgprint("请先勾选确认后再提交处理结果。");
+      return;
+    }
     const doSave = async () => {
       const result = await this.call(
         "overseas_costing.api.import_api.resolve_tax_certificate_reconciliation",

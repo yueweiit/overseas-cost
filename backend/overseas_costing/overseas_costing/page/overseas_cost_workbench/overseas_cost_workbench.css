@@ -2343,6 +2343,41 @@
   background: #fff;
 }
 
+.ocw-voucher-resolution-form .ocw-voucher-resolution-confirm {
+  display: inline-flex;
+  grid-column: 1 / -1;
+  flex-direction: row;
+  gap: 7px;
+  align-items: center;
+  justify-content: flex-start;
+  width: fit-content;
+  min-height: 24px;
+  margin: 2px 0 0;
+  color: var(--ocw-ink);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.ocw-voucher-resolution-form .ocw-voucher-resolution-confirm input {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  min-height: 15px;
+  margin: 0;
+  padding: 0;
+  border-radius: 4px;
+  accent-color: var(--ocw-brand);
+}
+
+.ocw-voucher-resolution-form .ocw-voucher-resolution-confirm span {
+  display: inline;
+  color: var(--ocw-ink);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .ocw-voucher-resolution-actions {
   display: flex;
   grid-column: 1 / -1;
@@ -2357,6 +2392,12 @@
   color: #fff;
   border-color: var(--ocw-brand);
   background: var(--ocw-brand);
+}
+
+.ocw-voucher-resolution-actions > .ocw-primary-btn:disabled {
+  color: rgba(255, 255, 255, 0.72);
+  border-color: #b8c9c6;
+  background: #b8c9c6;
 }
 
 @media (max-width: 900px) {
