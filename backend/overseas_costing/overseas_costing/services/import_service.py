@@ -424,6 +424,22 @@ def get_tax_certificate_parse_record(record_name: str | None = None) -> dict:
     return attachment_parse_service.get_tax_certificate_parse_record(record_name=record_name)
 
 
+def resolve_tax_certificate_reconciliation(
+    record_name: str | None = None,
+    resolution_action: str | None = None,
+    adjusted_tax_total_mxn: float | str | None = None,
+    remark: str | None = None,
+) -> dict:
+    """保存完税凭证差异人工处理结果，不写成本字段。"""
+
+    return attachment_parse_service.resolve_tax_certificate_reconciliation(
+        record_name=record_name,
+        resolution_action=resolution_action,
+        adjusted_tax_total_mxn=adjusted_tax_total_mxn,
+        remark=remark,
+    )
+
+
 def _load_rows(rows_json: str | None) -> list[dict]:
     if not rows_json:
         return []

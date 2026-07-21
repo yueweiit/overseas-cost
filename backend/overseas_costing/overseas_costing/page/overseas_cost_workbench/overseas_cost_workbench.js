@@ -479,6 +479,7 @@ class OverseasCostWorkbench {
     });
     dialog.show();
     dialog.$wrapper.addClass("ocw-voucher-modal");
+    this.activeVoucherParseDialog = dialog;
     dialog.$wrapper.data("ocw-voucher-batch-name", batchName);
     this.updateVoucherPrimarySaveAction(dialog, false);
     this.bindVoucherDropzone(dialog);
@@ -673,9 +674,11 @@ class OverseasCostWorkbench {
 
   renderTaxCertificateRecord(row) {
     const batch = row.batch || {};
+    const resolution = row.manual_resolution || {};
     const statusClass = this.voucherValidationPreviewClass(row.reconciliation_status || row.validation_status || "review");
     const batchLabel = batch.customs_no || batch.waybill_no || batch.batch_no || batch.name || "--";
     const itemCount = `${row.item_count || 0} / ${row.declared_item_count ?? "--"}`;
+    const resolutionLabel = resolution.status_label || row.manual_resolution_status_label || "未处理";
     return `
       <div class="ocw-voucher-record ${this.escape(statusClass)}">
         <div class="ocw-voucher-record-main">
@@ -688,6 +691,7 @@ class OverseasCostWorkbench {
           <div><span>系统税费 MXN</span><b>${this.escape(this.formatValidationValue(row.system_tax_total_mxn))}</b></div>
           <div><span>差额 MXN</span><b>${this.escape(this.formatValidationValue(row.tax_total_diff_mxn))}</b></div>
           <div><span>差额方向</span><b>${this.escape(row.direction_label || "--")}</b></div>
+          <div><span>人工处理</span><b>${this.escape(resolutionLabel)}</b></div>
           <div><span>行数</span><b>${this.escape(itemCount)}</b></div>
           <div><span>保存时间</span><b>${this.escape(this.formatValue(row.modified || row.creation || "--"))}</b></div>
           <div class="ocw-voucher-record-action">
@@ -723,6 +727,10 @@ class OverseasCostWorkbench {
     });
     detailDialog.show();
     detailDialog.$wrapper.addClass("ocw-voucher-modal ocw-voucher-record-modal");
+    detailDialog.$wrapper.on("click", "[data-action='resolve-voucher-record']", (event) => {
+      event.preventDefault();
+      this.submitVoucherManualResolution(detailDialog, recordName).catch((error) => this.showError(error));
+    });
   }
 
   renderTaxCertificateRecordDetail(result) {
@@ -766,6 +774,7 @@ class OverseasCostWorkbench {
         </div>
         <div class="ocw-voucher-tax-chips">${this.renderVoucherTaxChips(taxes)}</div>
         ${this.renderVoucherReconciliation(mappedResult, { showSaveButton: false })}
+        ${this.renderVoucherManualResolution(record, mappedResult)}
         ${this.renderVoucherValidation(validation)}
         <div class="ocw-voucher-table-wrap">
           <table class="ocw-voucher-table">
@@ -787,6 +796,135 @@ class OverseasCostWorkbench {
         <div class="ocw-voucher-more">共 ${this.escape(String(items.length || 0))} 条分项。</div>
       </div>
     `;
+  }
+
+  renderVoucherManualResolution(record, mappedResult = {}) {
+    const resolution = mappedResult.manual_resolution || record.manual_resolution || {};
+    const voucher = mappedResult.voucher || {};
+    const system = mappedResult.system || {};
+    const diff = mappedResult.difference || {};
+    const hasResolution = Boolean(resolution.action);
+    const selected = resolution.action || "accept_difference";
+    const adjustedValue = resolution.final_source === "manual_adjust" ? resolution.final_tax_total_mxn : "";
+    const rawHistory = Array.isArray(mappedResult.manual_resolution_history) ? mappedResult.manual_resolution_history : [];
+    const history = rawHistory.slice();
+    if (hasResolution) {
+      const currentKey = `${resolution.resolved_at || ""}|${resolution.action || ""}|${resolution.final_tax_total_mxn ?? ""}`;
+      const hasCurrent = history.some((item) => {
+        const row = item || {};
+        return `${row.resolved_at || ""}|${row.action || ""}|${row.final_tax_total_mxn ?? ""}` === currentKey;
+      });
+      if (!hasCurrent) {
+        history.push(resolution);
+      }
+    }
+    const options = [
+      ["accept_difference", "确认差异可接受"],
+      ["mark_exception", "备注异常"],
+      ["use_voucher", "按凭证金额为准"],
+      ["keep_system", "保留系统金额"],
+      ["manual_adjust", "手工调整金额"],
+    ]
+      .map(([value, label]) => `<option value="${this.escape(value)}" ${selected === value ? "selected" : ""}>${this.escape(label)}</option>`)
+      .join("");
+    const savedHtml = hasResolution
+      ? `
+        <div class="ocw-voucher-resolution-saved">
+          <div><span>当前处理</span><strong>${this.escape(resolution.status_label || resolution.action_label || "--")}</strong></div>
+          <div><span>采用金额 MXN</span><strong>${this.escape(this.formatValidationValue(resolution.final_tax_total_mxn))}</strong></div>
+          <div><span>采用依据</span><strong>${this.escape(resolution.final_source_label || "--")}</strong></div>
+          <div><span>处理人</span><strong>${this.escape(resolution.resolved_by || "--")}</strong></div>
+          <div><span>处理时间</span><strong>${this.escape(resolution.resolved_at || "--")}</strong></div>
+          <p>${this.escape(resolution.message || resolution.remark || "")}</p>
+        </div>
+      `
+      : `<div class="ocw-voucher-resolution-empty">当前差异尚未人工处理。</div>`;
+    const historyHtml = history.length
+      ? `
+        <div class="ocw-voucher-resolution-history">
+          <span>处理记录</span>
+          ${history
+            .slice()
+            .reverse()
+            .slice(0, 8)
+            .map((item) => {
+              const row = item || {};
+              return `
+                <div>
+                  <strong>${this.escape(row.action_label || row.status_label || "--")}</strong>
+                  <em>${this.escape(row.resolved_at || "--")} / ${this.escape(row.resolved_by || "--")}</em>
+                  <small>${this.escape(row.message || row.remark || "未填写备注")}</small>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
+      `
+      : "";
+    return `
+      <div class="ocw-voucher-resolution">
+        <div class="ocw-voucher-resolution-head">
+          <div>
+            <span>人工处理差异</span>
+            <strong>${this.escape(hasResolution ? "已处理，可重新调整" : "待处理")}</strong>
+          </div>
+          <p>可选择凭证金额、系统金额或手工调整金额为准；这里只保存处理记录，不会自动改成本字段。</p>
+        </div>
+        <div class="ocw-voucher-resolution-grid">
+          <div><span>凭证税费 MXN</span><strong>${this.escape(this.formatValidationValue(voucher.paid_total_mxn))}</strong></div>
+          <div><span>系统税费 MXN</span><strong>${this.escape(this.formatValidationValue(system.system_import_tax_total_mxn))}</strong></div>
+          <div><span>原差额 MXN</span><strong>${this.escape(this.formatValidationValue(diff.tax_total_diff_mxn))}</strong></div>
+          <div><span>方向</span><strong>${this.escape(diff.direction_label || "--")}</strong></div>
+        </div>
+        ${savedHtml}
+        ${historyHtml}
+        <div class="ocw-voucher-resolution-form">
+          <label>
+            <span>处理方式</span>
+            <select data-field="resolution_action">${options}</select>
+          </label>
+          <label>
+            <span>调整后税费 MXN</span>
+            <input type="number" step="0.01" data-field="adjusted_tax_total_mxn" value="${this.escape(adjustedValue ?? "")}" placeholder="选择手工调整时填写" />
+          </label>
+          <label class="ocw-voucher-resolution-remark">
+            <span>处理备注</span>
+            <textarea data-field="resolution_remark" rows="1" placeholder="例如：差额 303 为尾差，财务确认可接受">${this.escape(resolution.remark || "")}</textarea>
+          </label>
+          <button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="resolve-voucher-record">保存处理结果</button>
+        </div>
+      </div>
+    `;
+  }
+
+  async submitVoucherManualResolution(detailDialog, recordName) {
+    const $wrapper = detailDialog.$wrapper;
+    const action = $wrapper.find("[data-field='resolution_action']").val();
+    const adjusted = String($wrapper.find("[data-field='adjusted_tax_total_mxn']").val() || "").trim();
+    const remark = String($wrapper.find("[data-field='resolution_remark']").val() || "").trim();
+    const doSave = async () => {
+      const result = await this.call(
+        "overseas_costing.api.import_api.resolve_tax_certificate_reconciliation",
+        {
+          record_name: recordName,
+          resolution_action: action,
+          adjusted_tax_total_mxn: adjusted,
+          remark,
+        },
+        true
+      );
+      if (!result || !result.ok) {
+        frappe.msgprint((result && result.message) || "保存人工处理结果失败。");
+        return;
+      }
+      const $detail = $wrapper.find(".ocw-voucher-record-detail");
+      $detail.replaceWith(this.renderTaxCertificateRecordDetail(result));
+      if (this.activeVoucherParseDialog && this.activeVoucherParseDialog.$wrapper && this.activeVoucherParseDialog.$wrapper.is(":visible")) {
+        this.loadTaxCertificateRecords(this.activeVoucherParseDialog).catch((error) => this.showError(error));
+      }
+      frappe.show_alert({ message: "处理结果已保存。", indicator: "green" });
+    };
+    frappe.confirm("确认保存这次完税凭证差异处理结果？", doSave);
   }
 
   renderVoucherPreview(dialog, result, state = "empty") {
@@ -1007,8 +1145,8 @@ class OverseasCostWorkbench {
   }
 
   voucherValidationPreviewClass(status) {
-    if (status === "failed") return "failed";
-    if (status === "review") return "warn";
+    if (["failed", "unmatched", "exception"].includes(status)) return "failed";
+    if (["review", "pending"].includes(status)) return "warn";
     return "ready";
   }
 
@@ -2278,7 +2416,7 @@ class OverseasCostWorkbench {
         { fieldtype: "Data", fieldname: "project_collection", label: "项目归集" },
         { fieldtype: "Data", fieldname: "source_approval_no", label: "钉钉审批编号" },
         { fieldtype: "Data", fieldname: "source_instance_id", label: "钉钉实例ID（procInstId）" },
-        { fieldtype: "Data", fieldname: "source_dingtalk_url", label: "钉钉审批链接" },
+        { fieldtype: "Small Text", fieldname: "source_dingtalk_url", label: "钉钉审批链接" },
         { fieldtype: "Small Text", fieldname: "source_remark", label: "备注" },
       ],
       primary_action_label: "确认新增",

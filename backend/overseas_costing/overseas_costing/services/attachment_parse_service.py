@@ -264,6 +264,82 @@ def get_tax_certificate_parse_record(record_name: str | None = None) -> dict:
     }
 
 
+def resolve_tax_certificate_reconciliation(
+    *,
+    record_name: str | None = None,
+    resolution_action: str | None = None,
+    adjusted_tax_total_mxn: float | str | None = None,
+    remark: str | None = None,
+) -> dict:
+    """保存完税凭证差异的人工处理结果，不写入成本字段。"""
+
+    if not record_name:
+        return {"ok": False, "message": "请传入要处理的完税凭证解析记录。"}
+    if not _has_frappe_db_context():
+        return {
+            "ok": False,
+            "dry_run": True,
+            "record_name": record_name,
+            "message": "当前未连接 Frappe，无法保存人工处理结果。",
+        }
+    if not frappe.db.exists("Overseas Cost Attachment", record_name):
+        return {"ok": False, "record_name": record_name, "message": "未找到对应的完税凭证解析记录。"}
+
+    fields = [
+        "name",
+        "source_type",
+        "attachment_type",
+        "parse_result_json",
+        "mapped_result_json",
+        "remark",
+    ]
+    row = frappe.db.get_value("Overseas Cost Attachment", record_name, fields, as_dict=True) or {}
+    if row.get("source_type") != "Voucher" or row.get("attachment_type") != "Tax Certificate":
+        return {"ok": False, "record_name": record_name, "message": "该附件记录不是完税凭证解析记录。"}
+
+    mapped_result = _json_loads(row.get("mapped_result_json")) or {}
+    resolution = _build_tax_certificate_manual_resolution(
+        mapped_result=mapped_result,
+        resolution_action=resolution_action,
+        adjusted_tax_total_mxn=adjusted_tax_total_mxn,
+        remark=remark,
+        operator_name=getattr(frappe.session, "user", "") if getattr(frappe, "session", None) else "",
+    )
+    if not resolution["ok"]:
+        return {
+            "ok": False,
+            "record_name": record_name,
+            "message": resolution["message"],
+        }
+
+    history = mapped_result.get("manual_resolution_history")
+    if not isinstance(history, list):
+        history = []
+    existing_resolution = mapped_result.get("manual_resolution")
+    if existing_resolution and (not history or history[-1] != existing_resolution):
+        history.append(existing_resolution)
+    history.append(resolution["resolution"])
+
+    mapped_result["manual_resolution"] = resolution["resolution"]
+    mapped_result["manual_resolution_history"] = history[-20:]
+    mapped_result["status"] = resolution["resolution"]["status"]
+    mapped_result["status_label"] = resolution["resolution"]["status_label"]
+    mapped_result["message"] = resolution["resolution"]["message"]
+
+    remark_text = _manual_resolution_remark(row.get("remark"), resolution["resolution"])
+    frappe.db.set_value(
+        "Overseas Cost Attachment",
+        record_name,
+        {
+            "mapped_result_json": _json_dumps(mapped_result),
+            "remark": remark_text,
+        },
+        update_modified=True,
+    )
+    frappe.db.commit()
+    return get_tax_certificate_parse_record(record_name=record_name)
+
+
 def extract_pdf_text(*, file_path: str | None = None, file_url: str | None = None) -> str:
     """从 PDF 中抽取文本；运行环境没有 PDF 库时给出明确提示。"""
 
@@ -775,6 +851,7 @@ def _build_tax_certificate_record_summary(row: dict) -> dict:
     system = mapped_result.get("system") or {}
     difference = mapped_result.get("difference") or {}
     batch = mapped_result.get("batch") or {}
+    manual_resolution = mapped_result.get("manual_resolution") or {}
     return {
         "name": row.get("name") or "",
         "batch": batch or {"name": row.get("batch") or ""},
@@ -800,10 +877,136 @@ def _build_tax_certificate_record_summary(row: dict) -> dict:
         "validation_status_label": validation.get("status_label") or summary.get("validation_status_label") or "",
         "reconciliation_status": mapped_result.get("status") or "",
         "reconciliation_status_label": mapped_result.get("status_label") or "",
+        "manual_resolution": manual_resolution,
+        "manual_resolution_action": manual_resolution.get("action") or "",
+        "manual_resolution_status_label": manual_resolution.get("status_label") or "",
+        "resolved_tax_total_mxn": manual_resolution.get("final_tax_total_mxn"),
         "review_count": mapped_result.get("review_count") or 0,
         "failed_count": mapped_result.get("failed_count") or 0,
         "passed_count": mapped_result.get("passed_count") or 0,
     }
+
+
+def _build_tax_certificate_manual_resolution(
+    *,
+    mapped_result: dict,
+    resolution_action: str | None,
+    adjusted_tax_total_mxn=None,
+    remark: str | None = None,
+    operator_name: str | None = None,
+) -> dict:
+    action = str(resolution_action or "").strip()
+    actions = {
+        "accept_difference": {
+            "label": "确认差异可接受",
+            "status": "accepted",
+            "status_label": "差异已确认",
+            "final_source": "system_current",
+            "final_source_label": "保留系统金额，差异作为可接受尾差",
+        },
+        "mark_exception": {
+            "label": "备注异常",
+            "status": "exception",
+            "status_label": "已标记异常",
+            "final_source": "pending_review",
+            "final_source_label": "暂不确认金额，待继续核对",
+        },
+        "use_voucher": {
+            "label": "按凭证金额为准",
+            "status": "resolved",
+            "status_label": "已按凭证处理",
+            "final_source": "voucher",
+            "final_source_label": "完税凭证金额",
+        },
+        "keep_system": {
+            "label": "保留系统金额",
+            "status": "resolved",
+            "status_label": "已保留系统金额",
+            "final_source": "system_current",
+            "final_source_label": "系统当前金额",
+        },
+        "manual_adjust": {
+            "label": "手工调整金额",
+            "status": "adjusted",
+            "status_label": "已手工调整",
+            "final_source": "manual_adjust",
+            "final_source_label": "人工调整金额",
+        },
+    }
+    if action not in actions:
+        return {"ok": False, "message": "请选择人工处理方式。"}
+
+    voucher = mapped_result.get("voucher") or {}
+    system = mapped_result.get("system") or {}
+    difference = mapped_result.get("difference") or {}
+    voucher_total = _first_number(voucher.get("paid_total_mxn"))
+    system_total = _first_number(system.get("system_import_tax_total_mxn"))
+    adjusted_total = _to_number(adjusted_tax_total_mxn)
+    config = actions[action]
+
+    if action == "use_voucher" and voucher_total is None:
+        return {"ok": False, "message": "凭证金额为空，不能选择按凭证金额为准。"}
+    if action in {"keep_system", "accept_difference"} and system_total is None:
+        return {"ok": False, "message": "系统金额为空，不能选择保留系统金额或确认差异可接受。"}
+    if action == "manual_adjust" and adjusted_total is None:
+        return {"ok": False, "message": "请填写手工调整后的税费金额。"}
+    if action == "mark_exception" and not str(remark or "").strip():
+        return {"ok": False, "message": "备注异常时请填写异常原因。"}
+
+    if action == "use_voucher":
+        final_total = voucher_total
+    elif action in {"keep_system", "accept_difference"}:
+        final_total = system_total
+    elif action == "manual_adjust":
+        final_total = adjusted_total
+    else:
+        final_total = None
+
+    final_vs_system = None if final_total is None or system_total is None else _round_money(float(final_total) - float(system_total), 6)
+    final_vs_voucher = None if final_total is None or voucher_total is None else _round_money(float(final_total) - float(voucher_total), 6)
+    resolved_at = ""
+    try:
+        resolved_at = frappe.utils.now()
+    except Exception:
+        resolved_at = ""
+
+    resolution = {
+        "action": action,
+        "action_label": config["label"],
+        "status": config["status"],
+        "status_label": config["status_label"],
+        "final_source": config["final_source"],
+        "final_source_label": config["final_source_label"],
+        "voucher_tax_total_mxn": voucher_total,
+        "system_tax_total_mxn": system_total,
+        "original_diff_mxn": difference.get("tax_total_diff_mxn"),
+        "final_tax_total_mxn": None if final_total is None else _round_money(float(final_total), 6),
+        "final_diff_vs_system_mxn": final_vs_system,
+        "final_diff_vs_voucher_mxn": final_vs_voucher,
+        "remark": str(remark or "").strip(),
+        "resolved_by": operator_name or "",
+        "resolved_at": resolved_at,
+        "message": _manual_resolution_message(config["label"], final_total, remark),
+    }
+    return {"ok": True, "resolution": resolution}
+
+
+def _manual_resolution_message(action_label: str, final_total, remark: str | None = None) -> str:
+    suffix = f"；备注：{str(remark).strip()}" if str(remark or "").strip() else ""
+    if final_total is None:
+        return f"人工处理：{action_label}，暂不确认采用金额{suffix}。"
+    amount = _round_money(float(final_total), 6)
+    return f"人工处理：{action_label}，采用金额 MXN {amount}{suffix}。"
+
+
+def _manual_resolution_remark(existing_remark: str | None, resolution: dict) -> str:
+    base = str(existing_remark or "").strip()
+    line = f"人工处理：{resolution.get('action_label') or ''}"
+    if resolution.get("final_tax_total_mxn") is not None:
+        line += f"，采用金额 MXN {resolution.get('final_tax_total_mxn')}"
+    if resolution.get("remark"):
+        line += f"，备注：{resolution.get('remark')}"
+    return f"{base}\n{line}".strip() if base else line
 
 
 def _find_tax_certificate_batch(header: dict, batch_name: str | None = None) -> dict | None:

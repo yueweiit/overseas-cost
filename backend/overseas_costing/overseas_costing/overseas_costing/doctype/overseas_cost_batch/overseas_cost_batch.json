@@ -140,7 +140,7 @@
     },
     {
       "fieldname": "source_dingtalk_url",
-      "fieldtype": "Data",
+      "fieldtype": "Small Text",
       "label": "来源钉钉链接"
     },
     {

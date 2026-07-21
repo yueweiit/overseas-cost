@@ -6,6 +6,7 @@ from pathlib import Path
 
 from overseas_costing.services import attachment_parse_service
 from overseas_costing.services.attachment_parse_service import (
+    _build_tax_certificate_manual_resolution,
     _build_tax_certificate_reconciliation,
     build_packing_list_parse_task,
 )
@@ -272,6 +273,54 @@ def test_tax_certificate_reconciliation_preview_calculates_difference_without_wr
     assert result["difference"]["tax_total_diff_mxn"] == 20
     assert result["difference"]["direction_label"] == "凭证金额高于系统"
     assert result["message"].startswith("对比结果仅用于复核")
+
+
+def test_tax_certificate_manual_resolution_can_use_voucher_total() -> None:
+    result = _build_tax_certificate_manual_resolution(
+        mapped_result={
+            "voucher": {"paid_total_mxn": 129883},
+            "system": {"system_import_tax_total_mxn": 130186},
+            "difference": {"tax_total_diff_mxn": -303},
+        },
+        resolution_action="use_voucher",
+        remark="按正式完税凭证处理",
+        operator_name="tester",
+    )
+
+    assert result["ok"] is True
+    resolution = result["resolution"]
+    assert resolution["action_label"] == "按凭证金额为准"
+    assert resolution["final_tax_total_mxn"] == 129883
+    assert resolution["final_diff_vs_system_mxn"] == -303
+    assert resolution["final_diff_vs_voucher_mxn"] == 0
+
+
+def test_tax_certificate_manual_resolution_requires_adjusted_amount() -> None:
+    result = _build_tax_certificate_manual_resolution(
+        mapped_result={
+            "voucher": {"paid_total_mxn": 129883},
+            "system": {"system_import_tax_total_mxn": 130186},
+            "difference": {"tax_total_diff_mxn": -303},
+        },
+        resolution_action="manual_adjust",
+    )
+
+    assert result["ok"] is False
+    assert "手工调整" in result["message"]
+
+
+def test_tax_certificate_manual_resolution_requires_exception_remark() -> None:
+    result = _build_tax_certificate_manual_resolution(
+        mapped_result={
+            "voucher": {"paid_total_mxn": 129883},
+            "system": {"system_import_tax_total_mxn": 130186},
+            "difference": {"tax_total_diff_mxn": -303},
+        },
+        resolution_action="mark_exception",
+    )
+
+    assert result["ok"] is False
+    assert "异常原因" in result["message"]
 
 
 def test_tax_certificate_batch_lookup_prefers_voucher_header_over_requested_batch(monkeypatch) -> None:

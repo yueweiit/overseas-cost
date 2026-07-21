@@ -196,6 +196,23 @@ def get_tax_certificate_parse_record(record_name: str | None = None) -> dict:
 
 
 @frappe.whitelist()
+def resolve_tax_certificate_reconciliation(
+    record_name: str | None = None,
+    resolution_action: str | None = None,
+    adjusted_tax_total_mxn: float | str | None = None,
+    remark: str | None = None,
+) -> dict:
+    """保存完税凭证差异人工处理结果，不写入成本字段。"""
+
+    return import_service.resolve_tax_certificate_reconciliation(
+        record_name=record_name,
+        resolution_action=resolution_action,
+        adjusted_tax_total_mxn=adjusted_tax_total_mxn,
+        remark=remark,
+    )
+
+
+@frappe.whitelist()
 def import_purchase_expense_oa(
     batch_name: str,
     source_instance_id: str | None = None,
