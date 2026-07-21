@@ -1701,6 +1701,20 @@
   background: var(--ocw-brand-soft);
 }
 
+.ocw-voucher-modal {
+  --ocw-ink: #162322;
+  --ocw-muted: #657574;
+  --ocw-line: #dce4e2;
+  --ocw-paper: #f5f7f6;
+  --ocw-panel: #ffffff;
+  --ocw-brand: #0d7377;
+  --ocw-brand-dark: #095c60;
+  --ocw-brand-soft: #e3f2f2;
+  --ocw-accent: #ff6b35;
+  --ocw-accent-soft: #fff0ea;
+  --ocw-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+}
+
 .ocw-voucher-modal .modal-dialog {
   width: min(1120px, calc(100vw - 32px));
   max-width: min(1120px, calc(100vw - 32px));
@@ -2231,7 +2245,6 @@
 }
 
 .ocw-voucher-resolution-head p,
-.ocw-voucher-resolution-saved p,
 .ocw-voucher-resolution-empty {
   margin: 0;
   color: var(--ocw-ink);
@@ -2270,6 +2283,24 @@
   white-space: nowrap;
 }
 
+.ocw-voucher-resolution-saved p {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--ocw-ink);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.45;
+  text-align: center;
+  border: 1px solid var(--ocw-line);
+  border-radius: 8px;
+  background: #fff;
+}
+
 .ocw-voucher-resolution-history {
   display: grid;
   gap: 6px;
@@ -2299,6 +2330,7 @@
   min-width: 0;
   color: var(--ocw-ink);
   font-size: 12px;
+  font-weight: 800;
   font-style: normal;
   line-height: 1.4;
   overflow-wrap: anywhere;
@@ -2390,8 +2422,10 @@
   min-height: 36px;
   padding: 0 10px;
   color: #fff;
-  border-color: var(--ocw-brand);
-  background: var(--ocw-brand);
+  border-color: #0d7377;
+  background: #0d7377;
+  opacity: 1;
+  visibility: visible;
 }
 
 .ocw-voucher-resolution-actions > .ocw-primary-btn:disabled {
