@@ -839,28 +839,27 @@ class OverseasCostWorkbench {
         </div>
       `
       : `<div class="ocw-voucher-resolution-empty">当前差异尚未人工处理。</div>`;
-    const historyHtml = history.length
-      ? `
-        <div class="ocw-voucher-resolution-history">
-          <span>处理记录</span>
-          ${history
-            .slice()
-            .reverse()
-            .slice(0, 8)
-            .map((item) => {
-              const row = item || {};
-              return `
-                <div>
-                  <strong>${this.escape(row.action_label || row.status_label || "--")}</strong>
-                  <em>${this.escape(row.resolved_at || "--")} / ${this.escape(row.resolved_by || "--")}</em>
-                  <small>${this.escape(row.message || row.remark || "未填写备注")}</small>
-                </div>
-              `;
-            })
-            .join("")}
-        </div>
-      `
-      : "";
+    const historyRows = history
+      .slice()
+      .reverse()
+      .slice(0, 8)
+      .map((item) => {
+        const row = item || {};
+        return `
+          <div>
+            <strong>${this.escape(row.action_label || row.status_label || "--")}</strong>
+            <em>${this.escape(row.resolved_at || "--")} / ${this.escape(row.resolved_by || "--")}</em>
+            <small>${this.escape(row.message || row.remark || "未填写备注")}</small>
+          </div>
+        `;
+      })
+      .join("");
+    const historyHtml = `
+      <div class="ocw-voucher-resolution-history">
+        <span>处理记录</span>
+        ${historyRows || `<p>暂无处理记录，提交后会显示在这里。</p>`}
+      </div>
+    `;
     return `
       <div class="ocw-voucher-resolution">
         <div class="ocw-voucher-resolution-head">
@@ -876,8 +875,6 @@ class OverseasCostWorkbench {
           <div><span>原差额 MXN</span><strong>${this.escape(this.formatValidationValue(diff.tax_total_diff_mxn))}</strong></div>
           <div><span>方向</span><strong>${this.escape(diff.direction_label || "--")}</strong></div>
         </div>
-        ${savedHtml}
-        ${historyHtml}
         <div class="ocw-voucher-resolution-form">
           <label>
             <span>处理方式</span>
@@ -889,10 +886,14 @@ class OverseasCostWorkbench {
           </label>
           <label class="ocw-voucher-resolution-remark">
             <span>处理备注</span>
-            <textarea data-field="resolution_remark" rows="1" placeholder="例如：差额 303 为尾差，财务确认可接受">${this.escape(resolution.remark || "")}</textarea>
+            <input type="text" data-field="resolution_remark" value="${this.escape(resolution.remark || "")}" placeholder="例如：差额 303 为尾差，财务确认可接受" />
           </label>
-          <button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="resolve-voucher-record">保存处理结果</button>
+          <div class="ocw-voucher-resolution-actions">
+            <button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="resolve-voucher-record">提交处理结果</button>
+          </div>
         </div>
+        ${savedHtml}
+        ${historyHtml}
       </div>
     `;
   }

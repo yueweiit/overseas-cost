@@ -2294,7 +2294,8 @@
 
 .ocw-voucher-resolution-history strong,
 .ocw-voucher-resolution-history em,
-.ocw-voucher-resolution-history small {
+.ocw-voucher-resolution-history small,
+.ocw-voucher-resolution-history p {
   min-width: 0;
   color: var(--ocw-ink);
   font-size: 12px;
@@ -2307,9 +2308,15 @@
   color: var(--ocw-muted);
 }
 
+.ocw-voucher-resolution-history p {
+  margin: 0;
+  padding-top: 6px;
+  border-top: 1px dashed #dbe6e4;
+}
+
 .ocw-voucher-resolution-form {
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) minmax(150px, 1fr) minmax(260px, 2fr) 128px;
+  grid-template-columns: minmax(160px, 1fr) minmax(150px, 1fr) minmax(280px, 2fr);
   gap: 8px;
   align-items: end;
 }
@@ -2322,8 +2329,7 @@
 }
 
 .ocw-voucher-resolution-form select,
-.ocw-voucher-resolution-form input,
-.ocw-voucher-resolution-form textarea {
+.ocw-voucher-resolution-form input {
   width: 100%;
   height: 36px;
   min-height: 36px;
@@ -2337,12 +2343,14 @@
   background: #fff;
 }
 
-.ocw-voucher-resolution-form textarea {
-  resize: none;
+.ocw-voucher-resolution-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  justify-content: flex-end;
 }
 
-.ocw-voucher-resolution-form > .ocw-primary-btn {
-  width: 100%;
+.ocw-voucher-resolution-actions > .ocw-primary-btn {
+  width: 128px;
   height: 36px;
   min-height: 36px;
   padding: 0 10px;
@@ -2364,6 +2372,10 @@
 
   .ocw-voucher-resolution-history div {
     grid-template-columns: 1fr;
+  }
+
+  .ocw-voucher-resolution-actions > .ocw-primary-btn {
+    width: 100%;
   }
 }
 
