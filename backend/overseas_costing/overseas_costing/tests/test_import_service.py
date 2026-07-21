@@ -13,12 +13,16 @@ from overseas_costing.services.attachment_parse_service import (
 from overseas_costing.services.import_service import (
     _coerce_item_numeric_defaults,
     _ensure_supported_excel_path,
+    _get_linked_purchase_approvals_from_extra,
+    _index_items,
+    _match_item,
     _values_equal_for_import,
     get_tax_certificate_parse_record,
     import_main_excel,
     import_purchase_expense_oa,
     list_tax_certificate_parse_records,
     parse_packing_list_attachment,
+    preview_linked_purchase_expense_oa,
     preview_tax_certificate_pdf,
     preview_yuewei_excel_file,
     save_tax_certificate_parse_result,
@@ -42,6 +46,121 @@ def test_import_purchase_expense_oa_returns_preview_and_dingtalk_payload() -> No
     assert result["mapped_preview_items"][0]["material_code"] == "FL004104"
     assert result["dingtalk_payload"]["instance_id"] == "PROC-001"
     assert "purchase_currency" in result["writeback_targets"]
+
+
+def test_get_linked_purchase_approvals_from_oa_trace_extra_json() -> None:
+    linked = _get_linked_purchase_approvals_from_extra(
+        (
+            '{"source":"excel","oa_logistics_trace":{"linked_purchase_approvals":['
+            '{"approval_no":"202604300000000596348","source_instance_id":"PROC-PURCHASE-001"}'
+            "]}}"
+        )
+    )
+
+    assert linked[0]["approval_no"] == "202604300000000596348"
+    assert linked[0]["source_instance_id"] == "PROC-PURCHASE-001"
+
+
+def test_purchase_item_match_rejects_same_code_with_different_spec() -> None:
+    indexes = _index_items(
+        [
+            {
+                "name": "ITEM-001",
+                "material_code": "YL00060",
+                "product_name": "TPU原料 HF-1190A-8",
+                "spec_model": "HF-1190A-8",
+            }
+        ]
+    )
+
+    matched_by, candidates = _match_item(
+        {"material_code": "YL00060", "product_name": "原料TPU", "spec_model": "HF-1190A-1"},
+        indexes,
+    )
+
+    assert matched_by == "material_code"
+    assert candidates == []
+
+
+def test_preview_linked_purchase_expense_oa_matches_without_writing(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
+            if doctype == "Overseas Cost Batch" and name_or_filters == "FSCU8486789":
+                return {"name": "BATCH-DOC"} if as_dict else "BATCH-DOC"
+            if doctype == "Overseas Cost Batch" and name_or_filters == "BATCH-DOC":
+                if fields == ["current_version"]:
+                    return {"current_version": "VER-DOC"}
+                return {
+                    "name": "BATCH-DOC",
+                    "batch_no": "FSCU8486789",
+                    "source_approval_no": "202606101808000475588",
+                    "source_instance_id": "PROC-SEA",
+                    "source_dingtalk_url": "",
+                    "extra_json": (
+                        '{"source":"dingtalk_oa_logistics","linked_purchase_approvals":['
+                        '{"approval_no":"202604150041000081318","source_instance_id":"PROC-PURCHASE-001"}'
+                        "]}"
+                    ),
+                }
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            if doctype == "Overseas Cost Item":
+                return [
+                    {
+                        "name": "ITEM-001",
+                        "row_no": 1,
+                        "material_code": "YL000097",
+                        "product_name": "TPU原料 HF-8695AU",
+                        "spec_model": "HF-8695AU",
+                        "unit_price": 0.0,
+                        "purchase_currency": "",
+                        "goods_value": 0.0,
+                    },
+                    {
+                        "name": "ITEM-002",
+                        "row_no": 2,
+                        "material_code": "YL000058",
+                        "product_name": "副牌PC透明 LUXI",
+                        "spec_model": "LUXI",
+                        "unit_price": 2.1,
+                        "purchase_currency": "人民币RMB",
+                        "goods_value": 100,
+                    },
+                ]
+            return []
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+
+    result = preview_linked_purchase_expense_oa(
+        batch_name="FSCU8486789",
+        purchase_summaries_json=(
+            '[{"source_approval_no":"202604150041000081318","source_instance_id":"PROC-PURCHASE-001",'
+            '"purchase_currency":"人民币RMB","mapped_preview_items":['
+            '{"material_code":"YL000097","product_name":"TPU原料 HF-8695AU","spec_model":"HF-8695AU",'
+            '"unit_price":2.9,"goods_value":29000,"purchase_currency":"人民币RMB","source_type":"PURCHASE_EXPENSE_OA"},'
+            '{"material_code":"YL000058","product_name":"副牌PC透明 LUXI","spec_model":"LUXI",'
+            '"unit_price":2.35,"goods_value":11750,"purchase_currency":"人民币RMB","source_type":"PURCHASE_EXPENSE_OA"}'
+            "]}]"
+        ),
+    )
+
+    assert result["ok"] is True
+    assert result["linked_purchase_count"] == 1
+    assert result["writeback_preview"]["matched_count"] == 2
+    assert result["writeback_preview"]["fillable_row_count"] == 1
+    assert result["writeback_preview"]["conflict_row_count"] == 1
+    first_changes = result["writeback_preview"]["matched_rows"][0]["business_changes"]
+    second_changes = result["writeback_preview"]["matched_rows"][1]["business_changes"]
+    assert {change["status"] for change in first_changes} == {"fillable"}
+    assert any(change["status"] == "conflict" for change in second_changes)
 
 
 def test_parse_packing_list_attachment_returns_parse_plan() -> None:

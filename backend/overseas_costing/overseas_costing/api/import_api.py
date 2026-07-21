@@ -234,6 +234,25 @@ def import_purchase_expense_oa(
 
 
 @frappe.whitelist()
+def preview_linked_purchase_expense_oa(
+    batch_name: str,
+    version_name: str | None = None,
+    env_file: str | None = None,
+    linked_purchase_json: str | None = None,
+    purchase_summaries_json: str | None = None,
+) -> dict:
+    """预览当前批次关联采购支出 OA 能补哪些采购价格字段，不写入数据。"""
+
+    return import_service.preview_linked_purchase_expense_oa(
+        batch_name=batch_name,
+        version_name=version_name,
+        env_file=env_file,
+        linked_purchase_json=linked_purchase_json,
+        purchase_summaries_json=purchase_summaries_json,
+    )
+
+
+@frappe.whitelist()
 def parse_packing_list_attachment(
     batch_name: str,
     attachment_name: str | None = None,

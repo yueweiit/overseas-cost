@@ -9,6 +9,7 @@ from overseas_costing.services.batch_service import (
     create_batch,
     get_audit_logs,
     get_batch_items,
+    is_hidden_approval_status,
 )
 
 
@@ -102,3 +103,10 @@ def test_get_audit_logs_dry_run_returns_stable_shape() -> None:
     assert result["version_name"] == "VERSION-001"
     assert result["items"] == []
     assert result["total"] == 0
+
+
+def test_hidden_approval_status_matches_revoked_dingtalk_statuses() -> None:
+    assert is_hidden_approval_status("TERMINATED") is True
+    assert is_hidden_approval_status("已撤销") is True
+    assert is_hidden_approval_status("COMPLETED") is False
+    assert is_hidden_approval_status("") is False

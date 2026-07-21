@@ -1854,7 +1854,7 @@ class OverseasCostWorkbench {
     const waybillNo = batch.waybill_no || firstItem.waybill_no || "--";
     const itemCount = hasLoadedItems ? items.length : batch.item_count || 0;
     const totalGoodsValue = hasLoadedItems ? this.sumBatchNumber(batch.name, "goods_value") : batch.total_goods_value;
-    const statusInfo = this.batchStatusInfo(batch.status);
+    const statusInfo = this.batchStatusInfo(batch.status, batch, itemCount);
     const importedClass = this.lastImportedBatchNames.has(batch.name) ? "imported" : "";
     this.activeBatchName = this.activeBatchName || batch.name;
     return `
@@ -1909,6 +1909,10 @@ class OverseasCostWorkbench {
   sourceLabel(batch, firstItem = {}) {
     const explicit = firstItem.source_range || firstItem.source_sheet || batch.source_range || batch.source_sheet;
     if (this.hasText(explicit)) return explicit;
+    if (batch.source_type === "oa_logistics" || firstItem.source_type === "oa_logistics") {
+      const itemCount = Number(batch.item_count || 0);
+      return itemCount ? "钉钉国际物流 OA" : "钉钉国际物流 OA · 待解析附件";
+    }
     const transportMode = String(batch.transport_mode || firstItem.transport_mode || "").toUpperCase();
     const looksLikeLegacyYuewei =
       transportMode === "SEA" ||
@@ -2868,9 +2872,20 @@ class OverseasCostWorkbench {
     return labels[key] || String(value);
   }
 
-  batchStatusInfo(status) {
+  batchStatusInfo(status, batch = {}, itemCount = null) {
     const value = String(status || "").trim();
     const normalized = value.toLowerCase();
+    const sourceType = String(batch.source_type || "").trim();
+    const count = itemCount === null ? Number(batch.item_count || 0) : Number(itemCount || 0);
+    if (normalized.includes("imported")) {
+      const isOaTraceOnly = sourceType === "oa_logistics" && !count;
+      return {
+        label: isOaTraceOnly ? "仅拉取审批" : "已导入",
+        statusClass: isOaTraceOnly ? "ocw-check-info" : "ocw-check-ok",
+        needsRecalculate: false,
+        suggestion: isOaTraceOnly ? "已保存审批追溯，后续解析附件后生成明细" : "数据已导入，可继续核对或试算",
+      };
+    }
     if (normalized.includes("dirty")) {
       return {
         label: "待重算",
@@ -2908,6 +2923,7 @@ class OverseasCostWorkbench {
     if (value.includes("calculated")) return "done";
     if (value.includes("dirty")) return "review";
     if (value.includes("draft")) return "review";
+    if (value.includes("imported")) return "done";
     if (value.includes("locked")) return "locked";
     return "active";
   }

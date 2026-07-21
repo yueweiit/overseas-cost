@@ -31,6 +31,7 @@ data/*.xlsx
 data/*.xlsm
 data/*.xls
 data/*.csv
+data/*.json
 
 # Local prototype reference kept outside first delivery repo because it has its own Git history
 frontend-demo/

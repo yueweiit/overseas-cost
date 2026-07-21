@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable
@@ -37,6 +38,21 @@ from overseas_costing.utils.field_mapper import (
 
 ITEM_KEY_FIELDS = ("material_code", "product_name", "spec_model")
 DEFAULT_FX_RMB_TO_MXN = 2.6
+PURCHASE_WRITEBACK_FIELDS = (
+    "unit_price",
+    "purchase_currency",
+    "goods_value",
+)
+PURCHASE_FIELD_LABELS = {
+    "unit_price": "采购单价",
+    "purchase_currency": "采购币种",
+    "goods_value": "采购货值",
+    "source_type": "来源类型",
+    "source_doc_no": "来源审批编号",
+    "dingtalk_instance_id": "钉钉实例ID",
+    "dingtalk_official_url": "钉钉原单链接",
+    "parse_status": "解析状态",
+}
 NUMERIC_ITEM_FIELDS = {
     "unit_price",
     "quantity",
@@ -450,6 +466,18 @@ def _load_rows(rows_json: str | None) -> list[dict]:
     return []
 
 
+def _load_json_list(rows_json: str | None) -> list[dict]:
+    if not rows_json:
+        return []
+
+    loaded = json.loads(rows_json)
+    if isinstance(loaded, dict):
+        loaded = [loaded]
+    if isinstance(loaded, list):
+        return [row for row in loaded if isinstance(row, dict)]
+    return []
+
+
 def _load_blocks(blocks_json: str | None) -> list[dict]:
     if not blocks_json:
         return []
@@ -506,6 +534,18 @@ def _ensure_supported_excel_path(path: Path) -> Path:
 
 def _json_dumps(value) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _json_loads_dict(value) -> dict:
+    if isinstance(value, dict):
+        return dict(value)
+    if not value:
+        return {}
+    try:
+        loaded = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _to_float(value, default: float = 0.0) -> float:
@@ -856,6 +896,94 @@ def _resolve_version_name(batch_doc_name: str, version_name: str | None = None) 
     return None
 
 
+def _get_batch_trace_row(batch_doc_name: str) -> dict:
+    if frappe is None:
+        return {}
+    return frappe.db.get_value(
+        "Overseas Cost Batch",
+        batch_doc_name,
+        [
+            "name",
+            "batch_no",
+            "source_approval_no",
+            "source_instance_id",
+            "source_dingtalk_url",
+            "extra_json",
+        ],
+        as_dict=True,
+    ) or {}
+
+
+def _get_linked_purchase_approvals_from_extra(extra_json: str | dict | None) -> list[dict]:
+    payload = _json_loads_dict(extra_json)
+    trace = payload.get("oa_logistics_trace") if isinstance(payload.get("oa_logistics_trace"), dict) else {}
+    candidates = [
+        payload.get("linked_purchase_approvals"),
+        trace.get("linked_purchase_approvals"),
+    ]
+    linked: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for value in candidates:
+        if not isinstance(value, list):
+            continue
+        for row in value:
+            if not isinstance(row, dict):
+                continue
+            approval_no = str(row.get("approval_no") or row.get("source_approval_no") or row.get("business_id") or "").strip()
+            instance_id = str(
+                row.get("source_instance_id")
+                or row.get("proc_inst_id")
+                or row.get("procInstId")
+                or row.get("instance_id")
+                or ""
+            ).strip()
+            key = (approval_no, instance_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            linked.append({**row, "approval_no": approval_no, "source_instance_id": instance_id})
+    return linked
+
+
+def _normalize_purchase_summary(summary: dict) -> dict:
+    mapped_items = summary.get("mapped_preview_items")
+    if not isinstance(mapped_items, list):
+        mapped_items = []
+    return {
+        "ok": summary.get("ok", True),
+        "source_approval_no": summary.get("source_approval_no") or summary.get("approval_no") or "",
+        "source_instance_id": summary.get("source_instance_id") or "",
+        "source_dingtalk_url": summary.get("source_dingtalk_url") or summary.get("official_url") or "",
+        "approval_title": summary.get("approval_title") or "",
+        "approval_status": summary.get("approval_status") or "",
+        "purchase_currency": summary.get("purchase_currency") or "",
+        "detail_row_count": summary.get("detail_row_count") or len(mapped_items),
+        "mapped_preview_items": mapped_items,
+        "message": summary.get("message") or "",
+    }
+
+
+def _load_purchase_summaries_from_json(purchase_summaries_json: str | None) -> list[dict]:
+    return [_normalize_purchase_summary(summary) for summary in _load_json_list(purchase_summaries_json)]
+
+
+def _pull_purchase_summaries_from_dingtalk(*, linked_approvals: list[dict], env_file: str | None = None) -> list[dict]:
+    from overseas_costing.scripts.import_oa_logistics import (
+        get_access_token,
+        load_env_file,
+        pull_linked_purchase_approval_details,
+    )
+
+    resolved_env_file = str(env_file or os.environ.get("DINGTALK_ENV_FILE") or "").strip()
+    if resolved_env_file:
+        load_env_file(resolved_env_file)
+    token = get_access_token()
+    return [
+        _normalize_purchase_summary(summary)
+        for summary in pull_linked_purchase_approval_details(token=token, linked_approvals=linked_approvals)
+    ]
+
+
 def _get_batch_items(batch_doc_name: str, version_name: str | None) -> list[dict]:
     if frappe is None or not version_name:
         return []
@@ -877,6 +1005,11 @@ def _get_batch_items(batch_doc_name: str, version_name: str | None) -> list[dict
             "volume_m3",
             "volume_weight_kg",
             "chargeable_weight_kg",
+            "source_type",
+            "source_doc_no",
+            "dingtalk_instance_id",
+            "dingtalk_official_url",
+            "parse_status",
         ],
         order_by="row_no asc",
         limit_page_length=5000,
@@ -904,8 +1037,27 @@ def _match_item(mapped_row: dict, indexes: dict[str, dict[str, list[dict]]]) -> 
             continue
         candidates = indexes[field].get(key, [])
         if candidates:
-            return field, candidates
+            return field, _narrow_item_candidates(mapped_row, candidates)
     return "", []
+
+
+def _narrow_item_candidates(mapped_row: dict, candidates: list[dict]) -> list[dict]:
+    spec_key = _normalize_key(mapped_row.get("spec_model"))
+    if spec_key:
+        spec_candidates = [candidate for candidate in candidates if _normalize_key(candidate.get("spec_model")) == spec_key]
+        if spec_candidates:
+            return spec_candidates
+        if any(_normalize_key(candidate.get("spec_model")) for candidate in candidates):
+            return []
+
+    product_key = _normalize_key(mapped_row.get("product_name"))
+    if product_key:
+        product_candidates = [
+            candidate for candidate in candidates if _normalize_key(candidate.get("product_name")) == product_key
+        ]
+        if product_candidates:
+            return product_candidates
+    return candidates
 
 
 def _create_audit_log(
@@ -1100,6 +1252,309 @@ def _run_item_writeback(
         "unmatched_rows": unmatched_rows,
         "message": "已完成批次内明细匹配并执行可回填字段更新。" if updated_count else "已完成匹配，但当前没有字段变化需要写入。",
     }
+
+
+def _compact_purchase_row(mapped_row: dict) -> dict:
+    return {
+        "material_code": mapped_row.get("material_code"),
+        "product_name": mapped_row.get("product_name"),
+        "spec_model": mapped_row.get("spec_model"),
+        "quantity": mapped_row.get("quantity"),
+        "unit": mapped_row.get("unit"),
+        "unit_price": mapped_row.get("unit_price"),
+        "goods_value": mapped_row.get("goods_value"),
+        "purchase_currency": mapped_row.get("purchase_currency"),
+        "source_approval_no": mapped_row.get("source_approval_no"),
+        "source_instance_id": mapped_row.get("source_instance_id"),
+    }
+
+
+def _build_purchase_updates_for_preview(mapped_row: dict, _target: dict) -> dict:
+    return {
+        "unit_price": mapped_row.get("unit_price"),
+        "purchase_currency": mapped_row.get("purchase_currency"),
+        "goods_value": mapped_row.get("goods_value"),
+        "source_type": mapped_row.get("source_type"),
+        "source_doc_no": mapped_row.get("source_approval_no") or mapped_row.get("source_instance_id") or "",
+        "dingtalk_instance_id": mapped_row.get("source_instance_id") or "",
+        "dingtalk_official_url": mapped_row.get("source_dingtalk_url") or "",
+        "parse_status": "SUCCESS",
+    }
+
+
+def _field_change_status(field_name: str, old_value, new_value) -> str:
+    if new_value in (None, ""):
+        return "empty_source"
+    if old_value in (None, ""):
+        return "fillable"
+    if field_name in {"unit_price", "goods_value"} and _to_float(old_value, default=0) == 0:
+        return "fillable"
+    if _values_equal_for_import(old_value, new_value):
+        return "same"
+    return "conflict"
+
+
+def _build_proposed_changes(target: dict, field_updates: dict) -> list[dict]:
+    changes: list[dict] = []
+    for field_name, new_value in field_updates.items():
+        old_value = target.get(field_name)
+        status = _field_change_status(field_name, old_value, new_value)
+        changes.append(
+            {
+                "field_name": field_name,
+                "field_label": PURCHASE_FIELD_LABELS.get(field_name, field_name),
+                "old_value": old_value,
+                "new_value": new_value,
+                "status": status,
+                "is_business_field": field_name in PURCHASE_WRITEBACK_FIELDS,
+            }
+        )
+    return changes
+
+
+def _preview_item_writeback(
+    *,
+    batch_name: str,
+    version_name: str | None,
+    mapped_rows: list[dict],
+    update_builder: Callable[[dict, dict], dict],
+) -> dict:
+    if frappe is None:
+        return {
+            "dry_run": True,
+            "matched_count": 0,
+            "fillable_row_count": 0,
+            "conflict_row_count": 0,
+            "same_row_count": 0,
+            "ambiguous_count": 0,
+            "unmatched_count": len(mapped_rows),
+            "matched_rows": [],
+            "ambiguous_rows": [],
+            "unmatched_rows": [_compact_purchase_row(row) for row in mapped_rows],
+            "message": "当前未连接 Frappe，仅完成采购支出 OA 行解析，无法匹配批次 SKU。",
+        }
+
+    batch_doc_name = _resolve_batch_name(batch_name)
+    if not batch_doc_name:
+        return {
+            "matched_count": 0,
+            "fillable_row_count": 0,
+            "conflict_row_count": 0,
+            "same_row_count": 0,
+            "ambiguous_count": 0,
+            "unmatched_count": len(mapped_rows),
+            "matched_rows": [],
+            "ambiguous_rows": [],
+            "unmatched_rows": [_compact_purchase_row(row) for row in mapped_rows],
+            "message": f"未找到批次：{batch_name}",
+        }
+
+    resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
+    if not resolved_version_name:
+        return {
+            "batch_doc_name": batch_doc_name,
+            "matched_count": 0,
+            "fillable_row_count": 0,
+            "conflict_row_count": 0,
+            "same_row_count": 0,
+            "ambiguous_count": 0,
+            "unmatched_count": len(mapped_rows),
+            "matched_rows": [],
+            "ambiguous_rows": [],
+            "unmatched_rows": [_compact_purchase_row(row) for row in mapped_rows],
+            "message": f"批次 {batch_name} 暂无可用版本，无法匹配。",
+        }
+
+    items = _get_batch_items(batch_doc_name, resolved_version_name)
+    indexes = _index_items(items)
+    matched_rows: list[dict] = []
+    ambiguous_rows: list[dict] = []
+    unmatched_rows: list[dict] = []
+
+    for mapped_row in mapped_rows:
+        matched_by, candidates = _match_item(mapped_row, indexes)
+        if not candidates:
+            unmatched_rows.append(_compact_purchase_row(mapped_row))
+            continue
+        if len(candidates) > 1:
+            ambiguous_rows.append(
+                {
+                    "matched_by": matched_by,
+                    "mapped_row": _compact_purchase_row(mapped_row),
+                    "candidate_row_nos": [candidate.get("row_no") for candidate in candidates],
+                    "candidate_items": [
+                        {
+                            "name": candidate.get("name"),
+                            "row_no": candidate.get("row_no"),
+                            "material_code": candidate.get("material_code"),
+                            "product_name": candidate.get("product_name"),
+                            "spec_model": candidate.get("spec_model"),
+                        }
+                        for candidate in candidates[:10]
+                    ],
+                }
+            )
+            continue
+
+        target = candidates[0]
+        proposed_changes = _build_proposed_changes(target, update_builder(mapped_row, target))
+        business_changes = [change for change in proposed_changes if change["is_business_field"]]
+        matched_rows.append(
+            {
+                "matched_by": matched_by,
+                "target_item_name": target.get("name"),
+                "target_row_no": target.get("row_no"),
+                "target_material_code": target.get("material_code"),
+                "target_product_name": target.get("product_name"),
+                "target_spec_model": target.get("spec_model"),
+                "mapped_row": _compact_purchase_row(mapped_row),
+                "proposed_changes": proposed_changes,
+                "business_changes": business_changes,
+                "has_fillable": any(change["status"] == "fillable" for change in business_changes),
+                "has_conflict": any(change["status"] == "conflict" for change in business_changes),
+                "all_business_same": bool(business_changes)
+                and all(change["status"] == "same" for change in business_changes),
+            }
+        )
+
+    fillable_row_count = sum(1 for row in matched_rows if row["has_fillable"])
+    conflict_row_count = sum(1 for row in matched_rows if row["has_conflict"])
+    same_row_count = sum(1 for row in matched_rows if row["all_business_same"])
+    message = "采购支出 OA 预览已完成，当前未写入任何成本字段。"
+    if conflict_row_count:
+        message += " 发现已有金额/币种与采购 OA 不一致，需要人工确认。"
+    elif fillable_row_count:
+        message += " 可用于补齐空的采购单价、币种或货值。"
+
+    return {
+        "batch_doc_name": batch_doc_name,
+        "version_name": resolved_version_name,
+        "matched_count": len(matched_rows),
+        "fillable_row_count": fillable_row_count,
+        "conflict_row_count": conflict_row_count,
+        "same_row_count": same_row_count,
+        "ambiguous_count": len(ambiguous_rows),
+        "unmatched_count": len(unmatched_rows),
+        "matched_rows": matched_rows,
+        "ambiguous_rows": ambiguous_rows,
+        "unmatched_rows": unmatched_rows,
+        "message": message,
+    }
+
+
+def preview_linked_purchase_expense_oa(
+    *,
+    batch_name: str,
+    version_name: str | None = None,
+    env_file: str | None = None,
+    linked_purchase_json: str | None = None,
+    purchase_summaries_json: str | None = None,
+) -> dict:
+    """预览当前批次关联采购支出 OA 能补哪些采购价格字段，不写入数据。"""
+
+    batch_doc_name = _resolve_batch_name(batch_name) if frappe is not None else None
+    batch_trace = _get_batch_trace_row(batch_doc_name) if batch_doc_name else {"batch_no": batch_name}
+    linked_approvals = _load_json_list(linked_purchase_json) or _get_linked_purchase_approvals_from_extra(
+        batch_trace.get("extra_json")
+    )
+    purchase_summaries = _load_purchase_summaries_from_json(purchase_summaries_json)
+
+    if not linked_approvals and not purchase_summaries:
+        return {
+            "ok": True,
+            "dry_run": frappe is None,
+            "batch_name": batch_name,
+            "batch_doc_name": batch_doc_name,
+            "batch_no": batch_trace.get("batch_no") or batch_name,
+            "linked_purchase_count": 0,
+            "purchase_summary_count": 0,
+            "mapped_purchase_row_count": 0,
+            "writeback_preview": {
+                "matched_count": 0,
+                "fillable_row_count": 0,
+                "conflict_row_count": 0,
+                "same_row_count": 0,
+                "ambiguous_count": 0,
+                "unmatched_count": 0,
+                "matched_rows": [],
+                "ambiguous_rows": [],
+                "unmatched_rows": [],
+                "message": "当前批次没有关联采购支出审批单。",
+            },
+            "message": "当前批次没有关联采购支出审批单。",
+        }
+
+    if not purchase_summaries:
+        purchase_summaries = _pull_purchase_summaries_from_dingtalk(
+            linked_approvals=linked_approvals,
+            env_file=env_file,
+        )
+
+    mapped_rows: list[dict] = []
+    for summary in purchase_summaries:
+        source_approval_no = summary.get("source_approval_no") or ""
+        source_instance_id = summary.get("source_instance_id") or ""
+        source_dingtalk_url = summary.get("source_dingtalk_url") or ""
+        for row in summary.get("mapped_preview_items") or []:
+            if not isinstance(row, dict):
+                continue
+            mapped_rows.append(
+                {
+                    **row,
+                    "source_approval_no": row.get("source_approval_no") or source_approval_no,
+                    "source_instance_id": row.get("source_instance_id") or source_instance_id,
+                    "source_dingtalk_url": row.get("source_dingtalk_url") or source_dingtalk_url,
+                    "source_type": row.get("source_type") or "PURCHASE_EXPENSE_OA",
+                }
+            )
+
+    writeback_preview = _preview_item_writeback(
+        batch_name=batch_doc_name or batch_name,
+        version_name=version_name,
+        mapped_rows=mapped_rows,
+        update_builder=_build_purchase_updates_for_preview,
+    )
+
+    return {
+        "ok": True,
+        "dry_run": frappe is None,
+        "batch_name": batch_name,
+        "batch_doc_name": batch_doc_name or writeback_preview.get("batch_doc_name"),
+        "batch_no": batch_trace.get("batch_no") or batch_name,
+        "version_name": writeback_preview.get("version_name") or version_name,
+        "linked_purchase_count": len(linked_approvals),
+        "linked_purchase_approvals": linked_approvals,
+        "purchase_summary_count": len(purchase_summaries),
+        "purchase_summaries": [
+            {
+                "source_approval_no": summary.get("source_approval_no"),
+                "source_instance_id": summary.get("source_instance_id"),
+                "approval_title": summary.get("approval_title"),
+                "approval_status": summary.get("approval_status"),
+                "purchase_currency": summary.get("purchase_currency"),
+                "detail_row_count": summary.get("detail_row_count"),
+            }
+            for summary in purchase_summaries
+        ],
+        "mapped_purchase_row_count": len(mapped_rows),
+        "mapped_preview_items": [_compact_purchase_row(row) for row in mapped_rows[:20]],
+        "writeback_targets": [PURCHASE_FIELD_LABELS[field] for field in PURCHASE_WRITEBACK_FIELDS],
+        "writeback_preview": writeback_preview,
+        "message": writeback_preview.get("message") or "采购支出 OA 回填预览已生成，当前未写入任何字段。",
+    }
+
+
+def preview_linked_purchase_expense_oa_from_env() -> dict:
+    """从环境变量预览关联采购支出 OA，适合 bench execute 调试。"""
+
+    batch_name = str(os.environ.get("OVERSEAS_COST_BATCH") or os.environ.get("OVERSEAS_COST_BATCH_NAME") or "").strip()
+    if not batch_name:
+        raise ValueError("请设置 OVERSEAS_COST_BATCH。")
+    return preview_linked_purchase_expense_oa(
+        batch_name=batch_name,
+        version_name=str(os.environ.get("OVERSEAS_COST_VERSION") or "").strip() or None,
+        env_file=str(os.environ.get("DINGTALK_ENV_FILE") or "").strip() or None,
+    )
 
 
 def import_purchase_expense_oa(

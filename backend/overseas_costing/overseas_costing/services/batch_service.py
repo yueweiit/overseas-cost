@@ -263,6 +263,16 @@ ITEM_FILTER_FIELDS = (
 )
 ITEM_KEYWORD_FIELDS = ITEM_FILTER_FIELDS + ("project_collection", "transport_mode")
 DEFAULT_FX_RMB_TO_MXN = 2.6
+HIDDEN_APPROVAL_STATUSES = ("TERMINATED", "CANCELED", "CANCELLED", "REVOKED", "撤销", "已撤销")
+
+
+def is_hidden_approval_status(status: str | None) -> bool:
+    """判断钉钉审批状态是否不应在成本表格中展示。"""
+
+    normalized = str(status or "").strip().upper()
+    if not normalized:
+        return False
+    return any(str(hidden).upper() in normalized for hidden in HIDDEN_APPROVAL_STATUSES)
 
 
 def _load_batch_payload(batch_payload: str | dict | None) -> dict:
@@ -489,11 +499,11 @@ def get_batch_list(filters: dict) -> dict:
             "total": 0,
         }
 
-    db_filters = {}
+    db_filters = []
     if filters.get("transport_mode"):
-        db_filters["transport_mode"] = filters["transport_mode"]
+        db_filters.append(["transport_mode", "=", filters["transport_mode"]])
     if filters.get("status"):
-        db_filters["status"] = filters["status"]
+        db_filters.append(["status", "=", filters["status"]])
 
     keyword = filters.get("keyword")
     query_kwargs = {
@@ -509,6 +519,7 @@ def get_batch_list(filters: dict) -> dict:
             "source_file_name",
             "source_sheet",
             "source_range",
+            "source_approval_status",
             "status",
             "current_version",
             "item_count",
@@ -530,7 +541,11 @@ def get_batch_list(filters: dict) -> dict:
             ["project_collection", "like", like_keyword],
         ]
 
-    items = frappe.get_all("Overseas Cost Batch", **query_kwargs)
+    items = [
+        item
+        for item in frappe.get_all("Overseas Cost Batch", **query_kwargs)
+        if not is_hidden_approval_status(item.get("source_approval_status"))
+    ]
     return {
         "ok": True,
         "message": "批次列表已返回。",
