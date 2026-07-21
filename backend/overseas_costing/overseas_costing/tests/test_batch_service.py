@@ -61,6 +61,7 @@ def test_create_batch_dry_run_builds_manual_batch_and_version() -> None:
                 "waybill_no": "HPCU5155607",
                 "transport_mode": "海运",
                 "project_collection": "Yuewei",
+                "source_dingtalk_url": "https://aflow.dingtalk.com/dingtalk/web/query/pchomepage.htm#/plainapproval?procInstId=PROC-MANUAL-001",
             },
             ensure_ascii=False,
         )
@@ -72,6 +73,7 @@ def test_create_batch_dry_run_builds_manual_batch_and_version() -> None:
     assert result["batch"]["waybill_no"] == "HPCU5155607"
     assert result["batch"]["transport_mode"] == "SEA"
     assert result["batch"]["source_type"] == "manual"
+    assert result["batch"]["source_instance_id"] == "PROC-MANUAL-001"
     assert result["version"]["version_code"] == "手工-MANUAL-001"
     assert result["version"]["is_current"] == 1
 

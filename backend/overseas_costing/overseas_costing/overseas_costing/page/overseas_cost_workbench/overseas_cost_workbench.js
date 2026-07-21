@@ -2277,6 +2277,7 @@ class OverseasCostWorkbench {
         { fieldtype: "Select", fieldname: "transport_mode", label: "运输方式", options: "海运\n空运\n快递", default: "海运" },
         { fieldtype: "Data", fieldname: "project_collection", label: "项目归集" },
         { fieldtype: "Data", fieldname: "source_approval_no", label: "钉钉审批编号" },
+        { fieldtype: "Data", fieldname: "source_instance_id", label: "钉钉实例ID（procInstId）" },
         { fieldtype: "Data", fieldname: "source_dingtalk_url", label: "钉钉审批链接" },
         { fieldtype: "Small Text", fieldname: "source_remark", label: "备注" },
       ],
@@ -2288,6 +2289,8 @@ class OverseasCostWorkbench {
           customs_no: String(values.customs_no || "").trim(),
           waybill_no: String(values.waybill_no || "").trim(),
           container_no: String(values.container_no || "").trim(),
+          source_instance_id: String(values.source_instance_id || "").trim(),
+          source_dingtalk_url: String(values.source_dingtalk_url || "").trim(),
         };
         const label = batchPayload.customs_no || batchPayload.waybill_no || batchPayload.batch_no;
         frappe.confirm(

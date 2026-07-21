@@ -8,7 +8,8 @@
 
 from __future__ import annotations
 
-from urllib.parse import quote
+import re
+from urllib.parse import quote, unquote
 
 MOBILE_APPROVAL_URL_TEMPLATE = (
     "https://aflow.dingtalk.com/dingtalk/mobile/homepage.htm"
@@ -19,15 +20,38 @@ DESKTOP_PROTOCOL_URL_TEMPLATE = (
     "dingtalk://dingtalkclient/page/link?url={encoded_mobile_url}&pc_slide=true"
 )
 
+PROC_INST_ID_PATTERN = re.compile(r"(?:[?#&]|^)procInstId=([^&#\s]+)", re.IGNORECASE)
+
 
 def _clean(value: str | None) -> str:
     return str(value or "").strip()
 
 
+def _looks_like_url(value: str) -> bool:
+    text = _clean(value).lower()
+    return "://" in text or text.startswith("dingtalk:")
+
+
+def extract_dingtalk_instance_id(value: str | None) -> str:
+    """从钉钉审批链接中提取 procInstId。"""
+
+    text = _clean(value)
+    if not text:
+        return ""
+
+    for candidate in (text, unquote(text)):
+        match = PROC_INST_ID_PATTERN.search(candidate)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
 def build_mobile_approval_url(instance_id: str | None) -> str:
     """生成钉钉移动审批页链接。"""
 
-    normalized = _clean(instance_id)
+    normalized = extract_dingtalk_instance_id(instance_id) or _clean(instance_id)
+    if _looks_like_url(normalized):
+        return ""
     if not normalized:
         return ""
     return MOBILE_APPROVAL_URL_TEMPLATE.format(instance_id=normalized)
@@ -52,8 +76,8 @@ def build_dingtalk_order_payload(
     """整理成前端可直接使用的钉钉原单跳转信息。"""
 
     approval_no = _clean(approval_no)
-    instance_id = _clean(instance_id)
     official_url = _clean(official_url)
+    instance_id = extract_dingtalk_instance_id(instance_id) or _clean(instance_id) or extract_dingtalk_instance_id(official_url)
     mobile_url = build_mobile_approval_url(instance_id)
     desktop_url = build_desktop_approval_url(instance_id)
     open_url = desktop_url or official_url

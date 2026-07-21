@@ -21,7 +21,7 @@ except Exception:  # pragma: no cover - 本地无 Frappe 环境时保持可导�
     frappe = None
 
 from overseas_costing.services import attachment_parse_service
-from overseas_costing.utils.dingtalk import build_dingtalk_order_payload
+from overseas_costing.utils.dingtalk import build_dingtalk_order_payload, extract_dingtalk_instance_id
 from overseas_costing.utils.excel_blocks import (
     select_excel_blocks,
     summarize_excel_blocks,
@@ -587,6 +587,8 @@ def _resolve_or_create_excel_batch(
     existing_name = frappe.db.get_value("Overseas Cost Batch", {"batch_no": batch_no}, "name")
     source_meta = {key: value for key, value in block.items() if key != "items" and value not in (None, "")}
     waybill_no = block.get("waybillNo") or ("" if is_attachment_detail else batch_no)
+    source_dingtalk_url = block.get("sourceDingtalkUrl") or block.get("dingtalkUrl") or block.get("officialUrl") or ""
+    source_instance_id = block.get("sourceInstanceId") or extract_dingtalk_instance_id(source_dingtalk_url) or ""
     values = {
         "batch_no": batch_no,
         "customs_no": block.get("customsNo") or "",
@@ -598,7 +600,8 @@ def _resolve_or_create_excel_batch(
         "source_sheet": source_sheet or block.get("sourceSheet") or "",
         "source_range": block.get("sourceRange") or "",
         "source_approval_no": block.get("sourceApprovalNo") or "",
-        "source_instance_id": block.get("sourceInstanceId") or "",
+        "source_instance_id": source_instance_id,
+        "source_dingtalk_url": source_dingtalk_url,
         "status": "Imported",
         "import_remark": "Imported from Excel parser",
         "source_remark": block.get("remark") or "",

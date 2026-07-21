@@ -6,6 +6,7 @@ from overseas_costing.utils.dingtalk import (
     build_desktop_approval_url,
     build_dingtalk_order_payload,
     build_mobile_approval_url,
+    extract_dingtalk_instance_id,
 )
 
 
@@ -42,3 +43,25 @@ def test_build_dingtalk_order_payload_fallback_to_official_url() -> None:
     assert payload["desktop_url"] == ""
     assert payload["open_mode"] == "web_url"
     assert payload["open_url"] == "https://oa.dingtalk.com/approval/detail"
+
+
+def test_extract_dingtalk_instance_id_from_pc_approval_url() -> None:
+    url = (
+        "https://aflow.dingtalk.com/dingtalk/web/query/pchomepage.htm?from=oflow&op=true"
+        "#/plainapproval?procInstId=aR2wGNueQB-FVuGOgSAZdA04891770039043"
+    )
+
+    assert extract_dingtalk_instance_id(url) == "aR2wGNueQB-FVuGOgSAZdA04891770039043"
+
+
+def test_build_dingtalk_order_payload_uses_proc_inst_id_from_official_url() -> None:
+    official_url = (
+        "https://aflow.dingtalk.com/dingtalk/web/query/pchomepage.htm"
+        "#/plainapproval?procInstId=PROC-URL-001"
+    )
+
+    payload = build_dingtalk_order_payload(batch_name="BATCH-003", official_url=official_url)
+
+    assert payload["instance_id"] == "PROC-URL-001"
+    assert payload["open_mode"] == "desktop_protocol"
+    assert payload["open_url"] == payload["desktop_url"]

@@ -12,7 +12,7 @@ try:
 except Exception:  # pragma: no cover - 本地无 Frappe 环境时保持可导入
     frappe = None
 
-from overseas_costing.utils.dingtalk import build_dingtalk_order_payload
+from overseas_costing.utils.dingtalk import build_dingtalk_order_payload, extract_dingtalk_instance_id
 
 
 def _get_batch_source_meta(batch_name: str) -> dict:
@@ -64,9 +64,11 @@ def _get_batch_source_meta(batch_name: str) -> dict:
             for item in item_rows:
                 if item.get("dingtalk_instance_id") or item.get("dingtalk_official_url"):
                     meta["source_approval_no"] = meta.get("source_approval_no") or item.get("source_doc_no") or ""
-                    meta["source_instance_id"] = item.get("dingtalk_instance_id") or ""
+                    meta["source_instance_id"] = item.get("dingtalk_instance_id") or extract_dingtalk_instance_id(item.get("dingtalk_official_url")) or ""
                     meta["source_dingtalk_url"] = item.get("dingtalk_official_url") or ""
                     break
+    if not meta.get("source_instance_id"):
+        meta["source_instance_id"] = extract_dingtalk_instance_id(meta.get("source_dingtalk_url"))
     return meta
 
 
@@ -280,6 +282,8 @@ def _clean_payload_text(payload: dict, fieldname: str) -> str:
 
 def _build_manual_batch_values(payload: dict) -> dict:
     batch_no = _clean_payload_text(payload, "batch_no")
+    source_dingtalk_url = _clean_payload_text(payload, "source_dingtalk_url")
+    source_instance_id = _clean_payload_text(payload, "source_instance_id") or extract_dingtalk_instance_id(source_dingtalk_url)
     values = {
         "batch_no": batch_no,
         "customs_no": _clean_payload_text(payload, "customs_no"),
@@ -291,8 +295,8 @@ def _build_manual_batch_values(payload: dict) -> dict:
         "project_collection": _clean_payload_text(payload, "project_collection"),
         "source_type": "manual",
         "source_approval_no": _clean_payload_text(payload, "source_approval_no"),
-        "source_instance_id": _clean_payload_text(payload, "source_instance_id"),
-        "source_dingtalk_url": _clean_payload_text(payload, "source_dingtalk_url"),
+        "source_instance_id": source_instance_id,
+        "source_dingtalk_url": source_dingtalk_url,
         "status": "Draft",
         "confirm_status": "Pending",
         "writeback_status": "Not Started",
