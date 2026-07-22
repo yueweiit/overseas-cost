@@ -141,6 +141,16 @@ def upload_attachment(batch_name: str, version_name: str | None = None, file_url
 
 
 @frappe.whitelist()
+def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
+    """查询钉钉发起表单附件记录；评论附件本阶段不纳入。"""
+
+    return import_service.list_oa_form_attachments(
+        batch_name=batch_name,
+        limit=limit,
+    )
+
+
+@frappe.whitelist()
 def preview_tax_certificate_pdf(
     source_name: str | None = None,
     file_path: str | None = None,
@@ -268,6 +278,48 @@ def apply_linked_purchase_expense_fillable_fields(
         env_file=env_file,
         linked_purchase_json=linked_purchase_json,
         purchase_summaries_json=purchase_summaries_json,
+    )
+
+
+@frappe.whitelist()
+def preview_packing_list_attachment(
+    batch_name: str,
+    attachment_name: str | None = None,
+    file_url: str | None = None,
+    version_name: str | None = None,
+    template_hint: str | None = None,
+    sheet_rows_json: str | None = None,
+) -> dict:
+    """预览装箱单/物流附件可补哪些实际发货、重量、体积字段，不写入数据。"""
+
+    return import_service.preview_packing_list_attachment(
+        batch_name=batch_name,
+        attachment_name=attachment_name,
+        file_url=file_url,
+        version_name=version_name,
+        template_hint=template_hint,
+        sheet_rows_json=sheet_rows_json,
+    )
+
+
+@frappe.whitelist()
+def apply_packing_list_fillable_fields(
+    batch_name: str,
+    attachment_name: str | None = None,
+    file_url: str | None = None,
+    version_name: str | None = None,
+    template_hint: str | None = None,
+    sheet_rows_json: str | None = None,
+) -> dict:
+    """确认补入装箱单/物流附件中可安全写入的实际发货、重量、体积字段。"""
+
+    return import_service.apply_packing_list_fillable_fields(
+        batch_name=batch_name,
+        attachment_name=attachment_name,
+        file_url=file_url,
+        version_name=version_name,
+        template_hint=template_hint,
+        sheet_rows_json=sheet_rows_json,
     )
 
 

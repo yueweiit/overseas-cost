@@ -836,7 +836,7 @@
 .ocw-col-money { width: 120px; }
 .ocw-col-money-wide { width: 150px; }
 .ocw-col-value { width: 140px; }
-.ocw-col-action { width: 206px; }
+.ocw-col-action { width: 156px; }
 
 .ocw-parent-row {
   height: 55px;
@@ -2772,6 +2772,78 @@
 .ocw-purchase-modal .modal-body {
   max-height: calc(100vh - 180px);
   overflow: auto;
+}
+
+.ocw-quick-modal .modal-dialog {
+  width: min(520px, calc(100vw - 32px));
+}
+
+.ocw-quick-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.ocw-quick-context {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.ocw-quick-context span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.ocw-quick-context strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #111827;
+  font-size: 13px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocw-quick-card {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 12px;
+  text-align: left;
+  border: 1px solid #dbe6e4;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.ocw-quick-card:hover {
+  border-color: rgba(13, 115, 119, 0.45);
+  background: #f8fcfb;
+}
+
+.ocw-quick-card strong {
+  color: var(--ocw-ink);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.ocw-quick-card span {
+  color: var(--ocw-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ocw-quick-card.danger {
+  border-color: rgba(200, 38, 31, 0.2);
+  background: #fffafa;
+}
+
+.ocw-quick-card.danger strong {
+  color: #c8261f;
 }
 
 .ocw-purchase-preview {

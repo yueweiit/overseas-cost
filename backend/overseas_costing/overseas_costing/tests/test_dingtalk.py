@@ -15,10 +15,12 @@ from overseas_costing.utils.dingtalk import (
 from overseas_costing.scripts.import_oa_logistics import (
     DEFAULT_LOGISTICS_PROCESS_CODE,
     _merge_oa_extra_json,
+    _sync_oa_form_attachments,
     _normalize_legacy_instance,
     build_oa_item_values_from_approval,
     build_batch_values_from_approval,
     build_purchase_expense_item_values_from_approval,
+    extract_form_attachments,
     extract_oa_goods_rows,
     extract_form_fields,
     extract_linked_purchase_approvals,
@@ -145,6 +147,62 @@ def test_extract_linked_purchase_approvals_from_relate_field_ext_value() -> None
     assert linked[0]["open_url"].startswith("dingtalk://")
     assert summary["linked_purchase_count"] == 2
     assert summary["linked_purchase_approvals"][1]["approval_no"] == "202604150041000081318"
+
+
+def test_extract_form_attachments_ignores_comment_attachments() -> None:
+    instance = {
+        "processInstanceId": "PROC-SEA-ATTACH",
+        "businessId": "202607220001",
+        "formComponentValues": [
+            {
+                "componentType": "DDAttachment",
+                "name": "Adjunto物品清单/运费报价等附件信息",
+                "value": json.dumps(
+                    [
+                        {
+                            "fileName": "2026.7.3DHL快递清单.xlsx",
+                            "fileId": "FILE-001",
+                            "spaceId": "SPACE-001",
+                            "fileSize": 2048,
+                        },
+                        {
+                            "fileName": "7月份燃油附加费.png",
+                            "fileId": "FILE-002",
+                            "spaceId": "SPACE-001",
+                        },
+                    ],
+                    ensure_ascii=False,
+                ),
+            }
+        ],
+        "comments": [
+            {
+                "attachments": [
+                    {"fileName": "评论里的凭证.pdf", "fileId": "COMMENT-FILE-001"},
+                ]
+            }
+        ],
+    }
+
+    attachments = extract_form_attachments(instance)
+    summary = summarize_approval(instance)
+    values = build_batch_values_from_approval(
+        {
+            **summary,
+            "transport_mode_raw": "contenedor marítimo海运整柜",
+            "logistics_no": "TCLU1234567",
+        }
+    )
+    extra = json.loads(values["extra_json"])
+
+    assert len(attachments) == 2
+    assert attachments[0]["file_name"] == "2026.7.3DHL快递清单.xlsx"
+    assert attachments[0]["attachment_type"] == "Packing List"
+    assert attachments[1]["attachment_type"] == "Logistics Bill"
+    assert "评论里的凭证.pdf" not in [row["file_name"] for row in attachments]
+    assert summary["oa_form_attachment_count"] == 2
+    assert values["source_attachment_count"] == 2
+    assert extra["oa_form_attachments"][0]["file_id"] == "FILE-001"
 
 
 def test_extract_purchase_expense_rows_keeps_first_non_empty_currency() -> None:
@@ -375,6 +433,85 @@ def test_save_sea_approvals_to_erp_dry_run_returns_trace_preview() -> None:
     assert result["dry_run"] is True
     assert result["valid_count"] == 1
     assert result["items"][0]["batch_no"] == "HPCU5155607"
+
+
+def test_sync_oa_form_attachments_creates_attachment_records(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    inserted_attachments = []
+    inserted_audits = []
+
+    class FakeDoc:
+        def __init__(self, payload):
+            self.payload = dict(payload)
+            self.__dict__.update(payload)
+            self.name = payload.get("name") or f"DOC-{len(inserted_attachments) + len(inserted_audits) + 1}"
+
+        def insert(self, **_kwargs):
+            if self.payload.get("doctype") == "Overseas Cost Attachment":
+                self.name = f"ATTACH-{len(inserted_attachments) + 1}"
+                self.payload["name"] = self.name
+                inserted_attachments.append(self.payload)
+            elif self.payload.get("doctype") == "Overseas Cost Audit Log":
+                self.name = f"AUDIT-{len(inserted_audits) + 1}"
+                self.payload["name"] = self.name
+                inserted_audits.append(self.payload)
+            return self
+
+        def save(self, **_kwargs):
+            return self
+
+    class FakeDB:
+        @staticmethod
+        def get_value(*_args, **_kwargs):
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        class session:
+            user = "tester@example.com"
+
+        @staticmethod
+        def get_doc(*args):
+            if len(args) == 1 and isinstance(args[0], dict):
+                return FakeDoc(args[0])
+            raise AssertionError(args)
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+
+    result = _sync_oa_form_attachments(
+        batch_name="BATCH-001",
+        version_name="VER-001",
+        approval_item={
+            "source_approval_no": "202607220001",
+            "source_instance_id": "PROC-SEA-ATTACH",
+            "oa_form_attachments": [
+                {
+                    "source_field": "Adjunto物品清单/运费报价等附件信息",
+                    "component_type": "DDAttachment",
+                    "file_id": "FILE-001",
+                    "space_id": "SPACE-001",
+                    "file_name": "2026.7.3DHL快递清单.xlsx",
+                    "file_ext": "xlsx",
+                    "file_url": "",
+                    "attachment_type": "Packing List",
+                    "raw": {"fileName": "2026.7.3DHL快递清单.xlsx", "fileId": "FILE-001"},
+                }
+            ],
+        },
+    )
+
+    assert result["created_count"] == 1
+    assert inserted_attachments[0]["batch"] == "BATCH-001"
+    assert inserted_attachments[0]["version"] == "VER-001"
+    assert inserted_attachments[0]["source_type"] == "OA"
+    assert inserted_attachments[0]["attachment_type"] == "Packing List"
+    assert inserted_attachments[0]["file_name"] == "2026.7.3DHL快递清单.xlsx"
+    assert inserted_attachments[0]["parse_status"] == "Queued"
+    assert "FILE-001" in inserted_attachments[0]["source_doc_no"]
+    assert json.loads(inserted_attachments[0]["parse_result_json"])["comment_attachments_included"] is False
+    assert inserted_audits[0]["field_name"] == "oa_form_attachments"
 
 
 def test_revoked_approval_is_skipped_when_saving_oa_trace() -> None:

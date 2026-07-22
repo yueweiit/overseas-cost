@@ -44,13 +44,32 @@ PURCHASE_WRITEBACK_FIELDS = (
     "goods_value",
 )
 PURCHASE_FIELD_LABELS = {
-    "unit_price": "采购单价",
-    "purchase_currency": "采购币种",
-    "goods_value": "采购货值",
+    "unit_price": "单价Precio",
+    "purchase_currency": "币种Moneda",
+    "goods_value": "总金额Monto Total",
     "source_type": "来源类型",
     "source_doc_no": "来源审批编号",
     "dingtalk_instance_id": "钉钉实例ID",
     "dingtalk_official_url": "钉钉原单链接",
+    "parse_status": "解析状态",
+}
+PACKING_WRITEBACK_FIELDS = (
+    "actual_shipped_qty",
+    "gross_weight_kg",
+    "volume_m3",
+    "volume_weight_kg",
+    "chargeable_weight_kg",
+)
+PACKING_FIELD_LABELS = {
+    "actual_shipped_qty": "实际发货数量",
+    "gross_weight_kg": "毛重 KG",
+    "volume_m3": "体积 m3",
+    "volume_weight_kg": "体积重 KG",
+    "chargeable_weight_kg": "计费重 KG",
+    "hs_code": "海关编码",
+    "source_type": "来源类型",
+    "source_file_name": "来源文件",
+    "source_doc_no": "来源单号",
     "parse_status": "解析状态",
 }
 DINGTALK_ENV_FILE_CANDIDATES = (
@@ -390,6 +409,89 @@ def upload_attachment(batch_name: str, version_name: str | None = None, file_url
         "version_name": version_name,
         "file_url": file_url,
         "message": "附件登记骨架已创建，后续接 OCR / AI 解析。",
+    }
+
+
+def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
+    """返回钉钉发起表单附件记录；评论附件本阶段不纳入。"""
+
+    if frappe is None:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "batch_name": batch_name,
+            "items": [],
+            "total": 0,
+            "message": "当前未连接 Frappe，返回空附件记录。",
+        }
+
+    batch_doc_name = _resolve_batch_name(batch_name)
+    if not batch_doc_name:
+        return {
+            "ok": False,
+            "batch_name": batch_name,
+            "items": [],
+            "total": 0,
+            "message": f"未找到批次：{batch_name}",
+        }
+
+    requested_limit = max(1, min(int(limit or 50), 200))
+    rows = frappe.get_all(
+        "Overseas Cost Attachment",
+        filters={"batch": batch_doc_name, "source_type": "OA"},
+        fields=[
+            "name",
+            "batch",
+            "version",
+            "source_type",
+            "attachment_type",
+            "source_doc_no",
+            "file_name",
+            "file_url",
+            "parse_status",
+            "parse_result_json",
+            "mapped_result_json",
+            "remark",
+            "creation",
+            "modified",
+        ],
+        order_by="creation asc",
+        limit_page_length=requested_limit,
+    )
+
+    items = []
+    for row in rows:
+        parse_result = _json_loads_dict(row.get("parse_result_json"))
+        mapped_result = _json_loads_dict(row.get("mapped_result_json"))
+        items.append(
+            {
+                "name": row.get("name"),
+                "batch": row.get("batch"),
+                "version": row.get("version"),
+                "attachment_type": row.get("attachment_type") or "Other",
+                "source_doc_no": row.get("source_doc_no") or "",
+                "file_name": row.get("file_name") or "",
+                "file_url": row.get("file_url") or "",
+                "parse_status": row.get("parse_status") or "",
+                "source_field": parse_result.get("source_field") or "",
+                "file_id": parse_result.get("file_id") or "",
+                "space_id": parse_result.get("space_id") or "",
+                "file_ext": parse_result.get("file_ext") or "",
+                "parse_targets": mapped_result.get("parse_targets") or [],
+                "remark": row.get("remark") or "",
+                "creation": row.get("creation"),
+                "modified": row.get("modified"),
+            }
+        )
+
+    return {
+        "ok": True,
+        "batch_name": batch_name,
+        "batch_doc_name": batch_doc_name,
+        "items": items,
+        "total": len(items),
+        "comment_attachments_included": False,
+        "message": "钉钉发起表单附件记录已返回；评论附件未纳入。",
     }
 
 
@@ -1067,13 +1169,20 @@ def _index_items(items: list[dict]) -> dict[str, dict[str, list[dict]]]:
     return indexes
 
 
-def _match_item(mapped_row: dict, indexes: dict[str, dict[str, list[dict]]]) -> tuple[str, list[dict]]:
+def _match_item(
+    mapped_row: dict,
+    indexes: dict[str, dict[str, list[dict]]],
+    *,
+    trust_unique_material_code: bool = False,
+) -> tuple[str, list[dict]]:
     for field in ITEM_KEY_FIELDS:
         key = _normalize_key(mapped_row.get(field))
         if not key:
             continue
         candidates = indexes[field].get(key, [])
         if candidates:
+            if field == "material_code" and trust_unique_material_code and len(candidates) == 1:
+                return field, candidates
             return field, _narrow_item_candidates(mapped_row, candidates)
     return "", []
 
@@ -1191,6 +1300,7 @@ def _run_item_writeback(
     mapped_rows: list[dict],
     update_builder: Callable[[dict, dict], dict],
     action_remark: str,
+    trust_unique_material_code: bool = False,
 ) -> dict:
     if frappe is None:
         return {
@@ -1238,7 +1348,11 @@ def _run_item_writeback(
     updated_count = 0
 
     for mapped_row in mapped_rows:
-        matched_by, candidates = _match_item(mapped_row, indexes)
+        matched_by, candidates = _match_item(
+            mapped_row,
+            indexes,
+            trust_unique_material_code=trust_unique_material_code,
+        )
         if not candidates:
             unmatched_rows.append(mapped_row)
             continue
@@ -1306,6 +1420,21 @@ def _compact_purchase_row(mapped_row: dict) -> dict:
     }
 
 
+def _compact_packing_row(mapped_row: dict) -> dict:
+    return {
+        "material_code": mapped_row.get("material_code"),
+        "product_name": mapped_row.get("product_name"),
+        "spec_model": mapped_row.get("spec_model"),
+        "actual_shipped_qty": mapped_row.get("actual_shipped_qty"),
+        "gross_weight_kg": mapped_row.get("gross_weight_kg"),
+        "volume_m3": mapped_row.get("volume_m3"),
+        "volume_weight_kg": mapped_row.get("volume_weight_kg"),
+        "chargeable_weight_kg": mapped_row.get("chargeable_weight_kg"),
+        "source_doc_no": mapped_row.get("source_doc_no"),
+        "source_file_name": mapped_row.get("source_file_name"),
+    }
+
+
 def _build_purchase_updates_for_preview(mapped_row: dict, _target: dict) -> dict:
     return {
         "unit_price": mapped_row.get("unit_price"),
@@ -1319,31 +1448,46 @@ def _build_purchase_updates_for_preview(mapped_row: dict, _target: dict) -> dict
     }
 
 
-def _field_change_status(field_name: str, old_value, new_value) -> str:
+def _field_change_status(field_name: str, old_value, new_value, numeric_zero_fillable_fields: set[str] | None = None) -> str:
     if new_value in (None, ""):
         return "empty_source"
     if old_value in (None, ""):
         return "fillable"
-    if field_name in {"unit_price", "goods_value"} and _to_float(old_value, default=0) == 0:
+    zero_fields = numeric_zero_fillable_fields or {"unit_price", "goods_value"}
+    if field_name in zero_fields and _to_float(old_value, default=0) == 0:
         return "fillable"
     if _values_equal_for_import(old_value, new_value):
         return "same"
     return "conflict"
 
 
-def _build_proposed_changes(target: dict, field_updates: dict) -> list[dict]:
+def _build_proposed_changes(
+    target: dict,
+    field_updates: dict,
+    *,
+    field_labels: dict[str, str] | None = None,
+    business_fields: tuple[str, ...] | set[str] | None = None,
+    numeric_zero_fillable_fields: set[str] | None = None,
+) -> list[dict]:
+    resolved_labels = field_labels or PURCHASE_FIELD_LABELS
+    resolved_business_fields = set(business_fields or PURCHASE_WRITEBACK_FIELDS)
     changes: list[dict] = []
     for field_name, new_value in field_updates.items():
         old_value = target.get(field_name)
-        status = _field_change_status(field_name, old_value, new_value)
+        status = _field_change_status(
+            field_name,
+            old_value,
+            new_value,
+            numeric_zero_fillable_fields=numeric_zero_fillable_fields,
+        )
         changes.append(
             {
                 "field_name": field_name,
-                "field_label": PURCHASE_FIELD_LABELS.get(field_name, field_name),
+                "field_label": resolved_labels.get(field_name, field_name),
                 "old_value": old_value,
                 "new_value": new_value,
                 "status": status,
-                "is_business_field": field_name in PURCHASE_WRITEBACK_FIELDS,
+                "is_business_field": field_name in resolved_business_fields,
             }
         )
     return changes
@@ -1355,20 +1499,29 @@ def _preview_item_writeback(
     version_name: str | None,
     mapped_rows: list[dict],
     update_builder: Callable[[dict, dict], dict],
+    field_labels: dict[str, str] | None = None,
+    business_fields: tuple[str, ...] | set[str] | None = None,
+    compact_row: Callable[[dict], dict] | None = None,
+    numeric_zero_fillable_fields: set[str] | None = None,
+    preview_message_prefix: str = "采购支出 OA",
+    fillable_message: str = "可写入匹配行的业务字段。",
+    trust_unique_material_code: bool = False,
 ) -> dict:
+    compact = compact_row or _compact_purchase_row
     if frappe is None:
         return {
             "dry_run": True,
             "matched_count": 0,
             "fillable_row_count": 0,
+            "writable_row_count": 0,
             "conflict_row_count": 0,
             "same_row_count": 0,
             "ambiguous_count": 0,
             "unmatched_count": len(mapped_rows),
             "matched_rows": [],
             "ambiguous_rows": [],
-            "unmatched_rows": [_compact_purchase_row(row) for row in mapped_rows],
-            "message": "当前未连接 Frappe，仅完成采购支出 OA 行解析，无法匹配批次 SKU。",
+            "unmatched_rows": [compact(row) for row in mapped_rows],
+            "message": "当前未连接 Frappe，仅完成来源行解析，无法匹配批次 SKU。",
         }
 
     batch_doc_name = _resolve_batch_name(batch_name)
@@ -1376,13 +1529,14 @@ def _preview_item_writeback(
         return {
             "matched_count": 0,
             "fillable_row_count": 0,
+            "writable_row_count": 0,
             "conflict_row_count": 0,
             "same_row_count": 0,
             "ambiguous_count": 0,
             "unmatched_count": len(mapped_rows),
             "matched_rows": [],
             "ambiguous_rows": [],
-            "unmatched_rows": [_compact_purchase_row(row) for row in mapped_rows],
+            "unmatched_rows": [compact(row) for row in mapped_rows],
             "message": f"未找到批次：{batch_name}",
         }
 
@@ -1392,13 +1546,14 @@ def _preview_item_writeback(
             "batch_doc_name": batch_doc_name,
             "matched_count": 0,
             "fillable_row_count": 0,
+            "writable_row_count": 0,
             "conflict_row_count": 0,
             "same_row_count": 0,
             "ambiguous_count": 0,
             "unmatched_count": len(mapped_rows),
             "matched_rows": [],
             "ambiguous_rows": [],
-            "unmatched_rows": [_compact_purchase_row(row) for row in mapped_rows],
+            "unmatched_rows": [compact(row) for row in mapped_rows],
             "message": f"批次 {batch_name} 暂无可用版本，无法匹配。",
         }
 
@@ -1409,15 +1564,19 @@ def _preview_item_writeback(
     unmatched_rows: list[dict] = []
 
     for mapped_row in mapped_rows:
-        matched_by, candidates = _match_item(mapped_row, indexes)
+        matched_by, candidates = _match_item(
+            mapped_row,
+            indexes,
+            trust_unique_material_code=trust_unique_material_code,
+        )
         if not candidates:
-            unmatched_rows.append(_compact_purchase_row(mapped_row))
+            unmatched_rows.append(compact(mapped_row))
             continue
         if len(candidates) > 1:
             ambiguous_rows.append(
                 {
                     "matched_by": matched_by,
-                    "mapped_row": _compact_purchase_row(mapped_row),
+                    "mapped_row": compact(mapped_row),
                     "candidate_row_nos": [candidate.get("row_no") for candidate in candidates],
                     "candidate_items": [
                         {
@@ -1434,7 +1593,13 @@ def _preview_item_writeback(
             continue
 
         target = candidates[0]
-        proposed_changes = _build_proposed_changes(target, update_builder(mapped_row, target))
+        proposed_changes = _build_proposed_changes(
+            target,
+            update_builder(mapped_row, target),
+            field_labels=field_labels,
+            business_fields=business_fields,
+            numeric_zero_fillable_fields=numeric_zero_fillable_fields,
+        )
         business_changes = [change for change in proposed_changes if change["is_business_field"]]
         matched_rows.append(
             {
@@ -1444,7 +1609,7 @@ def _preview_item_writeback(
                 "target_material_code": target.get("material_code"),
                 "target_product_name": target.get("product_name"),
                 "target_spec_model": target.get("spec_model"),
-                "mapped_row": _compact_purchase_row(mapped_row),
+                "mapped_row": compact(mapped_row),
                 "proposed_changes": proposed_changes,
                 "business_changes": business_changes,
                 "has_fillable": any(change["status"] == "fillable" for change in business_changes),
@@ -1457,17 +1622,23 @@ def _preview_item_writeback(
     fillable_row_count = sum(1 for row in matched_rows if row["has_fillable"])
     conflict_row_count = sum(1 for row in matched_rows if row["has_conflict"])
     same_row_count = sum(1 for row in matched_rows if row["all_business_same"])
-    message = "采购支出 OA 预览已完成，当前未写入任何成本字段。"
+    writable_row_count = sum(
+        1
+        for row in matched_rows
+        if any(change["status"] in {"fillable", "conflict"} for change in row.get("business_changes") or [])
+    )
+    message = f"{preview_message_prefix} 预览已完成，当前未写入任何成本字段。"
     if conflict_row_count:
-        message += " 发现已有金额/币种与采购 OA 不一致，需要人工确认。"
-    elif fillable_row_count:
-        message += " 可用于补齐空的采购单价、币种或货值。"
+        message += " 发现系统已有值与来源数据不一致，写入时将按来源字段更新并保留修改记录。"
+    elif writable_row_count:
+        message += f" {fillable_message}"
 
     return {
         "batch_doc_name": batch_doc_name,
         "version_name": resolved_version_name,
         "matched_count": len(matched_rows),
         "fillable_row_count": fillable_row_count,
+        "writable_row_count": writable_row_count,
         "conflict_row_count": conflict_row_count,
         "same_row_count": same_row_count,
         "ambiguous_count": len(ambiguous_rows),
@@ -1509,6 +1680,7 @@ def preview_linked_purchase_expense_oa(
             "writeback_preview": {
                 "matched_count": 0,
                 "fillable_row_count": 0,
+                "writable_row_count": 0,
                 "conflict_row_count": 0,
                 "same_row_count": 0,
                 "ambiguous_count": 0,
@@ -1550,6 +1722,8 @@ def preview_linked_purchase_expense_oa(
         version_name=version_name,
         mapped_rows=mapped_rows,
         update_builder=_build_purchase_updates_for_preview,
+        fillable_message="可写入匹配行的单价Precio、币种Moneda、总金额Monto Total。",
+        trust_unique_material_code=True,
     )
 
     return {
@@ -1579,12 +1753,12 @@ def apply_linked_purchase_expense_fillable_fields(
     linked_purchase_json: str | None = None,
     purchase_summaries_json: str | None = None,
 ) -> dict:
-    """确认补入关联采购支出 OA 中可安全写入的采购字段。
+    """写入关联采购支出 OA 中已匹配物料行的采购字段。
 
-    安全边界：
+    当前口径：
     1. 只处理预览已匹配到唯一物料行的数据。
-    2. 只写入采购单价、采购币种、采购货值。
-    3. 只写入预览状态为 fillable 的字段；冲突行整行跳过。
+    2. 按钉钉采购审批字段写入单价、币种、总金额。
+    3. 未匹配、多匹配行不写入；已写入字段保留修改记录，后续可人工双击修正。
     """
 
     preview_result = preview_linked_purchase_expense_oa(
@@ -1621,25 +1795,31 @@ def apply_linked_purchase_expense_fillable_fields(
     applied_rows: list[dict] = []
     skipped_rows: list[dict] = []
     changed_field_count = 0
+    matched_rows = writeback_preview.get("matched_rows") or []
+    target_match_counts: dict[str, int] = {}
+    for row in matched_rows:
+        target_item_name = row.get("target_item_name")
+        if target_item_name:
+            target_match_counts[target_item_name] = target_match_counts.get(target_item_name, 0) + 1
 
-    for row in writeback_preview.get("matched_rows") or []:
+    for row in matched_rows:
         target_item_name = row.get("target_item_name")
         business_changes = row.get("business_changes") or []
         if not target_item_name:
             skipped_rows.append({"row": row, "reason": "缺少目标物料行"})
             continue
-        if row.get("has_conflict"):
-            skipped_rows.append({"row": row, "reason": "存在差异，需人工确认"})
+        if target_match_counts.get(target_item_name, 0) > 1:
+            skipped_rows.append({"row": row, "reason": "同一系统物料匹配到多条采购明细，未自动覆盖"})
             continue
-
         field_updates = {
             change.get("field_name"): change.get("new_value")
             for change in business_changes
-            if change.get("field_name") in PURCHASE_WRITEBACK_FIELDS and change.get("status") == "fillable"
+            if change.get("field_name") in PURCHASE_WRITEBACK_FIELDS
+            and change.get("status") in {"fillable", "conflict", "same"}
         }
         field_updates = {field_name: value for field_name, value in field_updates.items() if field_name}
         if not field_updates:
-            skipped_rows.append({"row": row, "reason": "没有可补字段"})
+            skipped_rows.append({"row": row, "reason": "没有可写入字段"})
             continue
 
         mapped_row = row.get("mapped_row") or {}
@@ -1650,7 +1830,7 @@ def apply_linked_purchase_expense_fillable_fields(
             version_name=resolved_version_name,
             row_no=row.get("target_row_no"),
             field_updates=field_updates,
-            action_remark=f"采购支出 OA 确认补入可补字段；来源审批：{source_no}",
+            action_remark=f"采购支出 OA 写入匹配字段；来源审批：{source_no}",
         )
         if changed_fields:
             applied_rows.append(
@@ -1685,9 +1865,231 @@ def apply_linked_purchase_expense_fillable_fields(
         "skipped_rows": skipped_rows,
         "preview_result": preview_result,
         "message": (
-            f"已补入 {updated_count} 行采购字段，共 {changed_field_count} 个字段；冲突、未匹配和多匹配行未写入。"
+            f"已同步 {updated_count} 行采购字段，共 {changed_field_count} 个字段；未匹配、多匹配或同物料多条来源的行未写入。"
             if updated_count
-            else "没有可安全补入的采购字段，未写入数据。"
+            else "没有可同步的采购字段，未写入数据。"
+        ),
+    }
+
+
+def _build_packing_updates_for_preview(mapped_row: dict, _target: dict) -> dict:
+    return {
+        "actual_shipped_qty": mapped_row.get("actual_shipped_qty"),
+        "gross_weight_kg": mapped_row.get("gross_weight_kg"),
+        "volume_m3": mapped_row.get("volume_m3"),
+        "volume_weight_kg": mapped_row.get("volume_weight_kg"),
+        "chargeable_weight_kg": mapped_row.get("chargeable_weight_kg"),
+        "hs_code": mapped_row.get("hs_code"),
+        "source_type": mapped_row.get("source_type") or "PACKING_LIST",
+        "source_file_name": mapped_row.get("source_file_name") or "",
+        "source_doc_no": mapped_row.get("source_doc_no") or mapped_row.get("purchase_order_no") or "",
+        "parse_status": "SUCCESS",
+    }
+
+
+def _build_packing_preview_items(
+    *,
+    attachment_name: str | None = None,
+    file_url: str | None = None,
+    sheet_rows_json: str | None = None,
+) -> tuple[list[dict], dict]:
+    if sheet_rows_json:
+        rows = _build_preview_rows(_load_rows(sheet_rows_json), map_packing_list_row_to_item)
+        for row in rows:
+            row["source_file_name"] = attachment_name or row.get("source_file_name") or ""
+            row["source_doc_no"] = file_url or row.get("source_doc_no") or attachment_name or ""
+        return rows, {"parser": "json_rows", "source": "sheet_rows_json"}
+
+    if not file_url:
+        return [], {"parser": "empty", "source": "none"}
+
+    path = _resolve_excel_file_path(file_url)
+    parser_meta, blocks = parse_yuewei_excel_workbook(path)
+    rows: list[dict] = []
+    for block in blocks:
+        for index, item_row in enumerate(block.get("items") or [], start=1):
+            mapped = map_yuewei_excel_block_item_to_item(block, item_row, row_index=index)
+            mapped["source_type"] = "PACKING_LIST"
+            mapped["source_file_name"] = attachment_name or path.name
+            mapped["source_doc_no"] = mapped.get("source_doc_no") or block.get("sourceDocNo") or block.get("id") or ""
+            rows.append(mapped)
+
+    return rows, {
+        **(parser_meta or {}),
+        "block_count": len(blocks),
+        "item_count": len(rows),
+        "source": "file_url",
+    }
+
+
+def preview_packing_list_attachment(
+    *,
+    batch_name: str,
+    attachment_name: str | None = None,
+    file_url: str | None = None,
+    version_name: str | None = None,
+    template_hint: str | None = None,
+    sheet_rows_json: str | None = None,
+) -> dict:
+    """预览装箱单/物流附件可补哪些实际发货、重量、体积字段，不写入数据。"""
+
+    preview_items, parser_meta = _build_packing_preview_items(
+        attachment_name=attachment_name,
+        file_url=file_url,
+        sheet_rows_json=sheet_rows_json,
+    )
+    parse_task = attachment_parse_service.build_packing_list_parse_task(
+        batch_name=batch_name,
+        version_name=version_name,
+        attachment_name=attachment_name,
+        file_url=file_url,
+        template_hint=template_hint,
+    )
+    writeback_preview = _preview_item_writeback(
+        batch_name=batch_name,
+        version_name=version_name,
+        mapped_rows=preview_items,
+        update_builder=_build_packing_updates_for_preview,
+        field_labels=PACKING_FIELD_LABELS,
+        business_fields=PACKING_WRITEBACK_FIELDS,
+        compact_row=_compact_packing_row,
+        numeric_zero_fillable_fields=set(PACKING_WRITEBACK_FIELDS),
+        preview_message_prefix="装箱单/物流附件",
+        fillable_message="可用于补齐空的实际发货数量、毛重或体积。",
+    )
+
+    return {
+        "ok": True,
+        "dry_run": frappe is None,
+        "batch_name": batch_name,
+        "batch_doc_name": writeback_preview.get("batch_doc_name"),
+        "version_name": writeback_preview.get("version_name") or version_name,
+        "attachment_name": attachment_name,
+        "file_url": file_url,
+        "source_type": "PACKING_LIST",
+        "parser_meta": parser_meta,
+        "parse_task": parse_task,
+        "mapped_preview_count": len(preview_items),
+        "mapped_preview_items": [_compact_packing_row(row) for row in preview_items[:20]],
+        "writeback_targets": [PACKING_FIELD_LABELS[field] for field in PACKING_WRITEBACK_FIELDS],
+        "writeback_preview": writeback_preview,
+        "message": writeback_preview.get("message") or "装箱单/物流附件预览已生成，当前未写入任何字段。",
+    }
+
+
+def apply_packing_list_fillable_fields(
+    *,
+    batch_name: str,
+    attachment_name: str | None = None,
+    file_url: str | None = None,
+    version_name: str | None = None,
+    template_hint: str | None = None,
+    sheet_rows_json: str | None = None,
+) -> dict:
+    """确认补入装箱单/物流附件中可安全写入的实际发货、重量、体积字段。"""
+
+    preview_result = preview_packing_list_attachment(
+        batch_name=batch_name,
+        attachment_name=attachment_name,
+        file_url=file_url,
+        version_name=version_name,
+        template_hint=template_hint,
+        sheet_rows_json=sheet_rows_json,
+    )
+    if not preview_result.get("ok"):
+        return {
+            "ok": False,
+            "preview_result": preview_result,
+            "message": preview_result.get("message") or "装箱单/物流附件预览失败，未写入数据。",
+        }
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "preview_result": preview_result,
+            "message": "当前未连接 Frappe，不能保存装箱单字段。",
+        }
+
+    writeback_preview = preview_result.get("writeback_preview") or {}
+    batch_doc_name = preview_result.get("batch_doc_name") or writeback_preview.get("batch_doc_name")
+    resolved_version_name = preview_result.get("version_name") or writeback_preview.get("version_name") or version_name
+    if not batch_doc_name or not resolved_version_name:
+        return {
+            "ok": False,
+            "preview_result": preview_result,
+            "message": "当前批次或版本未匹配成功，未写入数据。",
+        }
+
+    applied_rows: list[dict] = []
+    skipped_rows: list[dict] = []
+    changed_field_count = 0
+
+    for row in writeback_preview.get("matched_rows") or []:
+        target_item_name = row.get("target_item_name")
+        business_changes = row.get("business_changes") or []
+        if not target_item_name:
+            skipped_rows.append({"row": row, "reason": "缺少目标物料行"})
+            continue
+        if row.get("has_conflict"):
+            skipped_rows.append({"row": row, "reason": "存在差异，需人工确认"})
+            continue
+
+        field_updates = {
+            change.get("field_name"): change.get("new_value")
+            for change in business_changes
+            if change.get("field_name") in PACKING_WRITEBACK_FIELDS and change.get("status") == "fillable"
+        }
+        field_updates = {field_name: value for field_name, value in field_updates.items() if field_name}
+        if not field_updates:
+            skipped_rows.append({"row": row, "reason": "没有可补字段"})
+            continue
+
+        mapped_row = row.get("mapped_row") or {}
+        source_no = mapped_row.get("source_doc_no") or mapped_row.get("source_file_name") or attachment_name or "装箱单/物流附件"
+        changed_fields = _update_item_fields(
+            item_name=target_item_name,
+            batch_doc_name=batch_doc_name,
+            version_name=resolved_version_name,
+            row_no=row.get("target_row_no"),
+            field_updates=field_updates,
+            action_remark=f"装箱单/物流附件确认补入可补字段；来源：{source_no}",
+        )
+        if changed_fields:
+            applied_rows.append(
+                {
+                    "target_item_name": target_item_name,
+                    "target_row_no": row.get("target_row_no"),
+                    "source_doc_no": mapped_row.get("source_doc_no"),
+                    "changed_fields": changed_fields,
+                }
+            )
+            changed_field_count += len(changed_fields)
+
+    if applied_rows:
+        _mark_batch_dirty(batch_doc_name)
+        commit = getattr(getattr(frappe, "db", None), "commit", None)
+        if callable(commit):
+            commit()
+
+    updated_count = len(applied_rows)
+    return {
+        "ok": True,
+        "batch_name": batch_name,
+        "batch_doc_name": batch_doc_name,
+        "version_name": resolved_version_name,
+        "updated_count": updated_count,
+        "changed_field_count": changed_field_count,
+        "skipped_count": len(skipped_rows),
+        "conflict_row_count": writeback_preview.get("conflict_row_count", 0),
+        "unmatched_count": writeback_preview.get("unmatched_count", 0),
+        "ambiguous_count": writeback_preview.get("ambiguous_count", 0),
+        "applied_rows": applied_rows,
+        "skipped_rows": skipped_rows,
+        "preview_result": preview_result,
+        "message": (
+            f"已补入 {updated_count} 行装箱单字段，共 {changed_field_count} 个字段；冲突、未匹配和多匹配行未写入。"
+            if updated_count
+            else "没有可安全补入的装箱单字段，未写入数据。"
         ),
     }
 
@@ -1749,6 +2151,7 @@ def import_purchase_expense_oa(
         mapped_rows=preview_items,
         update_builder=build_purchase_updates,
         action_remark="采购支出 OA 导入回填采购价格字段",
+        trust_unique_material_code=True,
     )
 
     return {

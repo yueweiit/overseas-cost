@@ -92,6 +92,20 @@ PURCHASE_RELATE_FIELD_ALIASES = (
     "órdenes de compra",
     "ordenes de compra",
 )
+ATTACHMENT_FIELD_ALIASES = (
+    "附件",
+    "Adjunto",
+    "物品清单",
+    "运费报价",
+    "Packing",
+    "Packing List",
+    "Factura",
+    "Invoice",
+)
+ATTACHMENT_FILE_ID_KEYS = ("fileId", "file_id", "fileID", "mediaId", "media_id", "downloadId", "id")
+ATTACHMENT_FILE_NAME_KEYS = ("fileName", "file_name", "filename", "name", "title")
+ATTACHMENT_FILE_URL_KEYS = ("fileUrl", "file_url", "downloadUrl", "download_url", "url", "previewUrl", "preview_url")
+ATTACHMENT_SPACE_ID_KEYS = ("spaceId", "space_id", "spaceID")
 DEFAULT_LOGISTICS_PROCESS_CODE = "PROC-RIYJTXWV-CN52YRK70C5499JG0TJ03-3GSSHZQJ-5"
 DEFAULT_FX_RMB_TO_MXN = 2.6
 MAX_AUDIT_TEXT_LENGTH = 20000
@@ -756,6 +770,201 @@ def extract_linked_purchase_approvals(instance: dict) -> list[dict]:
     return approvals
 
 
+def _first_dict_value(source: dict, keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = source.get(key)
+        if value not in (None, ""):
+            return value
+    return ""
+
+
+def _looks_like_attachment_payload(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    has_file_name = any(_clean(value.get(key)) for key in ATTACHMENT_FILE_NAME_KEYS)
+    if not has_file_name:
+        return False
+    return any(
+        _clean(value.get(key))
+        for key in (
+            *ATTACHMENT_FILE_ID_KEYS,
+            *ATTACHMENT_FILE_URL_KEYS,
+            *ATTACHMENT_SPACE_ID_KEYS,
+            "fileSize",
+            "file_size",
+            "size",
+            "extension",
+            "fileType",
+            "file_type",
+        )
+    ) or any(key in value for key in ("fileName", "file_name"))
+
+
+def _file_extension(file_name: str, payload: dict | None = None) -> str:
+    payload = payload or {}
+    explicit = _clean(payload.get("extension") or payload.get("fileType") or payload.get("file_type"))
+    if explicit:
+        return explicit.lower().lstrip(".")
+    suffix = Path(file_name).suffix.lower().lstrip(".")
+    return suffix
+
+
+def _guess_oa_attachment_type(file_name: str, payload: dict | None = None) -> str:
+    normalized_name = _normalize_key(file_name)
+    extension = _file_extension(file_name, payload)
+    if any(keyword in normalized_name for keyword in ("完税", "税单", "pedimento", "taxcertificate")):
+        return "Tax Certificate"
+    if any(keyword in normalized_name for keyword in ("发票", "invoice", "factura")):
+        return "Commercial Invoice"
+    if any(keyword in normalized_name for keyword in ("装箱", "装柜", "物品清单", "packing", "packinglist", "清单")):
+        return "Packing List"
+    if any(keyword in normalized_name for keyword in ("运费", "物流", "报价", "燃油", "dhl", "fedex", "ups", "bill")):
+        return "Logistics Bill"
+    if extension in {"xls", "xlsx", "csv"}:
+        return "Packing List"
+    return "Other"
+
+
+def _build_attachment_record(
+    payload: dict,
+    *,
+    source_field: str = "",
+    component_type: str = "",
+    value_source: str = "",
+) -> dict:
+    file_name = _clean(_first_dict_value(payload, ATTACHMENT_FILE_NAME_KEYS))
+    file_id = _clean(_first_dict_value(payload, ATTACHMENT_FILE_ID_KEYS))
+    file_url = _clean(_first_dict_value(payload, ATTACHMENT_FILE_URL_KEYS))
+    space_id = _clean(_first_dict_value(payload, ATTACHMENT_SPACE_ID_KEYS))
+    file_size = _first_dict_value(payload, ("fileSize", "file_size", "size"))
+    extension = _file_extension(file_name, payload)
+    attachment_type = _guess_oa_attachment_type(file_name, payload)
+    return {
+        "source": "oa_form_attachment",
+        "source_field": source_field,
+        "component_type": component_type,
+        "value_source": value_source,
+        "file_id": file_id,
+        "space_id": space_id,
+        "file_name": file_name,
+        "file_url": file_url,
+        "file_size": file_size,
+        "file_ext": extension,
+        "attachment_type": attachment_type,
+        "raw": payload,
+    }
+
+
+def _extract_attachments_from_value(
+    value: Any,
+    *,
+    source_field: str = "",
+    component_type: str = "",
+    value_source: str = "",
+) -> list[dict]:
+    parsed = _parse_json_text(value)
+    if isinstance(parsed, dict):
+        records: list[dict] = []
+        if _looks_like_attachment_payload(parsed):
+            records.append(
+                _build_attachment_record(
+                    parsed,
+                    source_field=source_field,
+                    component_type=component_type,
+                    value_source=value_source,
+                )
+            )
+        for child in parsed.values():
+            records.extend(
+                _extract_attachments_from_value(
+                    child,
+                    source_field=source_field,
+                    component_type=component_type,
+                    value_source=value_source,
+                )
+            )
+        return records
+    if isinstance(parsed, list):
+        records: list[dict] = []
+        for child in parsed:
+            records.extend(
+                _extract_attachments_from_value(
+                    child,
+                    source_field=source_field,
+                    component_type=component_type,
+                    value_source=value_source,
+                )
+            )
+        return records
+    return []
+
+
+def _dedupe_attachment_records(records: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for record in records:
+        file_name = _clean(record.get("file_name"))
+        file_id = _clean(record.get("file_id"))
+        file_url = _clean(record.get("file_url"))
+        source_field = _clean(record.get("source_field"))
+        if not file_name and not file_id and not file_url:
+            continue
+        key = (file_id, file_url, file_name, source_field)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(record)
+    return deduped
+
+
+def extract_form_attachments(instance: dict) -> list[dict]:
+    """只从审批发起表单字段提取附件；评论附件暂不纳入。"""
+
+    records: list[dict] = []
+    for component in _iter_form_components(instance):
+        source_field = _clean(
+            component.get("name")
+            or component.get("label")
+            or component.get("bizAlias")
+            or component.get("componentName")
+            or component.get("id")
+        )
+        component_type = _clean(component.get("componentType") or component.get("component_type"))
+        records.extend(
+            _extract_attachments_from_value(
+                component.get("value"),
+                source_field=source_field,
+                component_type=component_type,
+                value_source="value",
+            )
+        )
+        records.extend(
+            _extract_attachments_from_value(
+                component.get("ext_value") or component.get("extValue"),
+                source_field=source_field,
+                component_type=component_type,
+                value_source="extValue",
+            )
+        )
+    return _dedupe_attachment_records(records)
+
+
+def extract_attachments_from_form_fields(form_fields: dict[str, Any]) -> list[dict]:
+    """从已拍平的表单字段中兜底提取附件清单。"""
+
+    records: list[dict] = []
+    for fieldname, value in (form_fields or {}).items():
+        records.extend(
+            _extract_attachments_from_value(
+                value,
+                source_field=_clean(fieldname),
+                component_type="",
+                value_source="form_fields",
+            )
+        )
+    return _dedupe_attachment_records(records)
+
+
 def is_sea_approval(fields: dict[str, Any], *, sea_keywords: tuple[str, ...] = DEFAULT_SEA_KEYWORDS) -> bool:
     transport_value = _find_field_value(fields, TRANSPORT_FIELD_ALIASES)
     normalized = _normalize_key(transport_value).upper()
@@ -776,6 +985,7 @@ def summarize_approval(instance: dict, *, process_instance_id: str = "", include
 
     fields = extract_form_fields(instance)
     linked_purchase_approvals = extract_linked_purchase_approvals(instance)
+    oa_form_attachments = extract_form_attachments(instance)
     instance_id = (
         _clean(process_instance_id)
         or _clean(instance.get("process_instance_id"))
@@ -809,6 +1019,8 @@ def summarize_approval(instance: dict, *, process_instance_id: str = "", include
         "logistics_no": _find_field_value(fields, BATCH_NO_FIELD_ALIASES),
         "linked_purchase_count": len(linked_purchase_approvals),
         "linked_purchase_approvals": linked_purchase_approvals,
+        "oa_form_attachment_count": len(oa_form_attachments),
+        "oa_form_attachments": oa_form_attachments,
         "form_fields": fields,
     }
     if include_raw:
@@ -828,9 +1040,12 @@ def _compact_extra_json_for_audit(value: Any) -> dict:
     trace = data.get("oa_logistics_trace") if isinstance(data.get("oa_logistics_trace"), dict) else data
     linked_approvals = trace.get("linked_purchase_approvals") if isinstance(trace, dict) else []
     linked_approvals = linked_approvals or []
+    form_attachments = trace.get("oa_form_attachments") if isinstance(trace, dict) else []
+    form_attachments = form_attachments or []
     return {
         "source": data.get("source"),
         "has_form_fields": bool(trace.get("form_fields")) if isinstance(trace, dict) else False,
+        "oa_form_attachment_count": len(form_attachments) if isinstance(form_attachments, list) else 0,
         "linked_purchase_count": len(linked_approvals) if isinstance(linked_approvals, list) else 0,
         "linked_purchase_approval_nos": [
             linked.get("approval_no") or linked.get("source_approval_no")
@@ -893,6 +1108,7 @@ def _merge_oa_extra_json(old_value: Any, new_value: Any) -> str:
             "transport_mode_raw": new_data.get("transport_mode_raw"),
             "open_url": new_data.get("open_url"),
             "linked_purchase_approvals": new_data.get("linked_purchase_approvals") or [],
+            "oa_form_attachments": new_data.get("oa_form_attachments") or [],
             "form_fields": new_data.get("form_fields") or {},
         }
     return _json_dumps(merged)
@@ -1202,7 +1418,8 @@ def build_batch_values_from_approval(item: dict) -> dict:
     source_instance_id = _clean(item.get("source_instance_id"))
     batch_no = _clean(_first_non_empty(logistics_no, source_approval_no, source_instance_id))
     source_dingtalk_url = _clean(item.get("source_dingtalk_url"))
-    attachment_count = _count_dingtalk_attachments(form_fields)
+    oa_form_attachments = item.get("oa_form_attachments") or extract_attachments_from_form_fields(form_fields)
+    attachment_count = len(oa_form_attachments) if oa_form_attachments else _count_dingtalk_attachments(form_fields)
     values = {
         "batch_no": batch_no,
         "waybill_no": logistics_no,
@@ -1233,6 +1450,7 @@ def build_batch_values_from_approval(item: dict) -> dict:
                 "transport_mode_raw": item.get("transport_mode_raw"),
                 "open_url": item.get("open_url"),
                 "linked_purchase_approvals": item.get("linked_purchase_approvals") or [],
+                "oa_form_attachments": oa_form_attachments,
                 "form_fields": form_fields,
             }
         ),
@@ -1472,6 +1690,264 @@ def _sync_oa_goods_items(
     }
 
 
+def _oa_attachment_parse_targets(record: dict) -> list[str]:
+    attachment_type = _clean(record.get("attachment_type"))
+    extension = _clean(record.get("file_ext")).lower()
+    if attachment_type == "Packing List" or extension in {"xls", "xlsx", "csv"}:
+        return ["actual_shipped_qty", "gross_weight_kg", "volume_m3", "chargeable_weight_kg"]
+    if attachment_type == "Tax Certificate":
+        return ["pedimento_no", "tax_totals", "paid_total_mxn", "line_items"]
+    if attachment_type == "Logistics Bill":
+        return ["logistics_fee", "fuel_surcharge", "currency", "bill_total"]
+    if attachment_type == "Commercial Invoice":
+        return ["invoice_no", "goods_value", "currency", "line_items"]
+    return []
+
+
+def _oa_attachment_source_doc_no(approval_item: dict, record: dict) -> str:
+    approval_no = _clean(approval_item.get("source_approval_no"))
+    instance_id = _clean(approval_item.get("source_instance_id"))
+    source_no = approval_no or instance_id or "OA"
+    file_key = _clean(record.get("file_id") or record.get("file_url") or record.get("file_name"))
+    if len(file_key) > 90:
+        file_key = file_key[:90]
+    return f"{source_no}::{file_key}" if file_key else source_no
+
+
+def _build_oa_attachment_values(
+    *,
+    batch_name: str,
+    version_name: str,
+    approval_item: dict,
+    record: dict,
+) -> dict:
+    parse_snapshot = {
+        "source": "dingtalk_oa_form_attachment",
+        "comment_attachments_included": False,
+        "approval_no": approval_item.get("source_approval_no") or "",
+        "instance_id": approval_item.get("source_instance_id") or "",
+        "source_field": record.get("source_field") or "",
+        "component_type": record.get("component_type") or "",
+        "file_id": record.get("file_id") or "",
+        "space_id": record.get("space_id") or "",
+        "file_size": record.get("file_size") or "",
+        "file_ext": record.get("file_ext") or "",
+        "raw_attachment": record.get("raw") or {},
+    }
+    mapped_snapshot = {
+        "parse_targets": _oa_attachment_parse_targets(record),
+        "next_step": "待下载钉钉发起表单附件后解析；评论附件暂未纳入。",
+    }
+    return {
+        "batch": batch_name,
+        "version": version_name,
+        "source_type": "OA",
+        "attachment_type": record.get("attachment_type") or "Other",
+        "source_doc_no": _oa_attachment_source_doc_no(approval_item, record),
+        "file_name": record.get("file_name") or "",
+        "file_url": record.get("file_url") or "",
+        "parse_status": "Queued",
+        "parse_result_json": _json_dumps(parse_snapshot),
+        "mapped_result_json": _json_dumps(mapped_snapshot),
+        "remark": "钉钉发起表单附件已登记，等待下载和解析；评论附件暂不导入。",
+    }
+
+
+def _find_existing_oa_attachment(values: dict) -> str:
+    if frappe is None:
+        return ""
+    filters = {
+        "batch": values.get("batch"),
+        "source_type": "OA",
+        "source_doc_no": values.get("source_doc_no"),
+    }
+    if not filters["batch"] or not filters["source_doc_no"]:
+        return ""
+    return frappe.db.get_value("Overseas Cost Attachment", filters, "name") or ""
+
+
+def _sync_oa_form_attachments(
+    *,
+    batch_name: str,
+    version_name: str,
+    approval_item: dict,
+) -> dict:
+    attachments = approval_item.get("oa_form_attachments") or extract_attachments_from_form_fields(approval_item.get("form_fields") or {})
+    if frappe is None:
+        return {
+            "action": "preview",
+            "attachment_count": len(attachments),
+            "created_count": 0,
+            "updated_count": 0,
+            "items": attachments,
+        }
+    if not attachments:
+        return {
+            "action": "skipped",
+            "attachment_count": 0,
+            "created_count": 0,
+            "updated_count": 0,
+            "reason": "钉钉发起表单未解析到附件；评论附件本阶段不处理。",
+        }
+
+    created_names: list[str] = []
+    updated_names: list[str] = []
+    for record in attachments:
+        values = _build_oa_attachment_values(
+            batch_name=batch_name,
+            version_name=version_name,
+            approval_item=approval_item,
+            record=record,
+        )
+        existing_name = _find_existing_oa_attachment(values)
+        if existing_name:
+            doc = frappe.get_doc("Overseas Cost Attachment", existing_name)
+            for fieldname, value in values.items():
+                setattr(doc, fieldname, value)
+            doc.save(ignore_permissions=True)
+            updated_names.append(existing_name)
+        else:
+            doc = frappe.get_doc({"doctype": "Overseas Cost Attachment", **values}).insert(ignore_permissions=True)
+            created_names.append(doc.name)
+
+    if created_names or updated_names:
+        _insert_batch_audit_log(
+            batch_name=batch_name,
+            field_name="oa_form_attachments",
+            old_value=None,
+            new_value={
+                "created_count": len(created_names),
+                "updated_count": len(updated_names),
+                "attachment_count": len(attachments),
+                "comment_attachments_included": False,
+            },
+            remark="登记钉钉发起表单附件，评论附件暂未纳入",
+        )
+
+    return {
+        "action": "synced",
+        "attachment_count": len(attachments),
+        "created_count": len(created_names),
+        "updated_count": len(updated_names),
+        "created_names": created_names,
+        "updated_names": updated_names,
+    }
+
+
+def _get_oa_trace_from_extra(extra_json: Any) -> tuple[dict, dict, bool]:
+    data = _json_loads_dict(extra_json)
+    if data.get("source") == "dingtalk_oa_logistics":
+        return data, data, True
+    trace = data.get("oa_logistics_trace")
+    if isinstance(trace, dict):
+        return data, trace, False
+    return data, {}, False
+
+
+def _set_oa_trace_in_extra(root: dict, trace: dict, is_root_trace: bool) -> str:
+    if is_root_trace:
+        merged = {**root, **trace}
+    else:
+        merged = dict(root)
+        merged["oa_logistics_trace"] = trace
+    return _json_dumps(merged)
+
+
+def sync_existing_oa_form_attachments(limit: int | None = 200) -> dict:
+    """从已有 OA 批次的 extra_json.form_fields 回填发起表单附件记录。
+
+    只处理发起表单附件，不处理审批评论附件。
+    """
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，无法回填已有批次附件记录。",
+        }
+
+    page_length = max(1, min(int(limit or 200), 1000))
+    rows = frappe.get_all(
+        "Overseas Cost Batch",
+        filters={"source_type": "oa_logistics"},
+        fields=[
+            "name",
+            "batch_no",
+            "current_version",
+            "source_approval_no",
+            "source_instance_id",
+            "extra_json",
+            "source_attachment_count",
+        ],
+        limit_page_length=page_length,
+        order_by="modified desc",
+    )
+
+    synced_items: list[dict] = []
+    skipped_items: list[dict] = []
+    total_created = 0
+    total_updated = 0
+
+    for row in rows:
+        root, trace, is_root_trace = _get_oa_trace_from_extra(row.get("extra_json"))
+        form_fields = trace.get("form_fields") or {}
+        attachments = trace.get("oa_form_attachments") or extract_attachments_from_form_fields(form_fields)
+        if not attachments:
+            skipped_items.append({"batch_name": row.get("name"), "batch_no": row.get("batch_no"), "reason": "未找到发起表单附件"})
+            continue
+
+        approval_item = {
+            "source_approval_no": row.get("source_approval_no") or trace.get("source_approval_no") or "",
+            "source_instance_id": row.get("source_instance_id") or trace.get("source_instance_id") or "",
+            "form_fields": form_fields,
+            "oa_form_attachments": attachments,
+        }
+        sync_result = _sync_oa_form_attachments(
+            batch_name=row.get("name"),
+            version_name=row.get("current_version") or "",
+            approval_item=approval_item,
+        )
+        total_created += int(sync_result.get("created_count") or 0)
+        total_updated += int(sync_result.get("updated_count") or 0)
+
+        if trace.get("oa_form_attachments") != attachments or int(row.get("source_attachment_count") or 0) != len(attachments):
+            trace = {**trace, "oa_form_attachments": attachments}
+            frappe.db.set_value(
+                "Overseas Cost Batch",
+                row.get("name"),
+                {
+                    "source_attachment_count": len(attachments),
+                    "extra_json": _set_oa_trace_in_extra(root, trace, is_root_trace),
+                },
+                update_modified=False,
+            )
+
+        synced_items.append(
+            {
+                "batch_name": row.get("name"),
+                "batch_no": row.get("batch_no"),
+                "attachment_count": len(attachments),
+                "attachment_sync": sync_result,
+            }
+        )
+
+    if hasattr(frappe.db, "commit"):
+        frappe.db.commit()
+
+    return {
+        "ok": True,
+        "dry_run": False,
+        "scanned_count": len(rows),
+        "synced_count": len(synced_items),
+        "skipped_count": len(skipped_items),
+        "created_count": total_created,
+        "updated_count": total_updated,
+        "items": synced_items,
+        "skipped_items": skipped_items,
+        "message": "已有 OA 批次的发起表单附件已登记；评论附件未纳入。",
+    }
+
+
 def save_sea_approvals_to_erp(result: dict) -> dict:
     """把海运审批摘要保存成批次追溯记录，并在空批次中生成 OA 基础物料行。
 
@@ -1536,6 +2012,11 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
             approval_item=item,
             only_when_empty=True,
         )
+        attachment_sync = _sync_oa_form_attachments(
+            batch_name=saved["batch_name"],
+            version_name=saved.get("version_name") or "",
+            approval_item=item,
+        )
         saved.update(
             {
                 "batch_no": values.get("batch_no"),
@@ -1543,6 +2024,7 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
                 "source_instance_id": values.get("source_instance_id"),
                 "logistics_no": values.get("waybill_no"),
                 "item_sync": item_sync,
+                "attachment_sync": attachment_sync,
             }
         )
         saved_items.append(saved)
@@ -1553,7 +2035,7 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
     return {
         "ok": True,
         "dry_run": False,
-        "message": "钉钉海运审批追溯已保存到批次头；空批次已补 OA 基础物料行，未写入单价、费用和税费。",
+        "message": "钉钉海运审批追溯已保存到批次头；空批次已补 OA 基础物料行，并登记发起表单附件，未写入单价、费用和税费。",
         "total": len(raw_items),
         "created_count": created_count,
         "updated_count": updated_count,
@@ -1677,6 +2159,7 @@ def save_csv(items: list[dict], output_path: str | Path) -> None:
         "transport_mode_raw",
         "logistics_no",
         "linked_purchase_count",
+        "oa_form_attachment_count",
         "linked_purchase_approval_nos",
     ]
     with path.open("w", encoding="utf-8-sig", newline="") as file:
@@ -1713,6 +2196,7 @@ def build_console_summary(result: dict, *, output: str = "", csv_output: str = "
                 "logistics_no": item.get("logistics_no"),
                 "approval_status": item.get("approval_status"),
                 "linked_purchase_count": item.get("linked_purchase_count"),
+                "oa_form_attachment_count": item.get("oa_form_attachment_count"),
             }
             for item in (result.get("items") or [])[:5]
         ],
