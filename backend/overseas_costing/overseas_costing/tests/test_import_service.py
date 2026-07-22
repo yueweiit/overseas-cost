@@ -617,7 +617,7 @@ def test_apply_packing_list_fillable_fields_skips_conflicts(monkeypatch) -> None
     )
     result = apply_packing_list_fillable_fields(
         batch_name="BATCH-PACKING",
-        attachment_name="packing.xlsx",
+        attachment_name="ATT-PACKING",
         sheet_rows_json=rows_json,
     )
 
@@ -631,6 +631,8 @@ def test_apply_packing_list_fillable_fields_skips_conflicts(monkeypatch) -> None
     assert items["ITEM-002"].actual_shipped_qty == 200
     assert items["ITEM-002"].gross_weight_kg == 10
     assert batch_updates[("Overseas Cost Batch", "BATCH-PACKING", "status")] == "Dirty"
+    assert batch_updates[("Overseas Cost Attachment", "ATT-PACKING", "parse_status")] == "Parsed"
+    assert result["attachment_marked_parsed"] is True
     assert commit_count["value"] == 1
     assert len(audit_payloads) == 3
 

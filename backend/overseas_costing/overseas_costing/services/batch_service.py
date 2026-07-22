@@ -488,6 +488,94 @@ def _build_item_query_args(
     return db_filters, or_filters
 
 
+def _has_source_value(value) -> bool:
+    return str(value or "").strip() != ""
+
+
+def _source_status_key(value) -> str:
+    return str(value or "").strip().lower()
+
+
+def _is_parsed_attachment(row: dict) -> bool:
+    return _source_status_key(row.get("parse_status")) == "parsed"
+
+
+def _build_batch_source_status(batch: dict, attachments: list[dict] | None = None) -> dict:
+    """按业务资料链路汇总批次来源状态，供前端数据检查展示。"""
+
+    attachment_rows = attachments or []
+    source_no = (
+        batch.get("source_approval_no")
+        or batch.get("source_instance_id")
+        or batch.get("batch_no")
+        or batch.get("name")
+        or ""
+    )
+    has_oa_logistics = (
+        batch.get("source_type") == "oa_logistics"
+        or _has_source_value(batch.get("source_approval_no"))
+        or _has_source_value(batch.get("source_instance_id"))
+        or _has_source_value(batch.get("source_dingtalk_url"))
+    )
+
+    oa_attachment_rows = [row for row in attachment_rows if row.get("source_type") == "OA"]
+    packing_list_rows = [row for row in attachment_rows if row.get("attachment_type") == "Packing List"]
+    tax_certificate_rows = [
+        row
+        for row in attachment_rows
+        if row.get("attachment_type") == "Tax Certificate" or row.get("source_type") == "Voucher"
+    ]
+    batch_source_attachment_count = int(batch.get("source_attachment_count") or 0)
+    oa_attachment_count = max(batch_source_attachment_count, len(oa_attachment_rows))
+
+    return {
+        "source_no": source_no,
+        "has_oa_logistics": bool(has_oa_logistics),
+        "source_approval_status": batch.get("source_approval_status") or "",
+        "oa_attachment_count": oa_attachment_count,
+        "registered_attachment_count": len(attachment_rows),
+        "packing_list_count": len(packing_list_rows),
+        "parsed_packing_list_count": sum(1 for row in packing_list_rows if _is_parsed_attachment(row)),
+        "tax_certificate_count": len(tax_certificate_rows),
+        "parsed_tax_certificate_count": sum(1 for row in tax_certificate_rows if _is_parsed_attachment(row)),
+        "has_form_attachments": oa_attachment_count > 0,
+        "has_packing_list": bool(packing_list_rows),
+        "has_tax_certificate": bool(tax_certificate_rows),
+    }
+
+
+def _attach_batch_source_status(items: list[dict]) -> list[dict]:
+    if not items:
+        return items
+
+    batch_names = [item.get("name") for item in items if item.get("name")]
+    attachment_rows: list[dict] = []
+    if batch_names:
+        try:
+            attachment_rows = frappe.get_all(
+                "Overseas Cost Attachment",
+                filters={"batch": ["in", batch_names]},
+                fields=["batch", "source_type", "attachment_type", "parse_status"],
+                limit_page_length=10000,
+            )
+        except Exception:
+            attachment_rows = []
+
+    attachments_by_batch: dict[str, list[dict]] = {}
+    for row in attachment_rows:
+        batch_name = row.get("batch")
+        if not batch_name:
+            continue
+        attachments_by_batch.setdefault(batch_name, []).append(row)
+
+    for item in items:
+        item["source_status"] = _build_batch_source_status(
+            item,
+            attachments_by_batch.get(item.get("name"), []),
+        )
+    return items
+
+
 def get_batch_list(filters: dict) -> dict:
     if frappe is None:
         return {
@@ -519,7 +607,11 @@ def get_batch_list(filters: dict) -> dict:
             "source_file_name",
             "source_sheet",
             "source_range",
+            "source_approval_no",
+            "source_instance_id",
+            "source_dingtalk_url",
             "source_approval_status",
+            "source_attachment_count",
             "status",
             "current_version",
             "item_count",
@@ -546,6 +638,7 @@ def get_batch_list(filters: dict) -> dict:
         for item in frappe.get_all("Overseas Cost Batch", **query_kwargs)
         if not is_hidden_approval_status(item.get("source_approval_status"))
     ]
+    items = _attach_batch_source_status(items)
     return {
         "ok": True,
         "message": "批次列表已返回。",

@@ -1293,6 +1293,41 @@ def _mark_batch_dirty(batch_doc_name: str) -> None:
     frappe.db.set_value("Overseas Cost Batch", batch_doc_name, "status", "Dirty", update_modified=True)
 
 
+def _mark_attachment_parsed(attachment_name: str | None, summary: dict) -> bool:
+    if frappe is None or not attachment_name:
+        return False
+
+    exists = getattr(getattr(frappe, "db", None), "exists", None)
+    if callable(exists):
+        try:
+            if not exists("Overseas Cost Attachment", attachment_name):
+                return False
+        except Exception:
+            return False
+
+    snapshot = {
+        "source": "packing_list_writeback",
+        "updated_count": summary.get("updated_count", 0),
+        "changed_field_count": summary.get("changed_field_count", 0),
+        "skipped_count": summary.get("skipped_count", 0),
+        "conflict_row_count": summary.get("conflict_row_count", 0),
+        "unmatched_count": summary.get("unmatched_count", 0),
+        "ambiguous_count": summary.get("ambiguous_count", 0),
+    }
+    try:
+        frappe.db.set_value("Overseas Cost Attachment", attachment_name, "parse_status", "Parsed", update_modified=True)
+        frappe.db.set_value(
+            "Overseas Cost Attachment",
+            attachment_name,
+            "mapped_result_json",
+            _json_dumps(snapshot),
+            update_modified=True,
+        )
+    except Exception:
+        return False
+    return True
+
+
 def _run_item_writeback(
     *,
     batch_name: str,
@@ -2067,9 +2102,22 @@ def apply_packing_list_fillable_fields(
 
     if applied_rows:
         _mark_batch_dirty(batch_doc_name)
+        attachment_marked = _mark_attachment_parsed(
+            attachment_name,
+            {
+                "updated_count": len(applied_rows),
+                "changed_field_count": changed_field_count,
+                "skipped_count": len(skipped_rows),
+                "conflict_row_count": writeback_preview.get("conflict_row_count", 0),
+                "unmatched_count": writeback_preview.get("unmatched_count", 0),
+                "ambiguous_count": writeback_preview.get("ambiguous_count", 0),
+            },
+        )
         commit = getattr(getattr(frappe, "db", None), "commit", None)
         if callable(commit):
             commit()
+    else:
+        attachment_marked = False
 
     updated_count = len(applied_rows)
     return {
@@ -2085,6 +2133,7 @@ def apply_packing_list_fillable_fields(
         "ambiguous_count": writeback_preview.get("ambiguous_count", 0),
         "applied_rows": applied_rows,
         "skipped_rows": skipped_rows,
+        "attachment_marked_parsed": attachment_marked,
         "preview_result": preview_result,
         "message": (
             f"已补入 {updated_count} 行装箱单字段，共 {changed_field_count} 个字段；冲突、未匹配和多匹配行未写入。"

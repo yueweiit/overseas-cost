@@ -4,6 +4,7 @@ import json
 
 from overseas_costing.services.batch_service import (
     _build_item_query_args,
+    _build_batch_source_status,
     _normalize_item_query_filters,
     _normalize_limit,
     create_batch,
@@ -110,3 +111,29 @@ def test_hidden_approval_status_matches_revoked_dingtalk_statuses() -> None:
     assert is_hidden_approval_status("已撤销") is True
     assert is_hidden_approval_status("COMPLETED") is False
     assert is_hidden_approval_status("") is False
+
+
+def test_build_batch_source_status_summarizes_oa_and_voucher_records() -> None:
+    status = _build_batch_source_status(
+        {
+            "name": "BATCH-001",
+            "batch_no": "FSCU8486789",
+            "source_type": "oa_logistics",
+            "source_approval_no": "202607010001",
+            "source_attachment_count": 3,
+        },
+        [
+            {"source_type": "OA", "attachment_type": "Packing List", "parse_status": "Queued"},
+            {"source_type": "OA", "attachment_type": "Commercial Invoice", "parse_status": "Queued"},
+            {"source_type": "Voucher", "attachment_type": "Tax Certificate", "parse_status": "Parsed"},
+        ],
+    )
+
+    assert status["has_oa_logistics"] is True
+    assert status["source_no"] == "202607010001"
+    assert status["oa_attachment_count"] == 3
+    assert status["registered_attachment_count"] == 3
+    assert status["packing_list_count"] == 1
+    assert status["parsed_packing_list_count"] == 0
+    assert status["tax_certificate_count"] == 1
+    assert status["parsed_tax_certificate_count"] == 1

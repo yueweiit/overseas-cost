@@ -186,7 +186,7 @@ class OverseasCostWorkbench {
                 <ul class="ocw-audit-list" data-area="audit-list"></ul>
               </article>
               <article class="ocw-bottom-panel">
-                <h2>数据检查</h2>
+                <h2>当前批次数据检查</h2>
                 <div class="ocw-diff-wrap" data-area="diff-panel"></div>
               </article>
             </section>
@@ -2011,6 +2011,18 @@ class OverseasCostWorkbench {
     });
     dialog.show();
     dialog.$wrapper.addClass("ocw-purchase-modal");
+    dialog.$wrapper
+      .off("click.ocwOaAttachments")
+      .on("click.ocwOaAttachments", "[data-action='open-generic-link']", (event) => {
+        this.openDingtalkLink($(event.currentTarget).attr("data-open-url"));
+      })
+      .on("click.ocwOaAttachments", "[data-action='preview-packing-list']", (event) => {
+        this.openPackingListPreviewDialog(
+          batch.name,
+          $(event.currentTarget).attr("data-attachment-name"),
+          $(event.currentTarget).attr("data-file-url")
+        );
+      });
     this.loadOaFormAttachments(batch, dialog).catch((error) => {
       dialog.$wrapper.find("[data-area='oa-attachment-list']").html(`
         <div class="ocw-purchase-empty">
@@ -2056,9 +2068,26 @@ class OverseasCostWorkbench {
       .map((row, index) => {
         const targets = (row.parse_targets || []).join("、") || "待识别";
         const fileRef = row.file_id || row.file_url || row.source_doc_no || "--";
-        const openButton = row.file_url
-          ? `<button class="ocw-link-btn" data-action="open-generic-link" data-open-url="${this.escape(row.file_url)}">打开</button>`
-          : `<span class="ocw-purchase-source-disabled">待下载</span>`;
+        const isPackingList =
+          row.attachment_type === "Packing List" || (row.parse_targets || []).some((target) => target === "actual_shipped_qty");
+        const actions = [];
+        if (row.file_url) {
+          actions.push(`<button class="ocw-link-btn" data-action="open-generic-link" data-open-url="${this.escape(row.file_url)}">打开</button>`);
+          if (isPackingList) {
+            actions.push(`
+              <button
+                class="ocw-link-btn"
+                data-action="preview-packing-list"
+                data-attachment-name="${this.escape(row.name || "")}"
+                data-file-url="${this.escape(row.file_url || "")}"
+              >解析预览</button>
+            `);
+          }
+        } else if (isPackingList) {
+          actions.push(`<span class="ocw-purchase-source-disabled">待下载后解析</span>`);
+        } else {
+          actions.push(`<span class="ocw-purchase-source-disabled">待下载</span>`);
+        }
         return `
           <tr>
             <td>${this.escape(String(index + 1))}</td>
@@ -2068,7 +2097,7 @@ class OverseasCostWorkbench {
             <td title="${this.escape(row.source_field || "")}">${this.escape(row.source_field || "--")}</td>
             <td title="${this.escape(fileRef)}">${this.escape(fileRef)}</td>
             <td title="${this.escape(targets)}">${this.escape(targets)}</td>
-            <td>${openButton}</td>
+            <td><div class="ocw-attachment-actions">${actions.join("")}</div></td>
           </tr>
         `;
       })
@@ -2096,6 +2125,231 @@ class OverseasCostWorkbench {
         </div>
       </section>
     `;
+  }
+
+  openPackingListPreviewDialog(batchName = "", attachmentName = "", fileUrl = "") {
+    const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
+    if (!batch) {
+      this.showPendingFeature("当前没有可解析装箱单的批次。");
+      return;
+    }
+    if (!fileUrl) {
+      this.showPendingFeature("当前附件只有钉钉文件标识，还没有下载到系统文件地址，暂不能解析。");
+      return;
+    }
+    this.activeBatchName = batch.name;
+    const batchLabel = batch.batch_no || batch.waybill_no || batch.name;
+    const dialog = new frappe.ui.Dialog({
+      title: "装箱单解析预览",
+      size: "large",
+      fields: [
+        {
+          fieldtype: "HTML",
+          fieldname: "packing_preview",
+          options: `
+            <div class="ocw-purchase-preview" data-area="packing-preview">
+              <div class="ocw-purchase-target">
+                <span>当前批次</span>
+                <strong>${this.escape(batchLabel)}</strong>
+                <em>先预览匹配结果，不会直接写入实际数量、毛重和体积。</em>
+              </div>
+              <div class="ocw-purchase-loading">正在解析装箱单</div>
+            </div>
+          `,
+        },
+      ],
+      primary_action_label: "关闭",
+      primary_action: () => dialog.hide(),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-purchase-modal");
+    this.loadPackingListPreview(batch, dialog, attachmentName, fileUrl).catch((error) => {
+      dialog.$wrapper.find("[data-area='packing-preview']").html(`
+        <div class="ocw-purchase-empty">
+          <strong>装箱单解析预览失败</strong>
+          <span>${this.escape(this.normalizeErrorMessage(error))}</span>
+        </div>
+      `);
+    });
+  }
+
+  async loadPackingListPreview(batch, dialog, attachmentName, fileUrl) {
+    const result = await this.call(
+      "overseas_costing.api.import_api.preview_packing_list_attachment",
+      {
+        batch_name: batch.name,
+        version_name: batch.current_version || null,
+        attachment_name: attachmentName || null,
+        file_url: fileUrl || null,
+      },
+      true
+    );
+    this.renderPackingListPreview(dialog, result, batch, attachmentName, fileUrl);
+  }
+
+  renderPackingListPreview(dialog, result, batch, attachmentName, fileUrl) {
+    const $target = dialog.$wrapper.find("[data-area='packing-preview']");
+    if (!result || !result.ok) {
+      $target.html(`
+        <div class="ocw-purchase-empty">
+          <strong>暂时无法解析装箱单</strong>
+          <span>${this.escape((result && result.message) || "请确认附件已经下载为 Excel 文件。")}</span>
+        </div>
+      `);
+      return;
+    }
+
+    const preview = result.writeback_preview || {};
+    const matchedRows = preview.matched_rows || [];
+    const fillableRows = matchedRows.filter((row) => row.has_fillable);
+    const conflictRows = matchedRows.filter((row) => row.has_conflict);
+    const unmatchedRows = preview.unmatched_rows || [];
+    const ambiguousRows = preview.ambiguous_rows || [];
+    const parser = result.parser_meta || {};
+
+    $target.html(`
+      <div class="ocw-purchase-target">
+        <span>当前批次</span>
+        <strong>${this.escape(batch.batch_no || batch.waybill_no || batch.name)}</strong>
+        <em>${this.escape(result.message || "装箱单预览已完成，当前未写入数据。")}</em>
+      </div>
+      <div class="ocw-purchase-summary">
+        <div><span>解析行数</span><strong>${this.escape(String(result.mapped_preview_count || 0))}</strong></div>
+        <div><span>匹配行</span><strong>${this.escape(String(preview.matched_count || 0))}</strong></div>
+        <div><span>可写入</span><strong>${this.escape(String(preview.fillable_row_count || 0))}</strong></div>
+        <div><span>未匹配</span><strong>${this.escape(String(preview.unmatched_count || 0))}</strong></div>
+      </div>
+      <div class="ocw-purchase-note">
+        解析来源：${this.escape(parser.source || "file_url")}；只写入当前为空或为 0 的实际发货数量、毛重、体积、计费重。
+      </div>
+      ${this.renderPackingApplyAction(preview)}
+      ${this.renderPurchasePreviewSection("可写入装箱单字段", fillableRows, "fillable")}
+      ${this.renderPurchasePreviewSection("存在差异，未自动写入", conflictRows, "conflict")}
+      ${this.renderPackingUnmatchedSection(unmatchedRows, ambiguousRows)}
+    `);
+    dialog.$wrapper
+      .off("click.ocwPackingPreview")
+      .on("click.ocwPackingPreview", "[data-action='apply-packing-fillable']", () => {
+        this.applyPackingListFillableFields(batch, dialog, result, attachmentName, fileUrl).catch((error) => this.showError(error));
+      });
+  }
+
+  renderPackingApplyAction(preview = {}) {
+    const fillableCount = Number(preview.fillable_row_count || 0);
+    if (!fillableCount) return "";
+    return `
+      <div class="ocw-purchase-apply">
+        <div>
+          <strong>写入可补装箱单字段</strong>
+          <span>本次可写入 ${this.escape(String(fillableCount))} 行，只补空值或 0 值；已有差异的行不自动覆盖。</span>
+        </div>
+        <button class="ocw-primary-btn ocw-mini-btn" data-action="apply-packing-fillable">写入可补字段</button>
+      </div>
+    `;
+  }
+
+  renderPackingUnmatchedSection(unmatchedRows = [], ambiguousRows = []) {
+    const rows = [
+      ...ambiguousRows.map((row) => ({ ...(row.mapped_row || {}), reason: `匹配到多行：${(row.candidate_row_nos || []).join("、")}` })),
+      ...unmatchedRows.map((row) => ({ ...row, reason: "当前批次没有匹配物料，未写入" })),
+    ];
+    if (!rows.length) {
+      return `
+        <section class="ocw-purchase-section">
+          <h4>未匹配装箱单行</h4>
+          <div class="ocw-purchase-empty-line">暂无未匹配行</div>
+        </section>
+      `;
+    }
+    const body = rows
+      .map(
+        (row) => `
+          <tr>
+            <td>${this.escape(row.material_code || "--")}</td>
+            <td title="${this.escape(row.product_name || "")}">${this.escape(row.product_name || "--")}</td>
+            <td title="${this.escape(row.spec_model || "")}">${this.escape(row.spec_model || "--")}</td>
+            <td>${this.escape(this.formatValue(row.actual_shipped_qty) || "--")}</td>
+            <td>${this.escape(this.formatValue(row.gross_weight_kg) || "--")}</td>
+            <td>${this.escape(this.formatValue(row.volume_m3) || "--")}</td>
+            <td>${this.escape(row.reason || "--")}</td>
+          </tr>
+        `
+      )
+      .join("");
+    return `
+      <section class="ocw-purchase-section">
+        <h4>未匹配装箱单行</h4>
+        <div class="ocw-purchase-table-wrap">
+          <table class="ocw-purchase-table">
+            <thead>
+              <tr>
+                <th>物料编码</th>
+                <th>品名</th>
+                <th>规格</th>
+                <th>实际数量</th>
+                <th>毛重 KG</th>
+                <th>体积 m3</th>
+                <th>原因</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
+  async applyPackingListFillableFields(batch, dialog, previewResult, attachmentName, fileUrl) {
+    const preview = (previewResult && previewResult.writeback_preview) || {};
+    const fillableCount = Number(preview.fillable_row_count || 0);
+    if (!fillableCount) {
+      frappe.show_alert({ message: "当前没有可写入的装箱单字段", indicator: "blue" });
+      return;
+    }
+    const confirmed = await new Promise((resolve) => {
+      frappe.confirm(
+        `
+          <div class="ocw-confirm-copy">
+            <h4>确认写入装箱单字段？</h4>
+            <p>本次最多写入 ${this.escape(String(fillableCount))} 行实际发货数量、毛重、体积或计费重。</p>
+            <div class="ocw-confirm-note">只补空值或 0 值；已有差异的行不会自动覆盖。</div>
+          </div>
+        `,
+        () => resolve(true),
+        () => resolve(false)
+      );
+    });
+    if (!confirmed) return;
+
+    const $button = dialog.$wrapper.find("[data-action='apply-packing-fillable']");
+    $button.prop("disabled", true).text("写入中");
+    try {
+      const result = await this.call(
+        "overseas_costing.api.import_api.apply_packing_list_fillable_fields",
+        {
+          batch_name: batch.name,
+          version_name: batch.current_version || null,
+          attachment_name: attachmentName || null,
+          file_url: fileUrl || null,
+        },
+        true
+      );
+      if (!result.ok) {
+        throw new Error(result.message || "装箱单字段写入失败");
+      }
+      if (Number(result.updated_count || 0) > 0) {
+        this.markBatchDirty(batch.name);
+      }
+      await this.loadBatchItems(batch.name, batch.current_version, true);
+      await this.loadAuditLogs(batch.name, batch.current_version);
+      this.expandedBatchNames.add(batch.name);
+      this.renderTable();
+      this.renderDiffPanel();
+      frappe.show_alert({ message: result.message || "装箱单字段已写入", indicator: result.updated_count ? "green" : "blue" });
+      dialog.hide();
+    } finally {
+      $button.prop("disabled", false).text("写入可补字段");
+    }
   }
 
   openDingtalkLink(openUrl) {
@@ -2772,10 +3026,24 @@ class OverseasCostWorkbench {
 
     const items = this.batchItems[batch.name] || [];
     const rows = this.buildDataCheckRows(batch, items);
+    const sourceStatus = batch.source_status || {};
+    const batchLabel = batch.waybill_no || batch.customs_no || batch.batch_no || batch.name;
+    const sourceNo = sourceStatus.source_no || batch.source_approval_no || batch.source_instance_id || "";
+    const targetLabel =
+      sourceNo && sourceNo !== batchLabel ? `${batchLabel || batch.name} / 来源 ${sourceNo}` : batchLabel || batch.name;
+    const displayRows = [
+      {
+        label: "检查对象",
+        status: "当前批次",
+        statusClass: "ocw-check-info",
+        suggestion: targetLabel,
+      },
+      ...rows,
+    ];
     this.$root.find("[data-area='diff-panel']").html(`
       <div class="ocw-diff-table">
         <div class="ocw-diff-head"><span>检查项</span><span>当前状态</span><span>处理建议</span></div>
-        ${rows
+        ${displayRows
           .map(
             (row) => `
               <div>
@@ -2791,32 +3059,59 @@ class OverseasCostWorkbench {
   }
 
   buildDataCheckRows(batch, items) {
+    const hasLoadedItems = Object.prototype.hasOwnProperty.call(this.batchItems, batch.name);
+    const loadedItems = hasLoadedItems ? items : [];
     const customsNo = batch.customs_no || this.firstLoadedValue(items, "customs_no");
     const waybillNo = batch.waybill_no || this.firstLoadedValue(items, "waybill_no");
-    const sourceNo = batch.batch_no || this.firstLoadedValue(items, "source_doc_no");
-    const itemCount = items.length || Number(batch.item_count || 0);
-    const goodsValue = items.length ? this.sumRowsNumber(items, "goods_value") : Number(batch.total_goods_value || 0);
-    const grossWeight = items.length ? this.sumRowsNumber(items, "gross_weight_kg") : Number(batch.total_gross_weight_kg || 0);
-    const freightAlloc = items.length ? this.sumRowsNumber(items, "freight_alloc_rmb") : 0;
-    const totalCost = items.length
-      ? this.sumRowsNumber(items, "total_cost_rmb")
+    const sourceNo = batch.source_approval_no || batch.source_instance_id || batch.batch_no || this.firstLoadedValue(items, "source_doc_no");
+    const itemCount = hasLoadedItems ? loadedItems.length : Number(batch.item_count || 0);
+    const goodsValue = hasLoadedItems ? this.sumRowsNumber(loadedItems, "goods_value") : Number(batch.total_goods_value || 0);
+    const grossWeight = hasLoadedItems ? this.sumRowsNumber(loadedItems, "gross_weight_kg") : Number(batch.total_gross_weight_kg || 0);
+    const freightAlloc = hasLoadedItems ? this.sumRowsNumber(loadedItems, "freight_alloc_rmb") : 0;
+    const totalCost = hasLoadedItems
+      ? this.sumRowsNumber(loadedItems, "total_cost_rmb")
       : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
-    const manualCount = items.filter((row) => Number(row.manual_override_flag || 0) === 1).length;
-    const batchStatus = this.batchStatusInfo(batch.status);
+    const taxTotal = hasLoadedItems
+      ? this.sumRowsNumber(loadedItems, "import_tax_total") ||
+        this.sumRowsNumber(loadedItems, "mexico_customs_mxn") ||
+        this.sumRowsNumber(loadedItems, "igi_amount") + this.sumRowsNumber(loadedItems, "iva_amount")
+      : 0;
+    const batchStatus = this.batchStatusInfo(batch.status, batch, itemCount);
+    const sourceStatus = batch.source_status || {};
 
-    const baseMissing = [];
-    if (!customsNo) baseMissing.push("报关单号");
-    if (!waybillNo) baseMissing.push("运单号");
-    const hasSourceOnly = !customsNo && !waybillNo && this.hasText(sourceNo);
-
-    const missingCode = this.countRows(items, (row) => !this.hasText(row.material_code));
-    const missingName = this.countRows(items, (row) => !this.hasText(row.product_name));
-    const badQuantity = this.countRows(items, (row) => !this.isPositive(row.quantity));
-    const badPrice = this.countRows(items, (row) => !this.isPositive(row.unit_price));
-    const badGoods = this.countRows(items, (row) => !this.isPositive(row.goods_value));
-    const badWeight = this.countRows(items, (row) => !this.isPositive(row.gross_weight_kg));
-    const badUnitCost = this.countRows(items, (row) => !this.isPositive(row.total_unit_rmb));
+    const hasOaSource =
+      Boolean(sourceStatus.has_oa_logistics) ||
+      String(batch.source_type || "").trim() === "oa_logistics" ||
+      this.hasText(batch.source_approval_no) ||
+      this.hasText(batch.source_instance_id) ||
+      this.hasText(batch.source_dingtalk_url) ||
+      this.countRows(loadedItems, (row) => this.hasText(row.dingtalk_instance_id) || this.hasText(row.dingtalk_official_url)) > 0;
+    const missingCode = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.hasText(row.material_code)) : 0;
+    const missingName = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.hasText(row.product_name)) : 0;
+    const badQuantity = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.quantity)) : 0;
+    const badPrice = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.unit_price)) : 0;
+    const badCurrency = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.hasText(row.purchase_currency)) : 0;
+    const badGoods = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.goods_value)) : 0;
+    const badActualQty = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.actual_shipped_qty)) : 0;
+    const badWeight = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.gross_weight_kg)) : 0;
+    const rowsWithTax = hasLoadedItems
+      ? this.countRows(
+          loadedItems,
+          (row) =>
+            this.isPositive(row.import_tax_total) ||
+            this.isPositive(row.mexico_customs_mxn) ||
+            this.isPositive(row.igi_amount) ||
+            this.isPositive(row.iva_amount)
+        )
+      : 0;
+    const badUnitCost = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.total_unit_rmb)) : 0;
     const needsRecalculate = batchStatus.needsRecalculate || badUnitCost > 0;
+    const attachmentCount = Number(sourceStatus.oa_attachment_count || batch.source_attachment_count || 0);
+    const packingListCount = Number(sourceStatus.packing_list_count || 0);
+    const parsedPackingListCount = Number(sourceStatus.parsed_packing_list_count || 0);
+    const taxCertificateCount = Number(sourceStatus.tax_certificate_count || 0);
+    const parsedTaxCertificateCount = Number(sourceStatus.parsed_tax_certificate_count || 0);
+    const sourceStatusNo = sourceStatus.source_no || sourceNo;
 
     return [
       {
@@ -2826,54 +3121,76 @@ class OverseasCostWorkbench {
         suggestion: batchStatus.suggestion,
       },
       {
-        label: "批次基础字段",
-        status: hasSourceOnly ? "待关联" : baseMissing.length ? "待补" : "完整",
-        statusClass: baseMissing.length ? "ocw-check-warn" : "ocw-check-ok",
-        suggestion: hasSourceOnly
-          ? `${sourceNo} 已作为来源单号，后续补报关/运单或物流单号`
-          : baseMissing.length
-          ? `缺少${baseMissing.join("、")}`
-          : `${customsNo || "--"} / ${waybillNo || "--"}`,
+        label: "国际物流 OA",
+        status: hasOaSource ? "已关联" : "未关联",
+        statusClass: hasOaSource ? "ocw-check-ok" : "ocw-check-warn",
+        suggestion: hasOaSource ? `${sourceStatusNo || "--"}，可跳转原审批单` : "先从钉钉国际物流流程拉取或补审批链接",
       },
       {
-        label: "物料主数据",
-        status: missingCode || missingName ? "待补" : `${itemCount} 行`,
-        statusClass: missingCode || missingName ? "ocw-check-warn" : "ocw-check-ok",
-        suggestion:
-          missingCode || missingName
-            ? `物料编码缺 ${missingCode} 行，物料名称缺 ${missingName} 行`
-            : "物料编码和名称已具备",
+        label: "物料明细",
+        status: !itemCount ? "待生成" : !hasLoadedItems ? "待展开" : missingCode || missingName || badQuantity ? "需核对" : `${itemCount} 行`,
+        statusClass: !itemCount || missingCode || missingName || badQuantity ? "ocw-check-warn" : "ocw-check-ok",
+        suggestion: !itemCount
+          ? "国际物流 OA 或附件解析后生成物料行"
+          : !hasLoadedItems
+          ? "展开批次后检查行级字段"
+          : missingCode || missingName || badQuantity
+          ? `编码缺 ${missingCode} 行，名称缺 ${missingName} 行，数量异常 ${badQuantity} 行`
+          : `${customsNo || sourceNo || "--"} / ${waybillNo || "--"}`,
       },
       {
-        label: "采购货值",
-        status: badQuantity || badPrice || badGoods ? "需核对" : this.formatNumber(goodsValue),
-        statusClass: badQuantity || badPrice || badGoods ? "ocw-check-warn" : "ocw-check-ok",
-        suggestion:
-          badQuantity || badPrice || badGoods
-            ? `数量异常 ${badQuantity} 行，单价异常 ${badPrice} 行，货值异常 ${badGoods} 行`
-            : "可用于按货值分摊",
+        label: "采购价格",
+        status: !itemCount ? "待物料" : !hasLoadedItems ? "待展开" : badPrice || badCurrency || badGoods ? "待同步" : this.formatNumber(goodsValue),
+        statusClass: !itemCount || badPrice || badCurrency || badGoods ? "ocw-check-warn" : "ocw-check-ok",
+        suggestion: !itemCount
+          ? "先有物料行，再从采购支出 OA 补价格"
+          : !hasLoadedItems
+          ? "展开批次后检查采购单价和币种"
+          : badPrice || badCurrency || badGoods
+          ? `单价缺 ${badPrice} 行，币种缺 ${badCurrency} 行，货值缺 ${badGoods} 行`
+          : "已具备单价、币种和总货值",
       },
       {
-        label: "重量分摊基础",
-        status: badWeight ? "需补重量" : `${this.formatNumber(grossWeight)} KG`,
-        statusClass: badWeight ? "ocw-check-warn" : "ocw-check-ok",
-        suggestion: badWeight ? `毛重缺失或为 0：${badWeight} 行` : "可用于国际运费按重量分摊",
+        label: "发起附件",
+        status: attachmentCount ? `${attachmentCount} 个` : "待拉取",
+        statusClass: attachmentCount ? "ocw-check-ok" : "ocw-check-warn",
+        suggestion: attachmentCount ? "资料里可查看装箱单、提单、发票等原始附件" : "从国际物流 OA 拉取发起人上传附件",
+      },
+      {
+        label: "装箱单数据",
+        status: !itemCount ? "待物料" : !hasLoadedItems ? "待展开" : badActualQty || badWeight ? "待解析" : `${this.formatNumber(grossWeight)} KG`,
+        statusClass: !itemCount || badActualQty || badWeight ? "ocw-check-warn" : "ocw-check-ok",
+        suggestion: !itemCount
+          ? "先生成物料行"
+          : !hasLoadedItems
+          ? "展开批次后检查实际数量和毛重"
+          : packingListCount && (badActualQty || badWeight)
+          ? `已登记装箱单 ${packingListCount} 个，已解析 ${parsedPackingListCount} 个；实际数量缺 ${badActualQty} 行，毛重缺 ${badWeight} 行`
+          : badActualQty || badWeight
+          ? `实际数量缺 ${badActualQty} 行，毛重缺 ${badWeight} 行；先看发起附件里的装箱单`
+          : "可用于重量分摊，体积字段后续按口径启用",
+      },
+      {
+        label: "税费凭证",
+        status: taxCertificateCount ? `${taxCertificateCount} 份` : rowsWithTax ? `${rowsWithTax} 行` : "待凭证",
+        statusClass: taxCertificateCount || rowsWithTax ? "ocw-check-ok" : "ocw-check-warn",
+        suggestion: taxCertificateCount
+          ? `已保存 ${parsedTaxCertificateCount || taxCertificateCount} 份凭证解析记录，用于最终多退少补对账`
+          : rowsWithTax
+          ? `系统已有税费 ${this.formatNumber(taxTotal)} MXN，后续仍需凭证对账`
+          : "完税凭证或清关资料解析后再做最终对账",
       },
       {
         label: "试算结果",
-        status: needsRecalculate ? "待重算" : this.formatNumber(totalCost),
-        statusClass: needsRecalculate ? "ocw-check-warn" : "ocw-check-ok",
-        suggestion: batchStatus.needsRecalculate
-          ? "明细已修改，请点击重新试算后再复核成本"
+        status: !itemCount ? "待物料" : needsRecalculate || !this.isPositive(totalCost) ? "待重算" : this.formatNumber(totalCost),
+        statusClass: !itemCount || needsRecalculate || !this.isPositive(totalCost) ? "ocw-check-warn" : "ocw-check-ok",
+        suggestion: !itemCount
+          ? "先形成批次物料明细"
+          : batchStatus.needsRecalculate
+          ? "明细已修改，请点击重新试算"
           : badUnitCost
-          ? `综合单价缺失或为 0：${badUnitCost} 行，点击重新试算`
+          ? `综合单价缺 ${badUnitCost} 行，点击重新试算`
           : `已生成综合成本，国际运费分摊 ${this.formatNumber(freightAlloc)} RMB`,
-      },
-      {
-        label: "修改留痕",
-        status: manualCount ? `${manualCount} 行` : "暂无",
-        statusClass: manualCount ? "ocw-check-info" : "ocw-check-ok",
-        suggestion: manualCount ? "手工修改已写入修改记录" : "双击修改后会进入修改记录",
       },
     ];
   }

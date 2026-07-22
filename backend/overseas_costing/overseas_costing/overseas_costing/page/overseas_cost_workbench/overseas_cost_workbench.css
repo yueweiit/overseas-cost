@@ -1276,7 +1276,7 @@
 }
 
 .ocw-diff-table {
-  min-width: 500px;
+  min-width: 0;
   border: 1px solid var(--ocw-line);
   border-radius: 7px;
   overflow: hidden;
@@ -1284,7 +1284,7 @@
 
 .ocw-diff-table > div {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) 88px minmax(150px, 1.2fr);
+  grid-template-columns: 92px 72px minmax(0, 1fr);
   gap: 6px;
   align-items: center;
   padding: 6px 10px;
@@ -1306,6 +1306,13 @@
 .ocw-diff-table strong {
   font-family: var(--ocw-mono);
   text-align: left;
+}
+
+.ocw-diff-table strong {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 .ocw-diff-table b {
@@ -2968,6 +2975,14 @@
   color: #475569;
   font-size: 12px;
   font-style: normal;
+}
+
+.ocw-attachment-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
 }
 
 .ocw-link-btn {
