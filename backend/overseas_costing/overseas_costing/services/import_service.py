@@ -53,6 +53,10 @@ PURCHASE_FIELD_LABELS = {
     "dingtalk_official_url": "钉钉原单链接",
     "parse_status": "解析状态",
 }
+DINGTALK_ENV_FILE_CANDIDATES = (
+    "/mnt/e/Yuewei开发/预算管理系统/dingtalk-budget-main/server/.env",
+    "E:/Yuewei开发/预算管理系统/dingtalk-budget-main/server/.env",
+)
 NUMERIC_ITEM_FIELDS = {
     "unit_price",
     "quantity",
@@ -967,6 +971,39 @@ def _load_purchase_summaries_from_json(purchase_summaries_json: str | None) -> l
     return [_normalize_purchase_summary(summary) for summary in _load_json_list(purchase_summaries_json)]
 
 
+def _build_purchase_summary_preview_row(summary: dict) -> dict:
+    approval_no = summary.get("source_approval_no") or ""
+    instance_id = summary.get("source_instance_id") or ""
+    official_url = summary.get("source_dingtalk_url") or ""
+    dingtalk_payload = build_dingtalk_order_payload(
+        approval_no=approval_no,
+        instance_id=instance_id,
+        official_url=official_url,
+    )
+    return {
+        "source_approval_no": approval_no,
+        "source_instance_id": instance_id,
+        "source_dingtalk_url": official_url,
+        "approval_title": summary.get("approval_title"),
+        "approval_status": summary.get("approval_status"),
+        "purchase_currency": summary.get("purchase_currency"),
+        "detail_row_count": summary.get("detail_row_count"),
+        "open_url": dingtalk_payload.get("open_url") or "",
+        "open_mode": dingtalk_payload.get("open_mode") or "unavailable",
+        "can_open": bool(dingtalk_payload.get("can_open")),
+    }
+
+
+def _resolve_dingtalk_env_file(env_file: str | None = None) -> str:
+    explicit = str(env_file or os.environ.get("DINGTALK_ENV_FILE") or "").strip()
+    if explicit:
+        return explicit
+    for candidate in DINGTALK_ENV_FILE_CANDIDATES:
+        if Path(candidate).exists():
+            return candidate
+    return ""
+
+
 def _pull_purchase_summaries_from_dingtalk(*, linked_approvals: list[dict], env_file: str | None = None) -> list[dict]:
     from overseas_costing.scripts.import_oa_logistics import (
         get_access_token,
@@ -974,7 +1011,7 @@ def _pull_purchase_summaries_from_dingtalk(*, linked_approvals: list[dict], env_
         pull_linked_purchase_approval_details,
     )
 
-    resolved_env_file = str(env_file or os.environ.get("DINGTALK_ENV_FILE") or "").strip()
+    resolved_env_file = _resolve_dingtalk_env_file(env_file)
     if resolved_env_file:
         load_env_file(resolved_env_file)
     token = get_access_token()
@@ -1525,22 +1562,133 @@ def preview_linked_purchase_expense_oa(
         "linked_purchase_count": len(linked_approvals),
         "linked_purchase_approvals": linked_approvals,
         "purchase_summary_count": len(purchase_summaries),
-        "purchase_summaries": [
-            {
-                "source_approval_no": summary.get("source_approval_no"),
-                "source_instance_id": summary.get("source_instance_id"),
-                "approval_title": summary.get("approval_title"),
-                "approval_status": summary.get("approval_status"),
-                "purchase_currency": summary.get("purchase_currency"),
-                "detail_row_count": summary.get("detail_row_count"),
-            }
-            for summary in purchase_summaries
-        ],
+        "purchase_summaries": [_build_purchase_summary_preview_row(summary) for summary in purchase_summaries],
         "mapped_purchase_row_count": len(mapped_rows),
         "mapped_preview_items": [_compact_purchase_row(row) for row in mapped_rows[:20]],
         "writeback_targets": [PURCHASE_FIELD_LABELS[field] for field in PURCHASE_WRITEBACK_FIELDS],
         "writeback_preview": writeback_preview,
         "message": writeback_preview.get("message") or "采购支出 OA 回填预览已生成，当前未写入任何字段。",
+    }
+
+
+def apply_linked_purchase_expense_fillable_fields(
+    *,
+    batch_name: str,
+    version_name: str | None = None,
+    env_file: str | None = None,
+    linked_purchase_json: str | None = None,
+    purchase_summaries_json: str | None = None,
+) -> dict:
+    """确认补入关联采购支出 OA 中可安全写入的采购字段。
+
+    安全边界：
+    1. 只处理预览已匹配到唯一物料行的数据。
+    2. 只写入采购单价、采购币种、采购货值。
+    3. 只写入预览状态为 fillable 的字段；冲突行整行跳过。
+    """
+
+    preview_result = preview_linked_purchase_expense_oa(
+        batch_name=batch_name,
+        version_name=version_name,
+        env_file=env_file,
+        linked_purchase_json=linked_purchase_json,
+        purchase_summaries_json=purchase_summaries_json,
+    )
+    if not preview_result.get("ok"):
+        return {
+            "ok": False,
+            "preview_result": preview_result,
+            "message": preview_result.get("message") or "采购支出 OA 预览失败，未写入数据。",
+        }
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "preview_result": preview_result,
+            "message": "当前未连接 Frappe，不能保存采购字段。",
+        }
+
+    writeback_preview = preview_result.get("writeback_preview") or {}
+    batch_doc_name = preview_result.get("batch_doc_name") or writeback_preview.get("batch_doc_name")
+    resolved_version_name = preview_result.get("version_name") or writeback_preview.get("version_name") or version_name
+    if not batch_doc_name or not resolved_version_name:
+        return {
+            "ok": False,
+            "preview_result": preview_result,
+            "message": "当前批次或版本未匹配成功，未写入数据。",
+        }
+
+    applied_rows: list[dict] = []
+    skipped_rows: list[dict] = []
+    changed_field_count = 0
+
+    for row in writeback_preview.get("matched_rows") or []:
+        target_item_name = row.get("target_item_name")
+        business_changes = row.get("business_changes") or []
+        if not target_item_name:
+            skipped_rows.append({"row": row, "reason": "缺少目标物料行"})
+            continue
+        if row.get("has_conflict"):
+            skipped_rows.append({"row": row, "reason": "存在差异，需人工确认"})
+            continue
+
+        field_updates = {
+            change.get("field_name"): change.get("new_value")
+            for change in business_changes
+            if change.get("field_name") in PURCHASE_WRITEBACK_FIELDS and change.get("status") == "fillable"
+        }
+        field_updates = {field_name: value for field_name, value in field_updates.items() if field_name}
+        if not field_updates:
+            skipped_rows.append({"row": row, "reason": "没有可补字段"})
+            continue
+
+        mapped_row = row.get("mapped_row") or {}
+        source_no = mapped_row.get("source_approval_no") or mapped_row.get("source_instance_id") or "关联采购支出 OA"
+        changed_fields = _update_item_fields(
+            item_name=target_item_name,
+            batch_doc_name=batch_doc_name,
+            version_name=resolved_version_name,
+            row_no=row.get("target_row_no"),
+            field_updates=field_updates,
+            action_remark=f"采购支出 OA 确认补入可补字段；来源审批：{source_no}",
+        )
+        if changed_fields:
+            applied_rows.append(
+                {
+                    "target_item_name": target_item_name,
+                    "target_row_no": row.get("target_row_no"),
+                    "source_approval_no": mapped_row.get("source_approval_no"),
+                    "changed_fields": changed_fields,
+                }
+            )
+            changed_field_count += len(changed_fields)
+
+    if applied_rows:
+        _mark_batch_dirty(batch_doc_name)
+        commit = getattr(getattr(frappe, "db", None), "commit", None)
+        if callable(commit):
+            commit()
+
+    updated_count = len(applied_rows)
+    return {
+        "ok": True,
+        "batch_name": batch_name,
+        "batch_doc_name": batch_doc_name,
+        "version_name": resolved_version_name,
+        "updated_count": updated_count,
+        "changed_field_count": changed_field_count,
+        "skipped_count": len(skipped_rows),
+        "conflict_row_count": writeback_preview.get("conflict_row_count", 0),
+        "unmatched_count": writeback_preview.get("unmatched_count", 0),
+        "ambiguous_count": writeback_preview.get("ambiguous_count", 0),
+        "applied_rows": applied_rows,
+        "skipped_rows": skipped_rows,
+        "preview_result": preview_result,
+        "message": (
+            f"已补入 {updated_count} 行采购字段，共 {changed_field_count} 个字段；冲突、未匹配和多匹配行未写入。"
+            if updated_count
+            else "没有可安全补入的采购字段，未写入数据。"
+        ),
     }
 
 

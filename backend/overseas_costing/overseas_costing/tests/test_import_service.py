@@ -11,6 +11,7 @@ from overseas_costing.services.attachment_parse_service import (
     build_packing_list_parse_task,
 )
 from overseas_costing.services.import_service import (
+    apply_linked_purchase_expense_fillable_fields,
     _coerce_item_numeric_defaults,
     _ensure_supported_excel_path,
     _get_linked_purchase_approvals_from_extra,
@@ -154,6 +155,8 @@ def test_preview_linked_purchase_expense_oa_matches_without_writing(monkeypatch)
 
     assert result["ok"] is True
     assert result["linked_purchase_count"] == 1
+    assert result["purchase_summaries"][0]["can_open"] is True
+    assert result["purchase_summaries"][0]["open_url"].startswith("dingtalk://")
     assert result["writeback_preview"]["matched_count"] == 2
     assert result["writeback_preview"]["fillable_row_count"] == 1
     assert result["writeback_preview"]["conflict_row_count"] == 1
@@ -161,6 +164,139 @@ def test_preview_linked_purchase_expense_oa_matches_without_writing(monkeypatch)
     second_changes = result["writeback_preview"]["matched_rows"][1]["business_changes"]
     assert {change["status"] for change in first_changes} == {"fillable"}
     assert any(change["status"] == "conflict" for change in second_changes)
+
+
+def test_apply_linked_purchase_expense_fillable_fields_skips_conflicts(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class FakeItemDoc:
+        def __init__(self, **values):
+            self.__dict__.update(values)
+            self.save_count = 0
+
+        def save(self, **_kwargs):
+            self.save_count += 1
+
+    class FakeAuditDoc:
+        def __init__(self, payload):
+            self.payload = payload
+            self.name = f"AUDIT-{len(audit_payloads) + 1}"
+
+        def insert(self, **_kwargs):
+            audit_payloads.append(self.payload)
+            return self
+
+    items = {
+        "ITEM-001": FakeItemDoc(
+            name="ITEM-001",
+            row_no=1,
+            material_code="YL000097",
+            product_name="TPU原料 HF-8695AU",
+            spec_model="HF-8695AU",
+            unit_price=0.0,
+            purchase_currency="",
+            goods_value=0.0,
+        ),
+        "ITEM-002": FakeItemDoc(
+            name="ITEM-002",
+            row_no=2,
+            material_code="YL000058",
+            product_name="副牌PC透明 LUXI",
+            spec_model="LUXI",
+            unit_price=2.1,
+            purchase_currency="人民币RMB",
+            goods_value=100,
+        ),
+    }
+    batch_updates = {}
+    audit_payloads = []
+    commit_count = {"value": 0}
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
+            if doctype == "Overseas Cost Batch" and name_or_filters == "FSCU8486789":
+                return {"name": "BATCH-DOC"} if as_dict else "BATCH-DOC"
+            if doctype == "Overseas Cost Batch" and name_or_filters == "BATCH-DOC":
+                if fields == ["current_version"]:
+                    return {"current_version": "VER-DOC"}
+                return {
+                    "name": "BATCH-DOC",
+                    "batch_no": "FSCU8486789",
+                    "extra_json": (
+                        '{"source":"dingtalk_oa_logistics","linked_purchase_approvals":['
+                        '{"approval_no":"202604150041000081318","source_instance_id":"PROC-PURCHASE-001"}'
+                        "]}"
+                    ),
+                }
+            return None
+
+        @staticmethod
+        def set_value(doctype, name, fieldname, value, **_kwargs):
+            batch_updates[(doctype, name, fieldname)] = value
+
+        @staticmethod
+        def commit():
+            commit_count["value"] += 1
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        class session:
+            user = "tester@example.com"
+
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            if doctype != "Overseas Cost Item":
+                return []
+            return [
+                {
+                    "name": item.name,
+                    "row_no": item.row_no,
+                    "material_code": item.material_code,
+                    "product_name": item.product_name,
+                    "spec_model": item.spec_model,
+                    "unit_price": item.unit_price,
+                    "purchase_currency": item.purchase_currency,
+                    "goods_value": item.goods_value,
+                }
+                for item in items.values()
+            ]
+
+        @staticmethod
+        def get_doc(*args):
+            if len(args) == 2 and args[0] == "Overseas Cost Item":
+                return items[args[1]]
+            if len(args) == 1 and isinstance(args[0], dict):
+                return FakeAuditDoc(args[0])
+            raise AssertionError(args)
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+
+    result = apply_linked_purchase_expense_fillable_fields(
+        batch_name="FSCU8486789",
+        purchase_summaries_json=(
+            '[{"source_approval_no":"202604150041000081318","source_instance_id":"PROC-PURCHASE-001",'
+            '"purchase_currency":"人民币RMB","mapped_preview_items":['
+            '{"material_code":"YL000097","product_name":"TPU原料 HF-8695AU","spec_model":"HF-8695AU",'
+            '"unit_price":2.9,"goods_value":29000,"purchase_currency":"人民币RMB","source_type":"PURCHASE_EXPENSE_OA"},'
+            '{"material_code":"YL000058","product_name":"副牌PC透明 LUXI","spec_model":"LUXI",'
+            '"unit_price":2.35,"goods_value":11750,"purchase_currency":"人民币RMB","source_type":"PURCHASE_EXPENSE_OA"}'
+            "]}]"
+        ),
+    )
+
+    assert result["ok"] is True
+    assert result["updated_count"] == 1
+    assert result["changed_field_count"] == 3
+    assert items["ITEM-001"].unit_price == 2.9
+    assert items["ITEM-001"].purchase_currency == "人民币RMB"
+    assert items["ITEM-001"].goods_value == 29000
+    assert items["ITEM-002"].unit_price == 2.1
+    assert items["ITEM-002"].goods_value == 100
+    assert batch_updates[("Overseas Cost Batch", "BATCH-DOC", "status")] == "Dirty"
+    assert commit_count["value"] == 1
+    assert len(audit_payloads) == 3
 
 
 def test_parse_packing_list_attachment_returns_parse_plan() -> None:

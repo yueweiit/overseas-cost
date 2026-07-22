@@ -222,6 +222,7 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='file-parse']", () => this.openFileParseDialog());
     this.$root.on("click", "[data-action='show-scope']", () => this.showPendingFeature("当前先支持成本总表和国际物流审批附件 Excel 的数据摘取；费用口径不完整时先落基础明细，后续由钉钉/凭证继续补数。"));
     this.$root.on("click", "[data-action='open-dingtalk']", (event) => this.openDingtalkOrder($(event.currentTarget).attr("data-batch-name")));
+    this.$root.on("click", "[data-action='preview-purchase']", (event) => this.openPurchasePreviewDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='add-batch']", () => this.openAddBatchDialog());
     this.$root.on("click", "[data-action='toggle-batch']", (event) => this.toggleBatch($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='expand-current']", () => this.setAllExpanded(true));
@@ -1698,6 +1699,347 @@ class OverseasCostWorkbench {
     return text.endsWith(".pdf");
   }
 
+  openPurchasePreviewDialog(batchName = "") {
+    const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
+    if (!batch) {
+      this.showPendingFeature("当前没有可预览的批次。");
+      return;
+    }
+    this.activeBatchName = batch.name;
+    const batchLabel = batch.waybill_no || batch.batch_no || batch.name;
+    const dialog = new frappe.ui.Dialog({
+      title: "采购支出 OA 预览",
+      fields: [
+        {
+          fieldtype: "HTML",
+          fieldname: "purchase_preview",
+          options: `
+            <div class="ocw-purchase-preview" data-area="purchase-preview">
+              <div class="ocw-purchase-loading">正在读取关联采购审批</div>
+            </div>
+          `,
+        },
+      ],
+      primary_action_label: "关闭",
+      primary_action: () => dialog.hide(),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-purchase-modal");
+    dialog.$wrapper.find("[data-area='purchase-preview']").html(`
+      <div class="ocw-purchase-target">
+        <span>当前批次</span>
+        <strong>${this.escape(batchLabel)}</strong>
+        <em>确认前不写入数据；确认后只补空白/0 的采购单价、币种和货值。</em>
+      </div>
+      <div class="ocw-purchase-loading">正在读取关联采购审批</div>
+    `);
+    this.previewPurchaseExpense(batch, dialog).catch((error) => {
+      dialog.$wrapper.find("[data-area='purchase-preview']").html(`
+        <div class="ocw-purchase-empty">
+          <strong>采购预览失败</strong>
+          <span>${this.escape(this.normalizeErrorMessage(error))}</span>
+        </div>
+      `);
+    });
+  }
+
+  async previewPurchaseExpense(batch, dialog) {
+    const result = await this.call(
+      "overseas_costing.api.import_api.preview_linked_purchase_expense_oa",
+      {
+        batch_name: batch.name,
+        version_name: batch.current_version || null,
+      },
+      true
+    );
+    this.renderPurchasePreview(dialog, result, batch);
+  }
+
+  renderPurchasePreview(dialog, result, batch) {
+    const $target = dialog.$wrapper.find("[data-area='purchase-preview']");
+    if (!result || !result.ok) {
+      $target.html(`
+        <div class="ocw-purchase-empty">
+          <strong>暂时无法生成采购预览</strong>
+          <span>${this.escape((result && result.message) || "请确认当前批次已经从国际物流 OA 关联采购支出审批。")}</span>
+        </div>
+      `);
+      return;
+    }
+
+    const preview = result.writeback_preview || {};
+    const matchedRows = preview.matched_rows || [];
+    const unmatchedRows = preview.unmatched_rows || [];
+    const ambiguousRows = preview.ambiguous_rows || [];
+    const fillableRows = matchedRows.filter((row) => row.has_fillable);
+    const conflictRows = matchedRows.filter((row) => row.has_conflict);
+    const batchLabel = result.batch_no || batch.waybill_no || batch.batch_no || batch.name;
+    const linkedHtml = this.renderPurchaseSourceList(result.purchase_summaries || []);
+
+    $target.html(`
+      <div class="ocw-purchase-target">
+        <span>当前批次</span>
+        <strong>${this.escape(batchLabel)}</strong>
+        <em>确认前不写入数据；确认后只补空白/0 的采购单价、币种和货值。</em>
+      </div>
+      <div class="ocw-purchase-summary">
+        <div><span>关联采购审批</span><strong>${this.escape(String(result.linked_purchase_count || 0))}</strong></div>
+        <div><span>采购明细行</span><strong>${this.escape(String(result.mapped_purchase_row_count || 0))}</strong></div>
+        <div><span>可补行</span><strong>${this.escape(String(preview.fillable_row_count || 0))}</strong></div>
+        <div><span>未匹配</span><strong>${this.escape(String(preview.unmatched_count || 0))}</strong></div>
+      </div>
+      <div class="ocw-purchase-note">
+        ${linkedHtml || "当前没有读取到关联采购支出审批。"}
+      </div>
+      ${this.renderPurchaseApplyAction(preview)}
+      ${this.renderPurchasePreviewSection("可补采购字段", fillableRows, "fillable")}
+      ${this.renderPurchasePreviewSection("需要人工确认", conflictRows, "conflict")}
+      ${this.renderPurchaseUnmatchedSection(unmatchedRows, ambiguousRows)}
+    `);
+    dialog.$wrapper
+      .off("click.ocwPurchase")
+      .on("click.ocwPurchase", "[data-action='apply-purchase-fillable']", () => {
+        this.applyPurchaseFillableFields(batch, dialog, preview).catch((error) => this.showError(error));
+      })
+      .on("click.ocwPurchase", "[data-action='open-purchase-source']", (event) => {
+        this.openDingtalkLink($(event.currentTarget).attr("data-open-url"));
+      });
+  }
+
+  renderPurchaseSourceList(rows) {
+    if (!rows.length) return "";
+    return `
+      <div class="ocw-purchase-source-list">
+        ${rows
+          .map((row) => {
+            const title = row.approval_title || "采购支出审批";
+            const approvalNo = row.source_approval_no || "--";
+            const meta = `${row.purchase_currency || "--"} · ${row.detail_row_count || 0} 行`;
+            const button = row.can_open
+              ? `<button class="ocw-link-btn" data-action="open-purchase-source" data-open-url="${this.escape(row.open_url || "")}">打开原单</button>`
+              : `<span class="ocw-purchase-source-disabled">无链接</span>`;
+            return `
+              <div class="ocw-purchase-source-row">
+                <div>
+                  <strong>${this.escape(approvalNo)}</strong>
+                  <span title="${this.escape(title)}">${this.escape(title)}</span>
+                  <em>${this.escape(meta)}</em>
+                </div>
+                ${button}
+              </div>
+            `;
+          })
+          .join("")}
+      </div>
+    `;
+  }
+
+  renderPurchaseApplyAction(preview) {
+    const fillableCount = Number((preview && preview.fillable_row_count) || 0);
+    if (!fillableCount) return "";
+    return `
+      <div class="ocw-purchase-apply">
+        <div>
+          <strong>发现 ${this.escape(String(fillableCount))} 行可补采购字段</strong>
+          <span>仅补入系统当前为空或为 0 的采购单价、采购币种、采购货值；差异、未匹配、多匹配行不会写入。</span>
+        </div>
+        <button class="ocw-primary-btn ocw-mini-btn" data-action="apply-purchase-fillable">确认补入可补字段</button>
+      </div>
+    `;
+  }
+
+  requestPurchaseApplyConfirm(fillableCount) {
+    return new Promise((resolve) => {
+      frappe.confirm(
+        `
+          <div class="ocw-confirm-copy">
+            <h4>确认补入采购字段？</h4>
+            <p>本次最多补入 ${this.escape(String(fillableCount))} 行可补字段，只会写入当前为空或为 0 的采购单价、采购币种、采购货值。</p>
+            <div class="ocw-confirm-note">有差异、未匹配、多匹配的数据不会写入，后续仍需人工核对。</div>
+          </div>
+        `,
+        () => resolve(true),
+        () => resolve(false)
+      );
+    });
+  }
+
+  async applyPurchaseFillableFields(batch, dialog, preview) {
+    if (!batch || this.isApplyingPurchaseFill) return;
+    const fillableCount = Number((preview && preview.fillable_row_count) || 0);
+    if (!fillableCount) {
+      frappe.show_alert({ message: "当前没有可补入的采购字段", indicator: "blue" });
+      return;
+    }
+    const confirmed = await this.requestPurchaseApplyConfirm(fillableCount);
+    if (!confirmed) return;
+
+    this.isApplyingPurchaseFill = true;
+    const $button = dialog.$wrapper.find("[data-action='apply-purchase-fillable']");
+    $button.prop("disabled", true).text("补入中");
+    try {
+      const result = await this.call(
+        "overseas_costing.api.import_api.apply_linked_purchase_expense_fillable_fields",
+        {
+          batch_name: batch.name,
+          version_name: batch.current_version || null,
+        },
+        true
+      );
+      if (!result.ok) {
+        throw new Error(result.message || "采购字段补入失败");
+      }
+      if (Number(result.updated_count || 0) > 0) {
+        this.markBatchDirty(batch.name);
+      }
+      await this.loadBatchItems(batch.name, batch.current_version, true);
+      await this.loadAuditLogs(batch.name, batch.current_version);
+      this.expandedBatchNames.add(batch.name);
+      this.renderTable();
+      this.renderDiffPanel();
+      frappe.show_alert({ message: result.message || "采购字段已补入", indicator: result.updated_count ? "green" : "blue" });
+      dialog.hide();
+    } finally {
+      this.isApplyingPurchaseFill = false;
+      $button.prop("disabled", false).text("确认补入可补字段");
+    }
+  }
+
+  openDingtalkLink(openUrl) {
+    const url = String(openUrl || "").trim();
+    if (!url) {
+      this.showPendingFeature("当前审批单没有可打开的钉钉链接。");
+      return;
+    }
+    if (url.startsWith("dingtalk://")) {
+      window.location.href = url;
+      frappe.show_alert({ message: "正在唤起钉钉客户端", indicator: "blue" });
+      return;
+    }
+    const opened = window.open(url, "_blank", "noopener,noreferrer");
+    if (!opened) {
+      frappe.msgprint({
+        title: "钉钉审批单",
+        message: `浏览器拦截了新窗口，请点击链接打开：<br><a href="${this.escape(url)}" target="_blank" rel="noopener noreferrer">${this.escape(url)}</a>`,
+        indicator: "orange",
+      });
+    }
+  }
+
+  renderPurchasePreviewSection(title, rows, type) {
+    if (!rows.length) {
+      return `
+        <section class="ocw-purchase-section">
+          <h4>${this.escape(title)}</h4>
+          <div class="ocw-purchase-empty-line">暂无${type === "fillable" ? "可补" : "差异"}行</div>
+        </section>
+      `;
+    }
+    const body = rows
+      .map((row) => {
+        const changes = (row.business_changes || [])
+          .map((change) => {
+            const status = this.purchaseChangeLabel(change.status);
+            return `
+              <span class="ocw-purchase-change ${this.escape(change.status || "")}">
+                ${this.escape(change.field_label || change.field_name)}：${this.escape(this.formatValue(change.old_value) || "空")} -> ${this.escape(this.formatValue(change.new_value) || "空")}（${this.escape(status)}）
+              </span>
+            `;
+          })
+          .join("");
+        return `
+          <tr>
+            <td>${this.escape(String(row.target_row_no || "--"))}</td>
+            <td>${this.escape(row.target_material_code || "--")}</td>
+            <td title="${this.escape(row.target_product_name || "")}">${this.escape(row.target_product_name || "--")}</td>
+            <td title="${this.escape(row.target_spec_model || "")}">${this.escape(row.target_spec_model || "--")}</td>
+            <td>${changes || "--"}</td>
+          </tr>
+        `;
+      })
+      .join("");
+    return `
+      <section class="ocw-purchase-section">
+        <h4>${this.escape(title)}</h4>
+        <div class="ocw-purchase-table-wrap">
+          <table class="ocw-purchase-table">
+            <thead>
+              <tr>
+                <th>行号</th>
+                <th>物料编码</th>
+                <th>系统品名</th>
+                <th>系统规格</th>
+                <th>预览变化</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
+  renderPurchaseUnmatchedSection(unmatchedRows, ambiguousRows) {
+    const rows = [
+      ...ambiguousRows.map((row) => ({ ...row.mapped_row, reason: `匹配到多行：${(row.candidate_row_nos || []).join("、")}` })),
+      ...unmatchedRows.map((row) => ({ ...row, reason: "系统当前批次未找到相同编码和规格" })),
+    ];
+    if (!rows.length) {
+      return `
+        <section class="ocw-purchase-section">
+          <h4>未匹配采购行</h4>
+          <div class="ocw-purchase-empty-line">暂无未匹配行</div>
+        </section>
+      `;
+    }
+    const body = rows
+      .map(
+        (row) => `
+          <tr>
+            <td>${this.escape(row.material_code || "--")}</td>
+            <td title="${this.escape(row.product_name || "")}">${this.escape(row.product_name || "--")}</td>
+            <td title="${this.escape(row.spec_model || "")}">${this.escape(row.spec_model || "--")}</td>
+            <td>${this.escape(this.formatValue(row.unit_price) || "--")}</td>
+            <td>${this.escape(row.purchase_currency || "--")}</td>
+            <td>${this.escape(row.source_approval_no || "--")}</td>
+            <td>${this.escape(row.reason || "--")}</td>
+          </tr>
+        `
+      )
+      .join("");
+    return `
+      <section class="ocw-purchase-section">
+        <h4>未匹配采购行</h4>
+        <div class="ocw-purchase-table-wrap">
+          <table class="ocw-purchase-table">
+            <thead>
+              <tr>
+                <th>物料编码</th>
+                <th>采购品名</th>
+                <th>采购规格</th>
+                <th>单价</th>
+                <th>币种</th>
+                <th>采购审批</th>
+                <th>原因</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
+  purchaseChangeLabel(status) {
+    const labels = {
+      fillable: "可补",
+      conflict: "有差异",
+      same: "一致",
+      empty_source: "来源为空",
+    };
+    return labels[status] || status || "未知";
+  }
+
   async openDingtalkOrder(batchName = "") {
     const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
     if (!batch) {
@@ -1881,6 +2223,7 @@ class OverseasCostWorkbench {
         <td class="ocw-row-actions">
           <div class="ocw-row-action-group">
             <button class="ocw-outline-btn ocw-mini-btn" data-action="open-dingtalk" data-batch-name="${this.escape(batch.name)}">审批单</button>
+            <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-purchase" data-batch-name="${this.escape(batch.name)}">采购预览</button>
             <button class="ocw-outline-btn ocw-mini-btn" data-action="refresh-batch" data-batch-name="${this.escape(batch.name)}">刷新数据</button>
             <button class="ocw-danger-btn ocw-mini-btn" data-action="delete-batch" data-batch-name="${this.escape(batch.name)}">删除</button>
           </div>
