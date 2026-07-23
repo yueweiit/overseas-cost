@@ -637,9 +637,12 @@ class OverseasCostWorkbench {
       return;
     }
     frappe.show_alert({
-      message: "保存完成。",
-      indicator: "green",
+      message: result.message || "保存完成。",
+      indicator: result.fx_sync && result.fx_sync.action === "updated" ? "orange" : "green",
     });
+    if (result.batch_name) {
+      await this.refreshBatch(result.batch_name).catch((error) => this.showError(error));
+    }
     try {
       await this.loadTaxCertificateRecords(dialog);
     } catch (error) {
@@ -1728,6 +1731,7 @@ class OverseasCostWorkbench {
       primary_action: () => dialog.hide(),
     });
     dialog.show();
+    this.activeOaAttachmentDialog = dialog;
     dialog.$wrapper.addClass("ocw-purchase-modal");
     dialog.$wrapper.find("[data-area='purchase-preview']").html(`
       <div class="ocw-purchase-target">
@@ -1810,7 +1814,7 @@ class OverseasCostWorkbench {
             const approvalNo = row.source_approval_no || "--";
             const meta = `${row.purchase_currency || "--"} · ${row.detail_row_count || 0} 行`;
             const button = row.can_open
-              ? `<button class="ocw-link-btn" data-action="open-purchase-source" data-open-url="${this.escape(row.open_url || "")}">打开原单</button>`
+              ? `<a class="ocw-link-btn" href="${this.escape(row.open_url || "")}" target="_blank" rel="noopener noreferrer">打开原单</a>`
               : `<span class="ocw-purchase-source-disabled">无链接</span>`;
             return `
               <div class="ocw-purchase-source-row">
@@ -2002,6 +2006,10 @@ class OverseasCostWorkbench {
               <strong>${this.escape(batchLabel)}</strong>
               <em>只显示钉钉审批发起表单上传的附件；评论附件暂不纳入。</em>
             </div>
+            <div class="ocw-import-preview-actions">
+              <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="parse-current-oa-attachments">解析当前批次可处理附件</button>
+              <span>自动下载并解析 Excel 装箱单；PDF、PO、合同等先保留原件。</span>
+            </div>
             <div class="ocw-purchase-loading" data-area="oa-attachment-list">正在读取发起附件</div>
           `,
         },
@@ -2022,6 +2030,18 @@ class OverseasCostWorkbench {
           $(event.currentTarget).attr("data-attachment-name"),
           $(event.currentTarget).attr("data-file-url")
         );
+      })
+      .on("click.ocwOaAttachments", "[data-action='download-oa-attachment']", (event) => {
+        this.downloadOaFormAttachment(
+          batch,
+          dialog,
+          $(event.currentTarget).attr("data-attachment-name"),
+          $(event.currentTarget),
+          $(event.currentTarget).attr("data-open-parse-after-download") === "1"
+        ).catch((error) => this.showError(error));
+      })
+      .on("click.ocwOaAttachments", "[data-action='parse-current-oa-attachments']", (event) => {
+        this.parseCurrentOaAttachments(batch, dialog, $(event.currentTarget)).catch((error) => this.showError(error));
       });
     this.loadOaFormAttachments(batch, dialog).catch((error) => {
       dialog.$wrapper.find("[data-area='oa-attachment-list']").html(`
@@ -2055,6 +2075,86 @@ class OverseasCostWorkbench {
     $target.removeClass("ocw-purchase-loading").html(this.renderOaAttachmentList(result.items || []));
   }
 
+  async downloadOaFormAttachment(batch, dialog, attachmentName = "", $button = null, openParseAfterDownload = false) {
+    if (!attachmentName) {
+      this.showPendingFeature("缺少附件记录，无法下载。");
+      return;
+    }
+    if ($button && $button.length) {
+      $button.prop("disabled", true).text("下载中");
+    }
+    const result = await this.call(
+      "overseas_costing.api.import_api.download_oa_form_attachment",
+      {
+        attachment_name: attachmentName,
+      },
+      true
+    );
+    if (!result || !result.ok) {
+      if ($button && $button.length) {
+        $button.prop("disabled", false).text("下载到本地");
+      }
+      this.showPendingFeature((result && result.message) || "钉钉附件下载失败。");
+      return;
+    }
+    if (result.file_url) {
+      this.downloadFileToLocal(result.file_url, result.file_name || "");
+    }
+    frappe.show_alert({
+      message: "附件已开始下载到本地",
+      indicator: "green",
+    });
+    await this.loadOaFormAttachments(batch, dialog);
+    if (openParseAfterDownload && result.file_url) {
+      this.openPackingListPreviewDialog(batch.name, result.attachment_name || attachmentName, result.file_url);
+    }
+  }
+
+  downloadFileToLocal(fileUrl, fileName = "") {
+    if (!fileUrl) return;
+    const link = document.createElement("a");
+    link.href = fileUrl;
+    if (fileName) link.download = fileName;
+    link.target = "_self";
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    window.setTimeout(() => link.remove(), 0);
+  }
+
+  async parseCurrentOaAttachments(batch, dialog, $button = null) {
+    if (!batch || this.isParsingOaAttachments) return;
+    this.isParsingOaAttachments = true;
+    if ($button && $button.length) {
+      $button.prop("disabled", true).text("解析中");
+    }
+    try {
+      const result = await this.call(
+        "overseas_costing.api.import_api.parse_oa_packing_list_attachments",
+        {
+          batch_name: batch.name,
+          limit: 80,
+          skip_parsed: 1,
+          recalculate: 1,
+        },
+        true
+      );
+      if (!result || !result.ok) {
+        const message = (result && result.message) || "当前批次附件解析失败。";
+        frappe.show_alert({ message, indicator: result && result.failed_count ? "red" : "orange" });
+      } else {
+        frappe.show_alert({ message: result.message || "当前批次可处理附件已解析", indicator: "green" });
+      }
+      await this.loadOaFormAttachments(batch, dialog);
+      await this.refreshBatch(batch.name);
+    } finally {
+      this.isParsingOaAttachments = false;
+      if ($button && $button.length) {
+        $button.prop("disabled", false).text("解析当前批次可处理附件");
+      }
+    }
+  }
+
   renderOaAttachmentList(items) {
     if (!items.length) {
       return `
@@ -2064,16 +2164,27 @@ class OverseasCostWorkbench {
         </section>
       `;
     }
+    const downloadableCount = items.filter((row) => !row.file_url && (row.can_download || row.file_id)).length;
+    const downloadedCount = items.filter((row) => row.file_url).length;
     const rows = items
       .map((row, index) => {
-        const targets = (row.parse_targets || []).join("、") || "待识别";
-        const fileRef = row.file_id || row.file_url || row.source_doc_no || "--";
+        const targets = (row.parse_targets || []).map((target) => this.attachmentParseTargetLabel(target)).join("、") || "待识别";
+        const fileRef = row.file_id || row.source_doc_no || (row.file_url ? "已保存附件" : "--");
+        const savedFileRef = row.file_url ? "已保存，可直接下载到本地" : "";
         const isPackingList =
           row.attachment_type === "Packing List" || (row.parse_targets || []).some((target) => target === "actual_shipped_qty");
+        const canParsePackingList = isPackingList && this.isExcelFileRef(row.file_url || row.file_name);
         const actions = [];
         if (row.file_url) {
-          actions.push(`<button class="ocw-link-btn" data-action="open-generic-link" data-open-url="${this.escape(row.file_url)}">打开</button>`);
-          if (isPackingList) {
+          actions.push(`
+            <a
+              class="ocw-link-btn"
+              href="${this.escape(row.file_url)}"
+              download="${this.escape(row.file_name || "")}"
+              target="_self"
+            >下载到本地</a>
+          `);
+          if (canParsePackingList) {
             actions.push(`
               <button
                 class="ocw-link-btn"
@@ -2082,18 +2193,35 @@ class OverseasCostWorkbench {
                 data-file-url="${this.escape(row.file_url || "")}"
               >解析预览</button>
             `);
+          } else if (isPackingList) {
+            actions.push(`<span class="ocw-purchase-source-disabled">PDF解析待接入</span>`);
           }
-        } else if (isPackingList) {
-          actions.push(`<span class="ocw-purchase-source-disabled">待下载后解析</span>`);
+        } else if (row.can_download || row.file_id) {
+          actions.push(`
+            <button
+              class="ocw-link-btn"
+              data-action="download-oa-attachment"
+              data-attachment-name="${this.escape(row.name || "")}"
+              data-open-parse-after-download="0"
+            >下载到本地</button>
+          `);
+          if (canParsePackingList) {
+            actions.push(`<span class="ocw-purchase-source-disabled">下载后可解析预览</span>`);
+          } else if (isPackingList) {
+            actions.push(`<span class="ocw-purchase-source-disabled">PDF解析待接入</span>`);
+          }
         } else {
           actions.push(`<span class="ocw-purchase-source-disabled">待下载</span>`);
         }
         return `
           <tr>
             <td>${this.escape(String(index + 1))}</td>
-            <td title="${this.escape(row.file_name || "")}">${this.escape(row.file_name || "--")}</td>
-            <td>${this.escape(row.attachment_type || "Other")}</td>
-            <td>${this.escape(row.parse_status || "--")}</td>
+            <td title="${this.escape(row.file_name || "")}">
+              <div class="ocw-attachment-file-name">${this.escape(row.file_name || "--")}</div>
+              ${savedFileRef ? `<div class="ocw-attachment-file-url">${this.escape(savedFileRef)}</div>` : ""}
+            </td>
+            <td>${this.escape(this.attachmentTypeLabel(row.attachment_type))}</td>
+            <td>${this.escape(this.attachmentStatusLabel(row.parse_status, row))}</td>
             <td title="${this.escape(row.source_field || "")}">${this.escape(row.source_field || "--")}</td>
             <td title="${this.escape(fileRef)}">${this.escape(fileRef)}</td>
             <td title="${this.escape(targets)}">${this.escape(targets)}</td>
@@ -2106,8 +2234,19 @@ class OverseasCostWorkbench {
       <section class="ocw-purchase-section">
         <h4>发起附件清单</h4>
         <div class="ocw-confirm-note">这些是钉钉审批发起人提交的附件原始记录，后续按文件类型进入装箱单、物流账单、发票或凭证解析；评论附件暂不处理。</div>
+        <div class="ocw-confirm-note">已登记 ${this.escape(String(items.length))} 个发起附件，${this.escape(String(downloadableCount))} 个可从钉钉下载，${this.escape(String(downloadedCount))} 个已保存到 Frappe 私有文件；评论附件暂不处理。</div>
         <div class="ocw-purchase-table-wrap">
           <table class="ocw-purchase-table">
+            <colgroup>
+              <col class="ocw-col-index">
+              <col class="ocw-col-file">
+              <col class="ocw-col-type">
+              <col class="ocw-col-status">
+              <col class="ocw-col-source">
+              <col class="ocw-col-file-id">
+              <col class="ocw-col-target">
+              <col class="ocw-col-action">
+            </colgroup>
             <thead>
               <tr>
                 <th>#</th>
@@ -2125,6 +2264,47 @@ class OverseasCostWorkbench {
         </div>
       </section>
     `;
+  }
+
+  attachmentTypeLabel(type) {
+    const labels = {
+      "Packing List": "装箱单",
+      "Tax Certificate": "完税凭证",
+      "Logistics Bill": "物流账单",
+      "Commercial Invoice": "商业发票",
+      Other: "待识别",
+    };
+    return labels[type] || type || "待识别";
+  }
+
+  attachmentStatusLabel(status, row = {}) {
+    const normalized = String(status || "").trim().toLowerCase();
+    if (normalized === "parsed" || normalized === "success") return "已解析";
+    if (normalized === "failed" || normalized === "error") return "解析失败";
+    if (normalized === "queued") return row.file_url ? "待解析" : "待下载";
+    if (!normalized) return row.file_url ? "待解析" : "待下载";
+    return status;
+  }
+
+  attachmentParseTargetLabel(target) {
+    const labels = {
+      actual_shipped_qty: "实际发货数量",
+      gross_weight_kg: "毛重KG",
+      volume_m3: "体积m3",
+      volume_weight_kg: "体积重KG",
+      chargeable_weight_kg: "计费重KG",
+      pedimento_no: "报关单号",
+      tax_totals: "税费合计",
+      paid_total_mxn: "实缴金额MXN",
+      line_items: "明细行",
+      logistics_fee: "物流费用",
+      fuel_surcharge: "燃油附加费",
+      currency: "币种",
+      bill_total: "账单总额",
+      invoice_no: "发票号",
+      goods_value: "货值",
+    };
+    return labels[target] || target || "";
   }
 
   openPackingListPreviewDialog(batchName = "", attachmentName = "", fileUrl = "") {
@@ -2345,6 +2525,9 @@ class OverseasCostWorkbench {
       this.expandedBatchNames.add(batch.name);
       this.renderTable();
       this.renderDiffPanel();
+      if (this.activeOaAttachmentDialog && this.activeOaAttachmentDialog.$wrapper && this.activeOaAttachmentDialog.$wrapper.is(":visible")) {
+        this.loadOaFormAttachments(batch, this.activeOaAttachmentDialog).catch((error) => this.showError(error));
+      }
       frappe.show_alert({ message: result.message || "装箱单字段已写入", indicator: result.updated_count ? "green" : "blue" });
       dialog.hide();
     } finally {
@@ -2363,13 +2546,30 @@ class OverseasCostWorkbench {
       frappe.show_alert({ message: "正在唤起钉钉客户端", indicator: "blue" });
       return;
     }
-    const opened = window.open(url, "_blank", "noopener,noreferrer");
-    if (!opened) {
-      frappe.msgprint({
-        title: "钉钉审批单",
-        message: `浏览器拦截了新窗口，请点击链接打开：<br><a href="${this.escape(url)}" target="_blank" rel="noopener noreferrer">${this.escape(url)}</a>`,
-        indicator: "orange",
-      });
+    this.openBrowserTab(url, "钉钉审批单");
+  }
+
+  openBrowserTab(url, title = "打开链接", preopenedWindow = null) {
+    const targetUrl = String(url || "").trim();
+    if (!targetUrl) return false;
+    if (preopenedWindow && !preopenedWindow.closed) {
+      preopenedWindow.location.href = targetUrl;
+      return true;
+    }
+    const link = document.createElement("a");
+    link.href = targetUrl;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    return true;
+  }
+
+  closePreopenedWindow(preopenedWindow) {
+    if (preopenedWindow && !preopenedWindow.closed) {
+      preopenedWindow.close();
     }
   }
 
@@ -2496,24 +2696,30 @@ class OverseasCostWorkbench {
     this.activeBatchName = batch.name;
     if (this.isOpeningDingtalk) return;
     this.isOpeningDingtalk = true;
+    let preopenedWindow = null;
     try {
+      preopenedWindow = window.open("about:blank", "_blank");
+      if (preopenedWindow) {
+        preopenedWindow.opener = null;
+      }
       const result = await this.call("overseas_costing.api.batch.get_dingtalk_order_link", {
         batch_name: batch.name,
       });
       const order = result.dingtalk_order || {};
       if (!order.can_open || !order.open_url) {
+        this.closePreopenedWindow(preopenedWindow);
         this.showPendingFeature("当前批次还没有关联钉钉审批链接，请先从国际物流单或采购支出单补来源信息。");
         return;
       }
 
       if (order.open_mode === "desktop_protocol") {
+        this.closePreopenedWindow(preopenedWindow);
         window.location.href = order.open_url;
         frappe.show_alert({ message: "正在唤起钉钉客户端", indicator: "blue" });
         return;
       }
 
-      const opened = window.open(order.open_url, "_blank", "noopener,noreferrer");
-      if (!opened) {
+      if (!this.openBrowserTab(order.open_url, "钉钉订单", preopenedWindow)) {
         frappe.msgprint({
           title: "钉钉订单",
           message: `浏览器拦截了新窗口，请点击链接打开：<br><a href="${this.escape(order.open_url)}" target="_blank" rel="noopener noreferrer">${this.escape(order.open_url)}</a>`,
@@ -2521,6 +2727,7 @@ class OverseasCostWorkbench {
         });
       }
     } catch (error) {
+      this.closePreopenedWindow(preopenedWindow);
       this.showError(error);
     } finally {
       this.isOpeningDingtalk = false;

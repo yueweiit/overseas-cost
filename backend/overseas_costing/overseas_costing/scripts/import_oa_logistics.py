@@ -48,6 +48,7 @@ from overseas_costing.utils.field_mapper import map_oa_row_to_item, map_purchase
 NEW_TOKEN_PATH = "/v1.0/oauth2/{corp_id}/token"
 NEW_LIST_INSTANCE_IDS_PATH = "/v1.0/workflow/processes/instanceIds/query"
 NEW_INSTANCE_DETAIL_PATH = "/v1.0/workflow/processInstances?processInstanceId={process_instance_id}"
+NEW_APPROVAL_ATTACHMENT_DOWNLOAD_PATH = "/v1.0/workflow/processInstances/spaces/files/urls/download"
 
 LEGACY_TOKEN_PATH = "/gettoken"
 LEGACY_LIST_INSTANCE_IDS_PATH = "/topapi/processinstance/listids?access_token={access_token}"
@@ -55,6 +56,7 @@ LEGACY_INSTANCE_DETAIL_PATH = "/topapi/processinstance/get?access_token={access_
 
 DEFAULT_SEA_KEYWORDS = ("海运", "SEA", "OCEAN", "MARITIMO", "MARÍTIMO")
 HIDDEN_APPROVAL_STATUSES = ("TERMINATED", "CANCELED", "CANCELLED", "REVOKED", "撤销", "已撤销")
+COMPLETED_APPROVAL_STATUSES = ("COMPLETED", "FINISHED", "AGREE", "APPROVED", "已完成", "审批通过", "同意")
 TRANSPORT_FIELD_ALIASES = (
     "物流方式",
     "运输方式",
@@ -92,6 +94,14 @@ PURCHASE_RELATE_FIELD_ALIASES = (
     "órdenes de compra",
     "ordenes de compra",
 )
+PURCHASE_APPROVAL_KEYWORDS = (
+    "采购支出",
+    "采购",
+    "gastosdecompra",
+    "gastoscompra",
+    "ordendecompra",
+    "ordenesdecompra",
+)
 ATTACHMENT_FIELD_ALIASES = (
     "附件",
     "Adjunto",
@@ -108,7 +118,18 @@ ATTACHMENT_FILE_URL_KEYS = ("fileUrl", "file_url", "downloadUrl", "download_url"
 ATTACHMENT_SPACE_ID_KEYS = ("spaceId", "space_id", "spaceID")
 DEFAULT_LOGISTICS_PROCESS_CODE = "PROC-RIYJTXWV-CN52YRK70C5499JG0TJ03-3GSSHZQJ-5"
 DEFAULT_FX_RMB_TO_MXN = 2.6
+DEFAULT_FX_USD_TO_RMB = round(1 / 0.1393, 6)
 MAX_AUDIT_TEXT_LENGTH = 20000
+DINGTALK_ENV_FILE_CANDIDATES = (
+    "/mnt/e/Yuewei开发/预算管理系统/dingtalk-expense-sync-main/.env",
+    "/mnt/e/Yuewei开发/预算管理系统/dingtalk-budget-main/server/.env",
+    "/mnt/e/Yuewei开发/dingtalk-expense-sync-main/.env",
+    "/mnt/e/Yuewei开发/dingtalk-budget-main/server/.env",
+    "E:/Yuewei开发/预算管理系统/dingtalk-expense-sync-main/.env",
+    "E:/Yuewei开发/预算管理系统/dingtalk-budget-main/server/.env",
+    "E:/Yuewei开发/dingtalk-expense-sync-main/.env",
+    "E:/Yuewei开发/dingtalk-budget-main/server/.env",
+)
 
 
 def _clean(value: Any) -> str:
@@ -134,7 +155,24 @@ def load_env_file(env_file: str | None, *, override: bool = False) -> str:
         value = value.strip().strip('"').strip("'")
         if key and (override or key not in os.environ):
             os.environ[key] = value
+        if key == "DINGTALK_APPKEY" and (override or "DINGTALK_APP_KEY" not in os.environ):
+            os.environ["DINGTALK_APP_KEY"] = value
+        if key == "DINGTALK_APPSECRET" and (override or "DINGTALK_APP_SECRET" not in os.environ):
+            os.environ["DINGTALK_APP_SECRET"] = value
     return str(path)
+
+
+def resolve_dingtalk_env_file(env_file: str | None = None) -> str:
+    """定位钉钉配置文件，优先使用显式路径，再找预算系统里的 .env。"""
+
+    explicit = _clean(env_file) or _clean(os.environ.get("DINGTALK_ENV_FILE"))
+    if explicit:
+        return explicit
+    for candidate in DINGTALK_ENV_FILE_CANDIDATES:
+        path = Path(candidate).expanduser()
+        if path.exists():
+            return str(path)
+    return ""
 
 
 def _preload_env_file_from_argv(argv: list[str]) -> str:
@@ -159,6 +197,25 @@ def resolve_logistics_process_code(process_code: str | None = "") -> str:
         _clean(process_code)
         or _clean(os.environ.get("DINGTALK_LOGISTICS_PROCESS_CODE"))
         or DEFAULT_LOGISTICS_PROCESS_CODE
+    )
+
+
+def resolve_purchase_process_code(process_code: str | None = "") -> str:
+    """解析采购支出流程号。
+
+    采购支出流程没有安全默认值，必须显式传入或配置环境变量，避免误把预算/其它审批流当采购来源。
+    """
+
+    process_codes = _parse_json_text(_clean(os.environ.get("DINGTALK_PROCESS_CODES")))
+    purchase_code_from_list = ""
+    if isinstance(process_codes, list) and len(process_codes) > 1:
+        purchase_code_from_list = _clean(process_codes[1])
+
+    return (
+        _clean(process_code)
+        or _clean(os.environ.get("DINGTALK_PURCHASE_PROCESS_CODE"))
+        or _clean(os.environ.get("DINGTALK_PURCHASE_EXPENSE_PROCESS_CODE"))
+        or purchase_code_from_list
     )
 
 
@@ -487,6 +544,45 @@ def get_process_instance_detail(*, token: str, process_instance_id: str, api_sty
     return _get_process_instance_detail_by_new_api(token=token, process_instance_id=instance_id)
 
 
+def get_process_attachment_download_url(*, token: str, process_instance_id: str, file_id: str) -> dict:
+    """换取钉钉审批发起表单附件的临时下载地址。"""
+
+    instance_id = _clean(process_instance_id)
+    resolved_file_id = _clean(file_id)
+    if not instance_id:
+        raise ValueError("缺少钉钉审批实例 ID。")
+    if not resolved_file_id:
+        raise ValueError("缺少钉钉附件 file_id。")
+
+    result = _request_json(
+        f"{_api_url()}{NEW_APPROVAL_ATTACHMENT_DOWNLOAD_PATH}",
+        method="POST",
+        token=token,
+        api_style="new",
+        payload={
+            "processInstanceId": instance_id,
+            "fileId": resolved_file_id,
+        },
+    )
+    _ensure_dingtalk_success(result, api_style="new")
+    body = _unwrap_result(result)
+    download_uri = _clean(
+        body.get("downloadUri")
+        or body.get("download_uri")
+        or body.get("downloadUrl")
+        or body.get("download_url")
+        or body.get("url")
+    )
+    if not download_uri:
+        raise RuntimeError(f"钉钉附件下载地址响应中没有 downloadUri：{result}")
+    return {
+        "process_instance_id": instance_id,
+        "file_id": resolved_file_id,
+        "download_uri": download_uri,
+        "raw_response": result,
+    }
+
+
 def _get_process_instance_detail_by_legacy_api(*, token: str, process_instance_id: str) -> dict:
     result = _request_json(
         f"{_oapi_url()}{LEGACY_INSTANCE_DETAIL_PATH.format(access_token=quote(token, safe=''))}",
@@ -685,13 +781,65 @@ def _is_purchase_relate_component(component: dict) -> bool:
 def _relation_display_values(component: dict) -> list[str]:
     value = _parse_json_text(component.get("value"))
     if isinstance(value, list):
-        return [_clean(item) for item in value]
+        display_values: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                display_values.append(
+                    _clean(
+                        item.get("title")
+                        or item.get("processInstanceTitle")
+                        or item.get("name")
+                        or item.get("label")
+                        or item.get("value")
+                    )
+                )
+            else:
+                display_values.append(_clean(item))
+        return display_values
     text = _clean(value)
     return [text] if text else []
 
 
+def _looks_like_linked_approval_payload(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    return any(
+        _clean(value.get(key))
+        for key in (
+            "businessId",
+            "business_id",
+            "bizId",
+            "approvalNo",
+            "approval_no",
+            "procInstId",
+            "processInstanceId",
+            "process_instance_id",
+            "instanceId",
+            "instance_id",
+            "url",
+            "detailUrl",
+            "officialUrl",
+        )
+    )
+
+
+def _iter_linked_approval_payloads(value: Any):
+    parsed = _parse_json_text(value)
+    if isinstance(parsed, dict):
+        if _looks_like_linked_approval_payload(parsed):
+            yield parsed
+        for child in parsed.values():
+            yield from _iter_linked_approval_payloads(child)
+    elif isinstance(parsed, list):
+        for child in parsed:
+            yield from _iter_linked_approval_payloads(child)
+
+
 def _relation_ext_items(component: dict) -> list:
     ext_value = _parse_json_text(component.get("ext_value") or component.get("extValue"))
+    nested_items = list(_iter_linked_approval_payloads(ext_value))
+    if nested_items:
+        return nested_items
     if isinstance(ext_value, dict):
         for key in ("list", "items", "data", "value"):
             value = ext_value.get(key)
@@ -709,6 +857,7 @@ def _build_linked_approval_record(component: dict, raw_item: Any, display_name: 
     if not isinstance(raw_item, dict):
         return {}
 
+    official_url = _clean(raw_item.get("url") or raw_item.get("detailUrl") or raw_item.get("officialUrl"))
     approval_no = _clean(
         raw_item.get("businessId")
         or raw_item.get("business_id")
@@ -723,7 +872,8 @@ def _build_linked_approval_record(component: dict, raw_item: Any, display_name: 
         or raw_item.get("instanceId")
         or raw_item.get("instance_id")
     )
-    official_url = _clean(raw_item.get("url") or raw_item.get("detailUrl") or raw_item.get("officialUrl"))
+    if not instance_id:
+        instance_id = extract_dingtalk_instance_id(official_url)
     title = _clean(raw_item.get("title") or raw_item.get("processInstanceTitle") or raw_item.get("name") or display_name)
     if not approval_no and not instance_id and not official_url:
         return {}
@@ -748,25 +898,49 @@ def _build_linked_approval_record(component: dict, raw_item: Any, display_name: 
     }
 
 
+def _has_purchase_approval_keyword(*values: Any) -> bool:
+    normalized_text = _normalize_key(" ".join(_clean(value) for value in values if value not in (None, "")))
+    return any(keyword in normalized_text for keyword in PURCHASE_APPROVAL_KEYWORDS)
+
+
 def extract_linked_purchase_approvals(instance: dict) -> list[dict]:
     """从国际物流 OA 的关联审批控件里提取采购支出审批编号和实例 ID。"""
 
     approvals: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
+
+    def add_record(component: dict, raw_item: Any, display_name: str = "", *, require_keyword: bool = False) -> None:
+        record = _build_linked_approval_record(component, raw_item, display_name=display_name)
+        if not record:
+            return
+        if require_keyword and not _has_purchase_approval_keyword(
+            record.get("title"),
+            record.get("display_name"),
+            record.get("source_field"),
+            raw_item.get("title") if isinstance(raw_item, dict) else "",
+            raw_item.get("processInstanceTitle") if isinstance(raw_item, dict) else "",
+        ):
+            return
+        key = (
+            record.get("approval_no", ""),
+            record.get("source_instance_id", ""),
+            "" if (record.get("approval_no") or record.get("source_instance_id")) else record.get("display_name", ""),
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        approvals.append(record)
+
     for component in _iter_form_components(instance):
         if not _is_purchase_relate_component(component):
             continue
         display_values = _relation_display_values(component)
         for index, raw_item in enumerate(_relation_ext_items(component)):
             display_name = display_values[index] if index < len(display_values) else ""
-            record = _build_linked_approval_record(component, raw_item, display_name=display_name)
-            if not record:
-                continue
-            key = (record.get("approval_no", ""), record.get("source_instance_id", ""), record.get("display_name", ""))
-            if key in seen:
-                continue
-            seen.add(key)
-            approvals.append(record)
+            add_record(component, raw_item, display_name=display_name)
+
+    for raw_item in _iter_linked_approval_payloads(instance):
+        add_record({}, raw_item, require_keyword=True)
     return approvals
 
 
@@ -978,6 +1152,17 @@ def is_hidden_approval_status(status: str | None) -> bool:
     if not normalized:
         return False
     return any(_clean(hidden).upper() in normalized for hidden in HIDDEN_APPROVAL_STATUSES)
+
+
+def is_completed_approval_status(status: str | None, *, allow_empty: bool = True) -> bool:
+    """判断审批是否已完成；空状态默认放行以兼容部分旧接口响应。"""
+
+    normalized = _clean(status).upper()
+    if not normalized:
+        return allow_empty
+    if is_hidden_approval_status(normalized):
+        return False
+    return any(_clean(completed).upper() in normalized for completed in COMPLETED_APPROVAL_STATUSES)
 
 
 def summarize_approval(instance: dict, *, process_instance_id: str = "", include_raw: bool = False) -> dict:
@@ -1349,6 +1534,7 @@ def pull_linked_purchase_approval_details(
     token: str,
     linked_approvals: list[dict],
     api_style: str = "auto",
+    include_running: bool = False,
 ) -> list[dict]:
     """按关联审批实例 ID 拉取采购支出详情并返回解析摘要。"""
 
@@ -1369,7 +1555,20 @@ def pull_linked_purchase_approval_details(
             continue
         detail = get_process_instance_detail(token=token, process_instance_id=instance_id, api_style=api_style)
         summary = summarize_purchase_approval(detail, process_instance_id=instance_id)
-        summary["ok"] = True
+        if is_hidden_approval_status(summary.get("approval_status")):
+            summary["ok"] = False
+            summary["detail_row_count"] = 0
+            summary["detail_rows"] = []
+            summary["mapped_preview_items"] = []
+            summary["message"] = "采购支出审批已撤销或终止，未用于采购字段同步。"
+        elif not include_running and not is_completed_approval_status(summary.get("approval_status")):
+            summary["ok"] = False
+            summary["detail_row_count"] = 0
+            summary["detail_rows"] = []
+            summary["mapped_preview_items"] = []
+            summary["message"] = "采购支出审批未完成，未用于采购字段同步。"
+        else:
+            summary["ok"] = True
         summary["linked_from"] = linked
         summaries.append(summary)
     return summaries
@@ -1539,6 +1738,7 @@ def _ensure_oa_trace_version(batch_name: str, batch_no: str) -> str:
             "status": "Active",
             "is_current": 1,
             "source_type": "Import",
+            "fx_usd_to_rmb": DEFAULT_FX_USD_TO_RMB,
             "fx_rmb_to_mxn": DEFAULT_FX_RMB_TO_MXN,
             "remark": f"钉钉国际物流审批追溯默认版本：{batch_no}",
         }
@@ -1834,6 +2034,76 @@ def _sync_oa_form_attachments(
     }
 
 
+def _sync_linked_purchase_fields(
+    *,
+    batch_name: str,
+    version_name: str,
+    approval_item: dict,
+) -> dict:
+    """按国际物流 OA 关联的采购支出审批，自动补采购单价、币种和货值。"""
+
+    linked_approvals = approval_item.get("linked_purchase_approvals") or []
+    if not linked_approvals:
+        return {
+            "action": "skipped",
+            "ok": True,
+            "linked_purchase_count": 0,
+            "updated_count": 0,
+            "reason": "当前国际物流 OA 没有关联采购支出审批。",
+        }
+    if frappe is None:
+        return {
+            "action": "preview",
+            "ok": True,
+            "linked_purchase_count": len(linked_approvals),
+            "updated_count": 0,
+            "reason": "当前未连接 Frappe，仅返回关联采购支出审批数量。",
+        }
+
+    try:
+        from overseas_costing.services import import_service
+
+        result = import_service.apply_linked_purchase_expense_fillable_fields(
+            batch_name=batch_name,
+            version_name=version_name,
+            linked_purchase_json=_json_dumps(linked_approvals),
+        )
+    except Exception as exc:
+        return {
+            "action": "failed",
+            "ok": False,
+            "linked_purchase_count": len(linked_approvals),
+            "updated_count": 0,
+            "message": f"关联采购支出 OA 同步失败：{exc}",
+        }
+
+    return {
+        "action": "synced" if result.get("ok") else "failed",
+        "ok": bool(result.get("ok")),
+        "linked_purchase_count": len(linked_approvals),
+        "updated_count": result.get("updated_count", 0),
+        "changed_field_count": result.get("changed_field_count", 0),
+        "skipped_count": result.get("skipped_count", 0),
+        "unmatched_count": result.get("unmatched_count", 0),
+        "ambiguous_count": result.get("ambiguous_count", 0),
+        "message": result.get("message") or "",
+    }
+
+
+def _recalculate_after_purchase_sync(*, batch_name: str, version_name: str, purchase_sync: dict) -> dict:
+    if frappe is None:
+        return {"action": "skipped", "reason": "当前未连接 Frappe。"}
+    if not purchase_sync.get("ok") or int(purchase_sync.get("updated_count") or 0) <= 0:
+        return {"action": "skipped", "reason": "采购字段没有新增写入，暂不自动试算。"}
+    try:
+        from overseas_costing.services.calculate_service import recalculate_batch
+
+        result = recalculate_batch(batch_name=batch_name, version_name=version_name)
+        return {"action": "recalculated", "ok": bool(result.get("ok", True)), "result": result}
+    except Exception as exc:
+        return {"action": "failed", "ok": False, "message": f"采购字段同步后自动试算失败：{exc}"}
+
+
 def _get_oa_trace_from_extra(extra_json: Any) -> tuple[dict, dict, bool]:
     data = _json_loads_dict(extra_json)
     if data.get("source") == "dingtalk_oa_logistics":
@@ -1948,12 +2218,361 @@ def sync_existing_oa_form_attachments(limit: int | None = 200) -> dict:
     }
 
 
-def save_sea_approvals_to_erp(result: dict) -> dict:
-    """把海运审批摘要保存成批次追溯记录，并在空批次中生成 OA 基础物料行。
+def _resolve_batch_source_instance_id(row: dict, trace: dict) -> str:
+    return (
+        _clean(row.get("source_instance_id"))
+        or _clean(trace.get("source_instance_id"))
+        or extract_dingtalk_instance_id(row.get("source_dingtalk_url"))
+        or extract_dingtalk_instance_id(trace.get("source_dingtalk_url") or trace.get("open_url"))
+    )
 
-    只写批次头追溯字段、默认版本、OA 表单基础物料行，不写单价、货值、费用和税费。
-    已有批次只补空值；审批状态、附件数量这类非金额状态字段允许刷新。
-    已有 SKU 明细的批次不会被 OA 表单覆盖。
+
+def refresh_existing_oa_logistics_details(
+    limit: int | None = 200,
+    *,
+    env_file: str | None = None,
+    api_style: str = "auto",
+    include_non_sea: bool = False,
+    access_token: str = "",
+) -> dict:
+    """重拉已有国际物流 OA 批次详情，并按关联采购支出 OA 自动补采购字段。
+
+    旧批次如果只保存了国际物流基础字段，没有保存 form_fields / linked_purchase_approvals，
+    单独执行 sync_existing_linked_purchase_fields 会因为缺少关联采购支出入口而跳过。
+    这个函数会先按 source_instance_id 回到钉钉重拉审批详情，再复用 save_sea_approvals_to_erp
+    更新批次追溯、附件入口、基础物料行和采购单价/币种/货值。
+    """
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，无法刷新已有 OA 批次详情。",
+        }
+
+    resolved_env_file = resolve_dingtalk_env_file(env_file)
+    if resolved_env_file:
+        load_env_file(resolved_env_file)
+    resolved_api_style = _resolve_api_style(api_style)
+    token = get_access_token(api_style=resolved_api_style, access_token=access_token)
+
+    page_length = max(1, min(int(limit or 200), 1000))
+    rows = frappe.get_all(
+        "Overseas Cost Batch",
+        filters={"source_type": "oa_logistics"},
+        fields=[
+            "name",
+            "batch_no",
+            "waybill_no",
+            "current_version",
+            "source_approval_no",
+            "source_instance_id",
+            "source_dingtalk_url",
+            "extra_json",
+        ],
+        limit_page_length=page_length,
+        order_by="modified desc",
+    )
+
+    refreshed_items: list[dict] = []
+    skipped_items: list[dict] = []
+    failed_items: list[dict] = []
+
+    for row in rows:
+        _root, trace, _is_root_trace = _get_oa_trace_from_extra(row.get("extra_json"))
+        instance_id = _resolve_batch_source_instance_id(row, trace)
+        if not instance_id:
+            skipped_items.append(
+                {
+                    "batch_name": row.get("name"),
+                    "batch_no": row.get("batch_no"),
+                    "reason": "缺少钉钉审批实例 ID，无法回到钉钉重拉详情",
+                }
+            )
+            continue
+
+        try:
+            detail = get_process_instance_detail(
+                token=token,
+                process_instance_id=instance_id,
+                api_style=resolved_api_style,
+            )
+            summary = summarize_approval(detail, process_instance_id=instance_id)
+        except Exception as exc:
+            failed_items.append(
+                {
+                    "batch_name": row.get("name"),
+                    "batch_no": row.get("batch_no"),
+                    "source_instance_id": instance_id,
+                    "reason": str(exc),
+                }
+            )
+            continue
+
+        if is_hidden_approval_status(summary.get("approval_status")):
+            skipped_items.append(
+                {
+                    "batch_name": row.get("name"),
+                    "batch_no": row.get("batch_no"),
+                    "source_instance_id": instance_id,
+                    "approval_status": summary.get("approval_status"),
+                    "reason": "审批单已撤销或终止，不再刷新到成本表",
+                }
+            )
+            continue
+
+        if not include_non_sea and not is_sea_approval(summary.get("form_fields") or {}):
+            skipped_items.append(
+                {
+                    "batch_name": row.get("name"),
+                    "batch_no": row.get("batch_no"),
+                    "source_instance_id": instance_id,
+                    "transport_mode_raw": summary.get("transport_mode_raw"),
+                    "reason": "审批详情不是海运，未纳入本次刷新",
+                }
+            )
+            continue
+
+        summary["source_approval_no"] = summary.get("source_approval_no") or row.get("source_approval_no") or trace.get("source_approval_no") or ""
+        summary["source_dingtalk_url"] = summary.get("source_dingtalk_url") or row.get("source_dingtalk_url") or trace.get("source_dingtalk_url") or ""
+        summary["logistics_no"] = summary.get("logistics_no") or row.get("waybill_no") or row.get("batch_no") or ""
+        refreshed_items.append(summary)
+
+    save_result = save_sea_approvals_to_erp({"ok": True, "items": refreshed_items}) if refreshed_items else {
+        "ok": True,
+        "created_count": 0,
+        "updated_count": 0,
+        "unchanged_count": 0,
+        "items": [],
+        "skipped_items": [],
+    }
+    saved_items = save_result.get("items") or []
+    purchase_updated_count = sum(int((item.get("purchase_sync") or {}).get("updated_count") or 0) for item in saved_items)
+    purchase_changed_field_count = sum(int((item.get("purchase_sync") or {}).get("changed_field_count") or 0) for item in saved_items)
+    linked_purchase_count = sum(int((item.get("purchase_sync") or {}).get("linked_purchase_count") or 0) for item in saved_items)
+    attachment_count = sum(int((item.get("attachment_sync") or {}).get("attachment_count") or 0) for item in saved_items)
+
+    return {
+        "ok": bool(save_result.get("ok", True)) and not failed_items,
+        "dry_run": False,
+        "env_file_loaded": bool(resolved_env_file),
+        "api_style": resolved_api_style,
+        "scanned_count": len(rows),
+        "detail_count": len(refreshed_items),
+        "saved_count": len(saved_items),
+        "created_count": save_result.get("created_count", 0),
+        "updated_count": save_result.get("updated_count", 0),
+        "unchanged_count": save_result.get("unchanged_count", 0),
+        "purchase_updated_count": purchase_updated_count,
+        "purchase_changed_field_count": purchase_changed_field_count,
+        "linked_purchase_count": linked_purchase_count,
+        "attachment_count": attachment_count,
+        "skipped_count": len(skipped_items) + int(save_result.get("skipped_count") or 0),
+        "failed_count": len(failed_items),
+        "items": saved_items,
+        "skipped_items": skipped_items + (save_result.get("skipped_items") or []),
+        "failed_items": failed_items,
+        "message": (
+            f"已重拉 {len(refreshed_items)} 条国际物流 OA 详情，并按关联采购支出 OA 同步采购字段；"
+            f"采购字段更新 {purchase_updated_count} 行，变更 {purchase_changed_field_count} 个字段。"
+        ),
+    }
+
+
+def detect_purchase_process_codes_from_existing_links(
+    limit: int | None = 50,
+    *,
+    env_file: str | None = None,
+    api_style: str = "auto",
+    access_token: str = "",
+) -> dict:
+    """从已有国际物流批次的关联采购单里反查采购支出流程模板号。"""
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，无法检测采购支出流程号。",
+        }
+
+    resolved_env_file = resolve_dingtalk_env_file(env_file)
+    if resolved_env_file:
+        load_env_file(resolved_env_file)
+    resolved_api_style = _resolve_api_style(api_style)
+    token = get_access_token(api_style=resolved_api_style, access_token=access_token)
+
+    page_length = max(1, min(int(limit or 50), 1000))
+    rows = frappe.get_all(
+        "Overseas Cost Batch",
+        filters={"source_type": "oa_logistics"},
+        fields=["name", "batch_no", "extra_json"],
+        limit_page_length=page_length,
+        order_by="modified desc",
+    )
+
+    detected: dict[str, dict] = {}
+    skipped_items: list[dict] = []
+    failed_items: list[dict] = []
+    for row in rows:
+        _root, trace, _is_root_trace = _get_oa_trace_from_extra(row.get("extra_json"))
+        linked_approvals = trace.get("linked_purchase_approvals") or []
+        if not linked_approvals:
+            skipped_items.append({"batch_name": row.get("name"), "batch_no": row.get("batch_no"), "reason": "没有关联采购支出单"})
+            continue
+        for linked in linked_approvals:
+            instance_id = _clean(linked.get("source_instance_id") or linked.get("proc_inst_id") or linked.get("instance_id"))
+            if not instance_id:
+                skipped_items.append(
+                    {
+                        "batch_name": row.get("name"),
+                        "batch_no": row.get("batch_no"),
+                        "approval_no": linked.get("approval_no") or linked.get("source_approval_no"),
+                        "reason": "关联采购支出单缺少实例 ID",
+                    }
+                )
+                continue
+            try:
+                detail = get_process_instance_detail(token=token, process_instance_id=instance_id, api_style=resolved_api_style)
+            except Exception as exc:
+                failed_items.append(
+                    {
+                        "batch_name": row.get("name"),
+                        "batch_no": row.get("batch_no"),
+                        "source_instance_id": instance_id,
+                        "reason": str(exc),
+                    }
+                )
+                continue
+            process_code = _clean(detail.get("processCode") or detail.get("process_code") or detail.get("processCodeValue"))
+            title = _clean(detail.get("title") or detail.get("processInstanceTitle") or detail.get("process_instance_title"))
+            if not process_code:
+                skipped_items.append(
+                    {
+                        "batch_name": row.get("name"),
+                        "batch_no": row.get("batch_no"),
+                        "source_instance_id": instance_id,
+                        "approval_title": title,
+                        "reason": "采购支出详情里没有返回 processCode",
+                    }
+                )
+                continue
+            record = detected.setdefault(
+                process_code,
+                {
+                    "process_code": process_code,
+                    "approval_title": title,
+                    "sample_instance_id": instance_id,
+                    "sample_approval_no": linked.get("approval_no") or linked.get("source_approval_no") or "",
+                    "count": 0,
+                },
+            )
+            record["count"] += 1
+
+    return {
+        "ok": not failed_items,
+        "dry_run": False,
+        "env_file_loaded": bool(resolved_env_file),
+        "api_style": resolved_api_style,
+        "scanned_count": len(rows),
+        "detected_count": len(detected),
+        "items": list(detected.values()),
+        "skipped_count": len(skipped_items),
+        "failed_count": len(failed_items),
+        "skipped_items": skipped_items,
+        "failed_items": failed_items,
+        "message": f"已从已有国际物流关联采购单中检测到 {len(detected)} 个采购支出流程号。",
+    }
+
+
+def sync_existing_linked_purchase_fields(limit: int | None = 200) -> dict:
+    """给已有国际物流 OA 批次补关联采购支出 OA 的采购字段。"""
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，无法同步已有批次采购字段。",
+        }
+
+    page_length = max(1, min(int(limit or 200), 1000))
+    rows = frappe.get_all(
+        "Overseas Cost Batch",
+        filters={"source_type": "oa_logistics"},
+        fields=[
+            "name",
+            "batch_no",
+            "current_version",
+            "source_approval_no",
+            "source_instance_id",
+            "extra_json",
+        ],
+        limit_page_length=page_length,
+        order_by="modified desc",
+    )
+
+    synced_items: list[dict] = []
+    skipped_items: list[dict] = []
+    total_updated = 0
+    total_changed_fields = 0
+
+    for row in rows:
+        _root, trace, _is_root_trace = _get_oa_trace_from_extra(row.get("extra_json"))
+        linked_approvals = trace.get("linked_purchase_approvals") or []
+        if not linked_approvals:
+            skipped_items.append({"batch_name": row.get("name"), "batch_no": row.get("batch_no"), "reason": "未找到关联采购支出审批"})
+            continue
+
+        approval_item = {
+            "source_approval_no": row.get("source_approval_no") or trace.get("source_approval_no") or "",
+            "source_instance_id": row.get("source_instance_id") or trace.get("source_instance_id") or "",
+            "linked_purchase_approvals": linked_approvals,
+        }
+        purchase_sync = _sync_linked_purchase_fields(
+            batch_name=row.get("name"),
+            version_name=row.get("current_version") or "",
+            approval_item=approval_item,
+        )
+        recalculate_sync = _recalculate_after_purchase_sync(
+            batch_name=row.get("name"),
+            version_name=row.get("current_version") or "",
+            purchase_sync=purchase_sync,
+        )
+        total_updated += int(purchase_sync.get("updated_count") or 0)
+        total_changed_fields += int(purchase_sync.get("changed_field_count") or 0)
+        synced_items.append(
+            {
+                "batch_name": row.get("name"),
+                "batch_no": row.get("batch_no"),
+                "linked_purchase_count": len(linked_approvals),
+                "purchase_sync": purchase_sync,
+                "recalculate_sync": recalculate_sync,
+            }
+        )
+
+    if hasattr(frappe.db, "commit"):
+        frappe.db.commit()
+
+    return {
+        "ok": True,
+        "dry_run": False,
+        "scanned_count": len(rows),
+        "synced_count": len(synced_items),
+        "skipped_count": len(skipped_items),
+        "updated_count": total_updated,
+        "changed_field_count": total_changed_fields,
+        "items": synced_items,
+        "skipped_items": skipped_items,
+        "message": "已有国际物流 OA 批次已按关联采购支出 OA 尝试同步采购单价、币种和货值。",
+    }
+
+
+def save_sea_approvals_to_erp(result: dict) -> dict:
+    """保存国际物流 OA，生成批次，并自动补关联采购支出 OA 的采购字段。
+
+    国际物流 OA 负责批次头、物料基础行、附件记录和采购支出关联。
+    采购支出 OA 负责补采购单价、采购币种、总货值。
+    装箱单/凭证等附件后续继续补实际发货、重量、体积和税费。
+    已有 SKU 明细不会被国际物流 OA 表单覆盖；采购支出 OA 有匹配结果时会直接写入采购字段。
     """
 
     raw_items = [item for item in result.get("items") or [] if isinstance(item, dict)]
@@ -2017,6 +2636,16 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
             version_name=saved.get("version_name") or "",
             approval_item=item,
         )
+        purchase_sync = _sync_linked_purchase_fields(
+            batch_name=saved["batch_name"],
+            version_name=saved.get("version_name") or "",
+            approval_item=item,
+        )
+        recalculate_sync = _recalculate_after_purchase_sync(
+            batch_name=saved["batch_name"],
+            version_name=saved.get("version_name") or "",
+            purchase_sync=purchase_sync,
+        )
         saved.update(
             {
                 "batch_no": values.get("batch_no"),
@@ -2025,6 +2654,8 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
                 "logistics_no": values.get("waybill_no"),
                 "item_sync": item_sync,
                 "attachment_sync": attachment_sync,
+                "purchase_sync": purchase_sync,
+                "recalculate_sync": recalculate_sync,
             }
         )
         saved_items.append(saved)
@@ -2035,7 +2666,7 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
     return {
         "ok": True,
         "dry_run": False,
-        "message": "钉钉海运审批追溯已保存到批次头；空批次已补 OA 基础物料行，并登记发起表单附件，未写入单价、费用和税费。",
+        "message": "钉钉海运审批已保存到批次；已生成/保留物料行、登记发起附件，并按关联采购支出 OA 同步采购单价、币种和货值。",
         "total": len(raw_items),
         "created_count": created_count,
         "updated_count": updated_count,
@@ -2137,6 +2768,454 @@ def pull_sea_approvals(
     return result
 
 
+def pull_purchase_expense_approvals(
+    *,
+    process_code: str,
+    start: str,
+    end: str,
+    api_style: str = "auto",
+    list_api: str = "auto",
+    page_size: int = 20,
+    max_pages: int = 20,
+    chunk_days: int = 30,
+    limit: int | None = None,
+    include_raw: bool = False,
+    include_running: bool = False,
+    access_token: str = "",
+    corp_id: str = "",
+    client_id: str = "",
+    client_secret: str = "",
+    app_key: str = "",
+    app_secret: str = "",
+) -> dict:
+    """按采购支出流程批量拉取审批详情，并解析行级单价、币种、总金额。"""
+
+    resolved_process_code = resolve_purchase_process_code(process_code)
+    if not resolved_process_code:
+        raise ValueError("缺少采购支出流程模板 process_code，请配置 DINGTALK_PURCHASE_PROCESS_CODE。")
+
+    resolved_api_style = _resolve_api_style(api_style)
+    resolved_list_api = _resolve_list_api_mode(list_api, resolved_api_style)
+    start_time_ms = _parse_datetime_ms(start)
+    end_time_ms = _parse_datetime_ms(end, end_of_day=True)
+    token = get_access_token(
+        api_style=resolved_api_style,
+        access_token=access_token,
+        corp_id=corp_id,
+        client_id=client_id,
+        client_secret=client_secret,
+        app_key=app_key,
+        app_secret=app_secret,
+    )
+    instance_ids = list_process_instance_ids(
+        token=token,
+        process_code=resolved_process_code,
+        start_time_ms=start_time_ms,
+        end_time_ms=end_time_ms,
+        api_style=resolved_api_style,
+        list_api=resolved_list_api,
+        page_size=page_size,
+        max_pages=max_pages,
+        chunk_days=chunk_days,
+    )
+    if limit:
+        instance_ids = instance_ids[:limit]
+
+    items: list[dict] = []
+    skipped_items: list[dict] = []
+    for instance_id in instance_ids:
+        detail = get_process_instance_detail(token=token, process_instance_id=instance_id, api_style=resolved_api_style)
+        summary = summarize_purchase_approval(detail, process_instance_id=instance_id)
+        if include_raw:
+            summary["raw_instance"] = detail
+        if is_hidden_approval_status(summary.get("approval_status")):
+            skipped_items.append(
+                {
+                    "source_instance_id": summary.get("source_instance_id"),
+                    "source_approval_no": summary.get("source_approval_no"),
+                    "approval_status": summary.get("approval_status"),
+                    "reason": "采购支出审批已撤销或终止",
+                }
+            )
+            continue
+        if not include_running and not is_completed_approval_status(summary.get("approval_status"), allow_empty=False):
+            skipped_items.append(
+                {
+                    "source_instance_id": summary.get("source_instance_id"),
+                    "source_approval_no": summary.get("source_approval_no"),
+                    "approval_status": summary.get("approval_status"),
+                    "approval_title": summary.get("approval_title"),
+                    "reason": "采购支出审批未完成",
+                }
+            )
+            continue
+        if not summary.get("detail_row_count") and not _has_purchase_approval_keyword(summary.get("approval_title")):
+            skipped_items.append(
+                {
+                    "source_instance_id": summary.get("source_instance_id"),
+                    "source_approval_no": summary.get("source_approval_no"),
+                    "approval_title": summary.get("approval_title"),
+                    "reason": "未解析到采购支出明细行",
+                }
+            )
+            continue
+        summary["ok"] = True
+        items.append(summary)
+
+    return {
+        "ok": True,
+        "process_code": resolved_process_code,
+        "api_style": resolved_api_style,
+        "list_api": resolved_list_api,
+        "start_time_ms": start_time_ms,
+        "end_time_ms": end_time_ms,
+        "chunk_days": chunk_days,
+        "total_instance_count": len(instance_ids),
+        "detail_count": len(items),
+        "skipped_count": len(skipped_items),
+        "items": items,
+        "skipped_items": skipped_items,
+    }
+
+
+def sync_purchase_expenses_from_process(
+    *,
+    process_code: str = "",
+    start: str = "",
+    end: str = "",
+    env_file: str | None = None,
+    api_style: str = "auto",
+    list_api: str = "auto",
+    page_size: int = 20,
+    max_pages: int = 20,
+    chunk_days: int = 30,
+    limit: int | None = None,
+    batch_limit: int | None = 200,
+    include_running: bool = False,
+    access_token: str = "",
+) -> dict:
+    """从采购支出流程批量拉审批，并按物料编码/规格同步已有 OA 批次采购字段。"""
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，无法批量同步采购支出 OA。",
+        }
+
+    resolved_env_file = resolve_dingtalk_env_file(env_file)
+    if resolved_env_file:
+        load_env_file(resolved_env_file)
+    resolved_process_code = resolve_purchase_process_code(process_code)
+    if not resolved_process_code:
+        return {
+            "ok": False,
+            "dry_run": False,
+            "env_file_loaded": bool(resolved_env_file),
+            "message": "缺少采购支出流程模板 process_code，请在环境变量配置 DINGTALK_PURCHASE_PROCESS_CODE 后再自动拉取。",
+        }
+
+    pull_result = pull_purchase_expense_approvals(
+        process_code=resolved_process_code,
+        start=start,
+        end=end,
+        api_style=api_style,
+        list_api=list_api,
+        page_size=page_size,
+        max_pages=max_pages,
+        chunk_days=chunk_days,
+        limit=limit,
+        include_running=include_running,
+        access_token=access_token,
+    )
+    purchase_summaries = pull_result.get("items") or []
+    if not purchase_summaries:
+        return {
+            "ok": True,
+            "dry_run": False,
+            "env_file_loaded": bool(resolved_env_file),
+            "pull": pull_result,
+            "scanned_count": 0,
+            "updated_count": 0,
+            "changed_field_count": 0,
+            "message": "本次没有拉到可同步的采购支出 OA 明细。",
+        }
+
+    page_length = max(1, min(int(batch_limit or 200), 1000))
+    rows = frappe.get_all(
+        "Overseas Cost Batch",
+        filters={"source_type": "oa_logistics"},
+        fields=["name", "batch_no", "current_version"],
+        limit_page_length=page_length,
+        order_by="modified desc",
+    )
+
+    from overseas_costing.services import import_service
+
+    purchase_summaries_json = _json_dumps(purchase_summaries)
+    synced_items: list[dict] = []
+    total_updated = 0
+    total_changed_fields = 0
+    total_unmatched = 0
+    total_ambiguous = 0
+    for row in rows:
+        purchase_sync = import_service.apply_linked_purchase_expense_fillable_fields(
+            batch_name=row.get("name"),
+            version_name=row.get("current_version") or "",
+            purchase_summaries_json=purchase_summaries_json,
+        )
+        recalculate_sync = _recalculate_after_purchase_sync(
+            batch_name=row.get("name"),
+            version_name=row.get("current_version") or "",
+            purchase_sync=purchase_sync,
+        )
+        total_updated += int(purchase_sync.get("updated_count") or 0)
+        total_changed_fields += int(purchase_sync.get("changed_field_count") or 0)
+        total_unmatched += int(purchase_sync.get("unmatched_count") or 0)
+        total_ambiguous += int(purchase_sync.get("ambiguous_count") or 0)
+        synced_items.append(
+            {
+                "batch_name": row.get("name"),
+                "batch_no": row.get("batch_no"),
+                "purchase_sync": purchase_sync,
+                "recalculate_sync": recalculate_sync,
+            }
+        )
+
+    return {
+        "ok": True,
+        "dry_run": False,
+        "env_file_loaded": bool(resolved_env_file),
+        "pull": {
+            **pull_result,
+            "items": [
+                {
+                    "source_approval_no": item.get("source_approval_no"),
+                    "source_instance_id": item.get("source_instance_id"),
+                    "approval_title": item.get("approval_title"),
+                    "detail_row_count": item.get("detail_row_count"),
+                    "purchase_currency": item.get("purchase_currency"),
+                }
+                for item in purchase_summaries[:20]
+            ],
+        },
+        "scanned_count": len(rows),
+        "updated_count": total_updated,
+        "changed_field_count": total_changed_fields,
+        "unmatched_count": total_unmatched,
+        "ambiguous_count": total_ambiguous,
+        "items": synced_items,
+        "message": (
+            f"已拉取 {len(purchase_summaries)} 张采购支出 OA，并尝试同步 {len(rows)} 个国际物流批次；"
+            f"采购字段更新 {total_updated} 行，变更 {total_changed_fields} 个字段。"
+        ),
+    }
+
+
+def preview_purchase_expenses_from_process(
+    *,
+    process_code: str = "",
+    start: str = "",
+    end: str = "",
+    env_file: str | None = None,
+    api_style: str = "auto",
+    list_api: str = "auto",
+    page_size: int = 20,
+    max_pages: int = 20,
+    chunk_days: int = 30,
+    limit: int | None = None,
+    batch_limit: int | None = 200,
+    include_running: bool = False,
+    access_token: str = "",
+) -> dict:
+    """从采购支出流程拉明细，并预览可匹配到哪些已有 OA 批次；不写数据库。"""
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，无法预览采购支出 OA 批量匹配。",
+        }
+
+    resolved_env_file = resolve_dingtalk_env_file(env_file)
+    if resolved_env_file:
+        load_env_file(resolved_env_file)
+    resolved_process_code = resolve_purchase_process_code(process_code)
+    if not resolved_process_code:
+        return {
+            "ok": False,
+            "dry_run": False,
+            "env_file_loaded": bool(resolved_env_file),
+            "message": "缺少采购支出流程模板 process_code，请在环境变量配置 DINGTALK_PURCHASE_PROCESS_CODE 后再预览。",
+        }
+
+    pull_result = pull_purchase_expense_approvals(
+        process_code=resolved_process_code,
+        start=start,
+        end=end,
+        api_style=api_style,
+        list_api=list_api,
+        page_size=page_size,
+        max_pages=max_pages,
+        chunk_days=chunk_days,
+        limit=limit,
+        include_running=include_running,
+        access_token=access_token,
+    )
+    purchase_summaries = pull_result.get("items") or []
+    purchase_rows_preview: list[dict] = []
+    for summary in purchase_summaries:
+        source_approval_no = summary.get("source_approval_no") or ""
+        source_instance_id = summary.get("source_instance_id") or ""
+        source_dingtalk_url = summary.get("source_dingtalk_url") or ""
+        for mapped_row in summary.get("mapped_preview_items") or []:
+            if not isinstance(mapped_row, dict):
+                continue
+            purchase_rows_preview.append(
+                {
+                    "material_code": mapped_row.get("material_code"),
+                    "product_name": mapped_row.get("product_name"),
+                    "spec_model": mapped_row.get("spec_model"),
+                    "quantity": mapped_row.get("quantity"),
+                    "unit_price": mapped_row.get("unit_price"),
+                    "goods_value": mapped_row.get("goods_value"),
+                    "purchase_currency": mapped_row.get("purchase_currency") or summary.get("purchase_currency"),
+                    "source_approval_no": mapped_row.get("source_approval_no") or source_approval_no,
+                    "source_instance_id": mapped_row.get("source_instance_id") or source_instance_id,
+                    "source_dingtalk_url": mapped_row.get("source_dingtalk_url") or source_dingtalk_url,
+                }
+            )
+    if not purchase_summaries:
+        return {
+            "ok": True,
+            "dry_run": False,
+            "env_file_loaded": bool(resolved_env_file),
+            "pull": {**pull_result, "items": []},
+            "scanned_count": 0,
+            "matched_batch_count": 0,
+            "writable_batch_count": 0,
+            "mapped_purchase_row_count": 0,
+            "mapped_purchase_rows": [],
+            "message": "本次没有拉到可预览的采购支出 OA 明细。",
+        }
+
+    page_length = max(1, min(int(batch_limit or 200), 1000))
+    rows = frappe.get_all(
+        "Overseas Cost Batch",
+        filters={"source_type": "oa_logistics"},
+        fields=["name", "batch_no", "current_version"],
+        limit_page_length=page_length,
+        order_by="modified desc",
+    )
+
+    from overseas_costing.services import import_service
+
+    purchase_summaries_json = _json_dumps(purchase_summaries)
+    items: list[dict] = []
+    matched_batch_count = 0
+    writable_batch_count = 0
+    total_matched_rows = 0
+    total_writable_rows = 0
+    total_unmatched_rows = 0
+    total_ambiguous_rows = 0
+
+    for row in rows:
+        preview = import_service.preview_linked_purchase_expense_oa(
+            batch_name=row.get("name"),
+            version_name=row.get("current_version") or "",
+            purchase_summaries_json=purchase_summaries_json,
+        )
+        writeback = preview.get("writeback_preview") or {}
+        matched_count = int(writeback.get("matched_count") or 0)
+        writable_count = int(writeback.get("writable_row_count") or 0)
+        unmatched_count = int(writeback.get("unmatched_count") or 0)
+        ambiguous_count = int(writeback.get("ambiguous_count") or 0)
+        if matched_count:
+            matched_batch_count += 1
+        if writable_count:
+            writable_batch_count += 1
+        total_matched_rows += matched_count
+        total_writable_rows += writable_count
+        total_unmatched_rows += unmatched_count
+        total_ambiguous_rows += ambiguous_count
+        if matched_count or writable_count:
+            items.append(
+                {
+                    "batch_name": row.get("name"),
+                    "batch_no": row.get("batch_no"),
+                    "matched_count": matched_count,
+                    "writable_row_count": writable_count,
+                    "fillable_row_count": writeback.get("fillable_row_count", 0),
+                    "conflict_row_count": writeback.get("conflict_row_count", 0),
+                    "same_row_count": writeback.get("same_row_count", 0),
+                    "unmatched_count": unmatched_count,
+                    "ambiguous_count": ambiguous_count,
+                    "matched_rows": [
+                        {
+                            "target_row_no": matched.get("target_row_no"),
+                            "target_material_code": matched.get("target_material_code"),
+                            "target_product_name": matched.get("target_product_name"),
+                            "target_spec_model": matched.get("target_spec_model"),
+                            "mapped_row": matched.get("mapped_row"),
+                            "business_changes": matched.get("business_changes"),
+                        }
+                        for matched in (writeback.get("matched_rows") or [])[:10]
+                    ],
+                }
+            )
+
+    return {
+        "ok": True,
+        "dry_run": False,
+        "env_file_loaded": bool(resolved_env_file),
+        "pull": {
+            **pull_result,
+            "items": [
+                _build_purchase_process_preview_row(item)
+                for item in purchase_summaries[:20]
+            ],
+        },
+        "scanned_count": len(rows),
+        "matched_batch_count": matched_batch_count,
+        "writable_batch_count": writable_batch_count,
+        "purchase_summary_count": len(purchase_summaries),
+        "mapped_purchase_row_count": len(purchase_rows_preview),
+        "mapped_purchase_rows": purchase_rows_preview[:50],
+        "matched_row_count": total_matched_rows,
+        "writable_row_count": total_writable_rows,
+        "unmatched_row_count": total_unmatched_rows,
+        "ambiguous_row_count": total_ambiguous_rows,
+        "items": items,
+        "message": (
+            f"已拉取 {len(purchase_summaries)} 张已完成采购支出 OA，预览匹配 {len(rows)} 个国际物流批次；"
+            f"命中 {matched_batch_count} 个批次，{total_writable_rows} 行可写入。"
+        ),
+    }
+
+
+def _build_purchase_process_preview_row(item: dict) -> dict:
+    approval_no = item.get("source_approval_no") or ""
+    instance_id = item.get("source_instance_id") or ""
+    official_url = item.get("source_dingtalk_url") or ""
+    dingtalk_payload = build_dingtalk_order_payload(
+        approval_no=approval_no,
+        instance_id=instance_id,
+        official_url=official_url,
+    )
+    return {
+        "source_approval_no": approval_no,
+        "source_instance_id": instance_id,
+        "source_dingtalk_url": official_url,
+        "approval_title": item.get("approval_title"),
+        "approval_status": item.get("approval_status"),
+        "detail_row_count": item.get("detail_row_count"),
+        "purchase_currency": item.get("purchase_currency"),
+        "open_url": dingtalk_payload.get("open_url") or "",
+        "open_mode": dingtalk_payload.get("open_mode") or "unavailable",
+        "can_open": bool(dingtalk_payload.get("can_open")),
+    }
+
+
 def save_json(result: dict, output_path: str | Path) -> None:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2227,6 +3306,66 @@ def pull_from_env() -> dict:
     if csv_output:
         save_csv(result["items"], csv_output)
     return result
+
+
+def pull_purchase_expenses_from_env() -> dict:
+    """从环境变量拉采购支出 OA 预览，不写数据库，适合 bench execute 调试。"""
+
+    resolved_env_file = resolve_dingtalk_env_file()
+    if resolved_env_file:
+        load_env_file(resolved_env_file)
+    start = (
+        _clean(os.environ.get("DINGTALK_PURCHASE_PULL_START"))
+        or _clean(os.environ.get("DINGTALK_PULL_START"))
+        or "2026-01-01"
+    )
+    end = (
+        _clean(os.environ.get("DINGTALK_PURCHASE_PULL_END"))
+        or _clean(os.environ.get("DINGTALK_PULL_END"))
+        or datetime.now().strftime("%Y-%m-%d")
+    )
+    limit = int(os.environ.get("DINGTALK_PURCHASE_PULL_LIMIT") or os.environ.get("DINGTALK_LIMIT") or 5)
+    include_running = os.environ.get("DINGTALK_PURCHASE_INCLUDE_RUNNING") in ("1", "true", "True", "yes")
+    result = pull_purchase_expense_approvals(
+        process_code=resolve_purchase_process_code(),
+        start=start,
+        end=end,
+        api_style=_clean(os.environ.get("DINGTALK_API_STYLE")) or "auto",
+        list_api=_clean(os.environ.get("DINGTALK_LIST_API")) or "auto",
+        page_size=int(os.environ.get("DINGTALK_PAGE_SIZE") or 20),
+        max_pages=int(os.environ.get("DINGTALK_MAX_PAGES") or 20),
+        chunk_days=int(os.environ.get("DINGTALK_CHUNK_DAYS") or 30),
+        limit=limit or None,
+        include_running=include_running,
+    )
+    return {
+        **result,
+        "env_file_loaded": bool(resolved_env_file),
+        "preview_items": [
+            {
+                "source_approval_no": item.get("source_approval_no"),
+                "source_instance_id": item.get("source_instance_id"),
+                "approval_title": item.get("approval_title"),
+                "approval_status": item.get("approval_status"),
+                "purchase_currency": item.get("purchase_currency"),
+                "detail_row_count": item.get("detail_row_count"),
+                "mapped_preview_items": [
+                    {
+                        "material_code": row.get("material_code"),
+                        "product_name": row.get("product_name"),
+                        "spec_model": row.get("spec_model"),
+                        "quantity": row.get("quantity"),
+                        "unit_price": row.get("unit_price"),
+                        "goods_value": row.get("goods_value"),
+                        "purchase_currency": row.get("purchase_currency"),
+                    }
+                    for row in (item.get("mapped_preview_items") or [])[:5]
+                ],
+            }
+            for item in (result.get("items") or [])[:5]
+        ],
+        "items": [],
+    }
 
 
 def pull_and_save_to_erp_from_env() -> dict:

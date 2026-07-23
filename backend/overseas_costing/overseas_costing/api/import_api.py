@@ -151,6 +151,21 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
 
 
 @frappe.whitelist()
+def download_oa_form_attachment(
+    attachment_name: str,
+    env_file: str | None = None,
+    access_token: str | None = None,
+) -> dict:
+    """下载钉钉发起表单附件到系统文件，评论附件本阶段不处理。"""
+
+    return import_service.download_oa_form_attachment(
+        attachment_name=attachment_name,
+        env_file=env_file,
+        access_token=access_token,
+    )
+
+
+@frappe.whitelist()
 def preview_tax_certificate_pdf(
     source_name: str | None = None,
     file_path: str | None = None,
@@ -324,6 +339,29 @@ def apply_packing_list_fillable_fields(
 
 
 @frappe.whitelist()
+def parse_oa_packing_list_attachments(
+    batch_name: str | None = None,
+    limit: int | None = 200,
+    env_file: str | None = None,
+    access_token: str | None = None,
+    skip_parsed=1,
+    recalculate=1,
+) -> dict:
+    """批量下载并解析钉钉发起附件里的 Excel 装箱单，写入可补字段。"""
+
+    skip_parsed_flag = str(skip_parsed or "").strip().lower() in ("1", "true", "yes", "y")
+    recalculate_flag = str(recalculate or "").strip().lower() in ("1", "true", "yes", "y")
+    return import_service.parse_oa_packing_list_attachments(
+        batch_name=batch_name,
+        limit=limit,
+        env_file=env_file,
+        access_token=access_token,
+        skip_parsed=skip_parsed_flag,
+        recalculate=recalculate_flag,
+    )
+
+
+@frappe.whitelist()
 def parse_packing_list_attachment(
     batch_name: str,
     attachment_name: str | None = None,
@@ -341,4 +379,102 @@ def parse_packing_list_attachment(
         version_name=version_name,
         template_hint=template_hint,
         sheet_rows_json=sheet_rows_json,
+    )
+
+
+@frappe.whitelist()
+def refresh_existing_oa_logistics_details(
+    limit: int | None = 200,
+    env_file: str | None = None,
+    api_style: str = "auto",
+    include_non_sea=0,
+    access_token: str | None = None,
+) -> dict:
+    """重拉已有国际物流 OA 批次详情，并自动同步关联采购支出字段。"""
+
+    from overseas_costing.scripts import import_oa_logistics
+
+    include_non_sea_flag = str(include_non_sea or "").strip().lower() in ("1", "true", "yes", "y")
+    return import_oa_logistics.refresh_existing_oa_logistics_details(
+        limit=limit,
+        env_file=env_file,
+        api_style=api_style,
+        include_non_sea=include_non_sea_flag,
+        access_token=access_token or "",
+    )
+
+
+@frappe.whitelist()
+def sync_purchase_expenses_from_process(
+    process_code: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    env_file: str | None = None,
+    api_style: str = "auto",
+    list_api: str = "auto",
+    page_size: int = 20,
+    max_pages: int = 20,
+    chunk_days: int = 30,
+    limit: int | None = None,
+    batch_limit: int | None = 200,
+    include_running=0,
+    access_token: str | None = None,
+) -> dict:
+    """从采购支出 OA 流程批量拉单，并按物料编码/规格同步已有国际物流批次。"""
+
+    from overseas_costing.scripts import import_oa_logistics
+
+    include_running_flag = str(include_running or "").strip().lower() in ("1", "true", "yes", "y")
+    return import_oa_logistics.sync_purchase_expenses_from_process(
+        process_code=process_code or "",
+        start=start or "",
+        end=end or "",
+        env_file=env_file,
+        api_style=api_style,
+        list_api=list_api,
+        page_size=int(page_size or 20),
+        max_pages=int(max_pages or 20),
+        chunk_days=int(chunk_days or 30),
+        limit=limit,
+        batch_limit=batch_limit,
+        include_running=include_running_flag,
+        access_token=access_token or "",
+    )
+
+
+@frappe.whitelist()
+def preview_purchase_expenses_from_process(
+    process_code: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    env_file: str | None = None,
+    api_style: str = "auto",
+    list_api: str = "auto",
+    page_size: int = 20,
+    max_pages: int = 20,
+    chunk_days: int = 30,
+    limit: int | None = None,
+    batch_limit: int | None = 200,
+    include_running=0,
+    access_token: str | None = None,
+) -> dict:
+    """预览采购支出 OA 流程能匹配哪些已有国际物流批次，不写入数据。"""
+
+    from overseas_costing.scripts import import_oa_logistics
+
+    include_running_flag = str(include_running or "").strip().lower() in ("1", "true", "yes", "y")
+    return import_oa_logistics.preview_purchase_expenses_from_process(
+        process_code=process_code or "",
+        start=start or "",
+        end=end or "",
+        env_file=env_file,
+        api_style=api_style,
+        list_api=list_api,
+        page_size=int(page_size or 20),
+        max_pages=int(max_pages or 20),
+        chunk_days=int(chunk_days or 30),
+        limit=limit,
+        batch_limit=batch_limit,
+        include_running=include_running_flag,
+        access_token=access_token or "",
     )

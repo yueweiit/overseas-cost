@@ -303,6 +303,107 @@ def test_parse_oa_attachment_detail_sheet_ignores_cost_calculation_rows() -> Non
     assert blocks[0]["items"][0][0] == "YL000098"
 
 
+def test_parse_packing_list_without_price_headers_auto_detects_physical_fields() -> None:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "LX20260509001 CI&PL"
+    sheet.append(["客户", "华峰"])
+    sheet.append(["柜号", "FSCU8486789"])
+    sheet.append(
+        [
+            "Item No.",
+            "中文品名",
+            "规格型号",
+            "实际发货数量",
+            "总毛重 G.W.(KG)",
+            "总体积 CBM",
+            "体积重 KG",
+            "计费重 KG",
+        ]
+    )
+    sheet.append(["YL000098", "TPU-HF-8695AU", "HF-8695AU", 5000, 1200, 19.0969, 3182.82, 3182.82])
+    file_path = Path("tmp_packing_without_price_test.xlsx")
+    try:
+        workbook.save(file_path)
+        workbook.close()
+
+        meta, blocks = parse_yuewei_excel_workbook(file_path)
+    finally:
+        workbook.close()
+        if file_path.exists():
+            file_path.unlink()
+
+    assert meta["sourceSheet"] == "LX20260509001 CI&PL"
+    assert meta["parser"] == "oa_attachment_detail"
+    assert summarize_excel_blocks(blocks) == {
+        "block_count": 1,
+        "item_count": 1,
+        "batch_ids": ["LX20260509001 CI&PL-未关联采购单"],
+    }
+    first_item = blocks[0]["items"][0]
+    assert first_item[0] == "YL000098"
+    assert first_item[1] == "TPU-HF-8695AU"
+    assert first_item[3] == 5000
+    assert first_item[11]["actualShippedQty"] == 5000
+    assert first_item[11]["grossWeightKg"] == 1200
+    assert first_item[11]["volumeM3"] == 19.0969
+    assert first_item[11]["volumeWeightKg"] == 3182.82
+    assert first_item[11]["chargeableWeightKg"] == 3182.82
+
+
+def test_parse_ci_pl_workbook_merges_invoice_quantity_and_packing_weight() -> None:
+    workbook = openpyxl.Workbook()
+    ci = workbook.active
+    ci.title = "CI"
+    ci.append(["COMMERCIAL INVOICE", None, None, None, None])
+    ci.append(["From", "ZHEJIANG HUAFON TPU CO.LTD", None, None, None])
+    ci.append(["To", "YUEWEI S.A. DE C.V.", "C/I No.: HFZF25087160", None, None])
+    ci.append([None, None, None, None, None])
+    ci.append(["Article No", "Article Name", "Unit Price", "Quantity", "Amount"])
+    ci.append([1, "TPU,Termoplástico poliuretano（热塑性聚氨酯（TPU HF-8695AU））", 3.05, 10000, 30500])
+    ci.append([2, "TPU,Termoplástico poliuretano（热塑性聚氨酯（TPU HF-1190A-8））", 2.35, 15000, 35250])
+    ci.append([None, "TOTAL:", None, 25000, 65750])
+
+    pl = workbook.create_sheet("PL")
+    pl.append(["PACKING LIST", None, None, None])
+    pl.append(["Package List", None, None, None])
+    pl.append(["Package No", "Article Name", "Dimension\n（M³）", "Weight\n(Kg)"])
+    for index in range(1, 11):
+        pl.append([index, "TPU,Termoplástico poliuretano（热塑性聚氨酯（TPU HF-8695AU））", 1.68, 1030])
+    for index in range(11, 26):
+        pl.append([index, "TPU,Termoplástico poliuretano（热塑性聚氨酯（TPU HF-1190A-8））", 1.68, 1030])
+    pl.append([None, None, 42, 25750])
+
+    file_path = Path("tmp_ci_pl_workbook_test.xlsx")
+    try:
+        workbook.save(file_path)
+        workbook.close()
+
+        meta, blocks = parse_yuewei_excel_workbook(file_path)
+    finally:
+        workbook.close()
+        if file_path.exists():
+            file_path.unlink()
+
+    assert meta["sourceSheet"] == "CI+PL"
+    assert meta["parser"] == "ci_pl_workbook"
+    assert summarize_excel_blocks(blocks) == {
+        "block_count": 1,
+        "item_count": 2,
+        "batch_ids": ["HFZF25087160"],
+    }
+    first_item = blocks[0]["items"][0]
+    second_item = blocks[0]["items"][1]
+    assert first_item[3] == 10000
+    assert first_item[11]["specModel"] == "HF-8695AU"
+    assert first_item[11]["actualShippedQty"] == 10000
+    assert first_item[11]["grossWeightKg"] == 10300
+    assert first_item[11]["volumeM3"] == 16.8
+    assert second_item[11]["specModel"] == "HF-1190A-8"
+    assert second_item[11]["grossWeightKg"] == 15450
+    assert second_item[11]["volumeM3"] == 25.2
+
+
 def test_select_parsed_workbook_blocks_excludes_double_clear_by_default() -> None:
     _meta, blocks = _parse_sample_blocks()
 

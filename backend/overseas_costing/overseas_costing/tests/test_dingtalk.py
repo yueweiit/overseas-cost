@@ -16,6 +16,7 @@ from overseas_costing.scripts.import_oa_logistics import (
     DEFAULT_LOGISTICS_PROCESS_CODE,
     _merge_oa_extra_json,
     _sync_oa_form_attachments,
+    _sync_linked_purchase_fields,
     _normalize_legacy_instance,
     build_oa_item_values_from_approval,
     build_batch_values_from_approval,
@@ -25,11 +26,18 @@ from overseas_costing.scripts.import_oa_logistics import (
     extract_form_fields,
     extract_linked_purchase_approvals,
     extract_purchase_expense_rows,
+    get_process_attachment_download_url,
+    is_completed_approval_status,
     is_hidden_approval_status,
     is_sea_approval,
     load_env_file,
     resolve_logistics_process_code,
+    resolve_purchase_process_code,
+    refresh_existing_oa_logistics_details,
+    pull_purchase_expense_approvals,
+    preview_purchase_expenses_from_process,
     save_sea_approvals_to_erp,
+    sync_purchase_expenses_from_process,
     summarize_approval,
     summarize_purchase_approval,
 )
@@ -92,6 +100,29 @@ def test_build_dingtalk_order_payload_uses_proc_inst_id_from_official_url() -> N
     assert payload["open_url"] == payload["desktop_url"]
 
 
+def test_get_process_attachment_download_url_uses_process_instance_and_file_id(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    calls = []
+
+    def fake_request_json(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return {"result": {"downloadUri": "https://download.example.com/packing.xlsx"}}
+
+    monkeypatch.setattr(import_oa_logistics, "_request_json", fake_request_json)
+
+    result = get_process_attachment_download_url(
+        token="TOKEN-001",
+        process_instance_id="PROC-SEA-001",
+        file_id="FILE-001",
+    )
+
+    assert result["download_uri"] == "https://download.example.com/packing.xlsx"
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["token"] == "TOKEN-001"
+    assert calls[0]["payload"] == {"processInstanceId": "PROC-SEA-001", "fileId": "FILE-001"}
+
+
 def test_logistics_approval_summary_extracts_sea_trace_fields() -> None:
     instance = {
         "processInstanceId": "PROC-SEA-001",
@@ -147,6 +178,66 @@ def test_extract_linked_purchase_approvals_from_relate_field_ext_value() -> None
     assert linked[0]["open_url"].startswith("dingtalk://")
     assert summary["linked_purchase_count"] == 2
     assert summary["linked_purchase_approvals"][1]["approval_no"] == "202604150041000081318"
+
+
+def test_extract_linked_purchase_approvals_from_nested_relate_payload() -> None:
+    instance = {
+        "processInstanceId": "PROC-SEA-NESTED",
+        "formComponentValues": [
+            {
+                "componentType": "RelateField",
+                "name": "Asocar órdenes de compra",
+                "value": json.dumps(["采购支出 Gastos de compra enviado por Yadira"], ensure_ascii=False),
+                "extValue": json.dumps(
+                    {
+                        "data": {
+                            "list": [
+                                {
+                                    "businessId": "202604300000000596348",
+                                    "url": "https://aflow.dingtalk.com/#/approval?procInstId=PROC-PURCHASE-NESTED",
+                                    "title": "采购支出 Gastos de compra",
+                                }
+                            ]
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        ],
+    }
+
+    linked = extract_linked_purchase_approvals(instance)
+
+    assert len(linked) == 1
+    assert linked[0]["approval_no"] == "202604300000000596348"
+    assert linked[0]["source_instance_id"] == "PROC-PURCHASE-NESTED"
+
+
+def test_extract_linked_purchase_approvals_from_top_level_related_payload() -> None:
+    instance = {
+        "processInstanceId": "PROC-SEA-RELATED",
+        "processInstanceTitle": "国际物流 Logística Internacional",
+        "formComponentValues": [],
+        "relatedProcessInstances": [
+            {
+                "businessId": "202604150041000081318",
+                "processInstanceId": "PROC-PURCHASE-TOP",
+                "processInstanceTitle": "采购支出 Gastos de Compra",
+                "url": "https://aflow.dingtalk.com/#/approval?procInstId=PROC-PURCHASE-TOP",
+            },
+            {
+                "businessId": "202604150041000000000",
+                "processInstanceId": "PROC-LOGISTICS-TOP",
+                "processInstanceTitle": "国际物流 Logística Internacional",
+            },
+        ],
+    }
+
+    linked = extract_linked_purchase_approvals(instance)
+
+    assert len(linked) == 1
+    assert linked[0]["approval_no"] == "202604150041000081318"
+    assert linked[0]["source_instance_id"] == "PROC-PURCHASE-TOP"
 
 
 def test_extract_form_attachments_ignores_comment_attachments() -> None:
@@ -272,8 +363,13 @@ def test_legacy_dingtalk_instance_is_normalized_for_summary() -> None:
 
 def test_load_env_file_keeps_existing_values_by_default(monkeypatch) -> None:
     env_file = Path.cwd() / ".tmp_dingtalk_env_test"
-    env_file.write_text("DINGTALK_PROCESS_CODE=FROM_FILE\nDINGTALK_LIST_API=old\n", encoding="utf-8")
+    env_file.write_text(
+        "DINGTALK_PROCESS_CODE=FROM_FILE\nDINGTALK_LIST_API=old\nDINGTALK_APPKEY=APPKEY\nDINGTALK_APPSECRET=APPSECRET\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("DINGTALK_PROCESS_CODE", "EXISTING")
+    monkeypatch.delenv("DINGTALK_APP_KEY", raising=False)
+    monkeypatch.delenv("DINGTALK_APP_SECRET", raising=False)
 
     try:
         load_env_file(str(env_file))
@@ -282,6 +378,8 @@ def test_load_env_file_keeps_existing_values_by_default(monkeypatch) -> None:
 
     assert os.environ["DINGTALK_PROCESS_CODE"] == "EXISTING"
     assert os.environ["DINGTALK_LIST_API"] == "old"
+    assert os.environ["DINGTALK_APP_KEY"] == "APPKEY"
+    assert os.environ["DINGTALK_APP_SECRET"] == "APPSECRET"
 
 
 def test_logistics_process_code_does_not_use_budget_process_env(monkeypatch) -> None:
@@ -294,6 +392,204 @@ def test_logistics_process_code_does_not_use_budget_process_env(monkeypatch) -> 
 
     assert resolve_logistics_process_code() == "PROC-LOGISTICS-ENV"
     assert resolve_logistics_process_code("PROC-CLI") == "PROC-CLI"
+
+
+def test_purchase_process_code_requires_purchase_specific_env(monkeypatch) -> None:
+    monkeypatch.setenv("DINGTALK_PROCESS_CODE", "PROC-BUDGET-001")
+    monkeypatch.delenv("DINGTALK_PURCHASE_PROCESS_CODE", raising=False)
+    monkeypatch.delenv("DINGTALK_PURCHASE_EXPENSE_PROCESS_CODE", raising=False)
+    monkeypatch.delenv("DINGTALK_PROCESS_CODES", raising=False)
+
+    assert resolve_purchase_process_code() == ""
+
+    monkeypatch.setenv("DINGTALK_PURCHASE_PROCESS_CODE", "PROC-PURCHASE-ENV")
+
+    assert resolve_purchase_process_code() == "PROC-PURCHASE-ENV"
+    assert resolve_purchase_process_code("PROC-PURCHASE-CLI") == "PROC-PURCHASE-CLI"
+
+    monkeypatch.delenv("DINGTALK_PURCHASE_PROCESS_CODE", raising=False)
+    monkeypatch.setenv("DINGTALK_PROCESS_CODES", '["PROC-OPERATION","PROC-PURCHASE-LIST"]')
+
+    assert resolve_purchase_process_code() == "PROC-PURCHASE-LIST"
+
+
+def test_completed_approval_status_filters_running() -> None:
+    assert is_completed_approval_status("COMPLETED") is True
+    assert is_completed_approval_status("审批通过") is True
+    assert is_completed_approval_status("RUNNING") is False
+    assert is_completed_approval_status("TERMINATED") is False
+
+
+def test_pull_purchase_expense_approvals_reads_process_details(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    monkeypatch.setenv("DINGTALK_PURCHASE_PROCESS_CODE", "PROC-PURCHASE")
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "TOKEN")
+    monkeypatch.setattr(import_oa_logistics, "list_process_instance_ids", lambda **_kwargs: ["PROC-PURCHASE-001"])
+
+    def fake_get_process_instance_detail(**_kwargs):
+        return {
+            "processInstanceId": "PROC-PURCHASE-001",
+            "businessId": "202604150041000081318",
+            "title": "采购支出 Gastos de Compra",
+            "status": "COMPLETED",
+            "formComponentValues": [
+                {"componentType": "TextField", "name": "币种Moneda", "value": "人民币RMB"},
+                {
+                    "componentType": "TableField",
+                    "name": "需求明细",
+                    "value": json.dumps(
+                        [
+                            {
+                                "rowValue": [
+                                    {"label": "物品编码Código", "value": "YL000097"},
+                                    {"label": "物品名称Nombre del artículo", "value": "TPU原料"},
+                                    {"label": "数量Cantidad", "value": "10000"},
+                                    {"label": "单价Precio", "value": "2.9"},
+                                    {"label": "总金额Monto Total", "value": "29000"},
+                                ]
+                            }
+                        ],
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+        }
+
+    monkeypatch.setattr(import_oa_logistics, "get_process_instance_detail", fake_get_process_instance_detail)
+
+    result = pull_purchase_expense_approvals(process_code="", start="2026-04-01", end="2026-04-30")
+
+    assert result["ok"] is True
+    assert result["process_code"] == "PROC-PURCHASE"
+    assert result["detail_count"] == 1
+    assert result["items"][0]["detail_row_count"] == 1
+    assert result["items"][0]["mapped_preview_items"][0]["material_code"] == "YL000097"
+    assert result["items"][0]["mapped_preview_items"][0]["unit_price"] == 2.9
+
+
+def test_pull_purchase_expense_approvals_skips_running_by_default(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    monkeypatch.setenv("DINGTALK_PURCHASE_PROCESS_CODE", "PROC-PURCHASE")
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "TOKEN")
+    monkeypatch.setattr(import_oa_logistics, "list_process_instance_ids", lambda **_kwargs: ["PROC-PURCHASE-RUNNING"])
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "get_process_instance_detail",
+        lambda **_kwargs: {
+            "processInstanceId": "PROC-PURCHASE-RUNNING",
+            "businessId": "202604150041000081318",
+            "title": "采购支出 Gastos de Compra",
+            "status": "RUNNING",
+            "formComponentValues": [],
+        },
+    )
+
+    result = pull_purchase_expense_approvals(process_code="", start="2026-04-01", end="2026-04-30")
+
+    assert result["detail_count"] == 0
+    assert result["skipped_count"] == 1
+    assert result["skipped_items"][0]["reason"] == "采购支出审批未完成"
+
+
+def test_sync_purchase_expenses_from_process_requires_process_code(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    monkeypatch.delenv("DINGTALK_PURCHASE_PROCESS_CODE", raising=False)
+    monkeypatch.delenv("DINGTALK_PURCHASE_EXPENSE_PROCESS_CODE", raising=False)
+    monkeypatch.setattr(import_oa_logistics, "frappe", object())
+    monkeypatch.setattr(import_oa_logistics, "resolve_dingtalk_env_file", lambda env_file=None: "")
+
+    result = sync_purchase_expenses_from_process(start="2026-04-01", end="2026-04-30")
+
+    assert result["ok"] is False
+    assert "DINGTALK_PURCHASE_PROCESS_CODE" in result["message"]
+
+
+def test_preview_purchase_expenses_from_process_matches_existing_batches(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(*_args, **_kwargs):
+            return [
+                {"name": "BATCH-FSCU", "batch_no": "FSCU8486789", "current_version": "VER-FSCU"},
+                {"name": "BATCH-HPCU", "batch_no": "HPCU5155607", "current_version": "VER-HPCU"},
+            ]
+
+    purchase_summary = {
+        "source_approval_no": "202604150041000081318",
+        "source_instance_id": "PROC-PURCHASE-001",
+        "approval_title": "采购支出 Gastos de Compra",
+        "detail_row_count": 1,
+        "purchase_currency": "人民币RMB",
+        "mapped_preview_items": [{"material_code": "YL000097", "unit_price": 2.9}],
+    }
+    preview_calls: list[dict] = []
+
+    def fake_pull_purchase_expense_approvals(**_kwargs):
+        return {"ok": True, "detail_count": 1, "items": [purchase_summary], "skipped_items": []}
+
+    def fake_preview_linked_purchase_expense_oa(**kwargs):
+        preview_calls.append(kwargs)
+        if kwargs["batch_name"] == "BATCH-FSCU":
+            return {
+                "writeback_preview": {
+                    "matched_count": 1,
+                    "writable_row_count": 1,
+                    "fillable_row_count": 1,
+                    "conflict_row_count": 0,
+                    "same_row_count": 0,
+                    "unmatched_count": 0,
+                    "ambiguous_count": 0,
+                    "matched_rows": [
+                        {
+                            "target_row_no": 1,
+                            "target_material_code": "YL000097",
+                            "target_product_name": "TPU原料",
+                            "target_spec_model": "",
+                            "mapped_row": {"material_code": "YL000097", "unit_price": 2.9},
+                            "business_changes": [
+                                {"fieldname": "purchase_unit_price", "new_value": 2.9, "status": "fillable"}
+                            ],
+                        }
+                    ],
+                }
+            }
+        return {
+            "writeback_preview": {
+                "matched_count": 0,
+                "writable_row_count": 0,
+                "fillable_row_count": 0,
+                "conflict_row_count": 0,
+                "same_row_count": 0,
+                "unmatched_count": 1,
+                "ambiguous_count": 0,
+                "matched_rows": [],
+            }
+        }
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe())
+    monkeypatch.setattr(import_oa_logistics, "resolve_dingtalk_env_file", lambda env_file=None: "")
+    monkeypatch.setenv("DINGTALK_PURCHASE_PROCESS_CODE", "PROC-PURCHASE")
+    monkeypatch.setattr(import_oa_logistics, "pull_purchase_expense_approvals", fake_pull_purchase_expense_approvals)
+    monkeypatch.setattr(import_service, "preview_linked_purchase_expense_oa", fake_preview_linked_purchase_expense_oa)
+
+    result = preview_purchase_expenses_from_process(start="2026-04-01", end="2026-04-30")
+
+    assert result["ok"] is True
+    assert result["matched_batch_count"] == 1
+    assert result["writable_batch_count"] == 1
+    assert result["writable_row_count"] == 1
+    assert result["purchase_summary_count"] == 1
+    assert result["mapped_purchase_row_count"] == 1
+    assert result["pull"]["items"][0]["can_open"] is True
+    assert result["mapped_purchase_rows"][0]["source_approval_no"] == "202604150041000081318"
+    assert result["items"][0]["batch_no"] == "FSCU8486789"
+    assert len(preview_calls) == 2
+    assert preview_calls[0]["purchase_summaries_json"]
 
 
 def test_build_batch_values_from_oa_logistics_approval() -> None:
@@ -512,6 +808,164 @@ def test_sync_oa_form_attachments_creates_attachment_records(monkeypatch) -> Non
     assert "FILE-001" in inserted_attachments[0]["source_doc_no"]
     assert json.loads(inserted_attachments[0]["parse_result_json"])["comment_attachments_included"] is False
     assert inserted_audits[0]["field_name"] == "oa_form_attachments"
+
+
+def test_sync_linked_purchase_fields_applies_existing_import_service(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    calls = []
+
+    def fake_apply_linked_purchase_expense_fillable_fields(**kwargs):
+        calls.append(kwargs)
+        return {
+            "ok": True,
+            "updated_count": 2,
+            "changed_field_count": 6,
+            "skipped_count": 0,
+            "unmatched_count": 0,
+            "ambiguous_count": 0,
+            "message": "采购字段已同步",
+        }
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", object())
+    monkeypatch.setattr(import_service, "apply_linked_purchase_expense_fillable_fields", fake_apply_linked_purchase_expense_fillable_fields)
+
+    result = _sync_linked_purchase_fields(
+        batch_name="BATCH-001",
+        version_name="VER-001",
+        approval_item={
+            "linked_purchase_approvals": [
+                {"approval_no": "202604300000000596348", "source_instance_id": "PROC-PURCHASE-001"}
+            ]
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["action"] == "synced"
+    assert result["updated_count"] == 2
+    assert result["changed_field_count"] == 6
+    assert calls[0]["batch_name"] == "BATCH-001"
+    assert calls[0]["version_name"] == "VER-001"
+    assert "202604300000000596348" in calls[0]["linked_purchase_json"]
+
+
+def test_refresh_existing_oa_logistics_details_repulls_missing_trace(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    detail_calls = []
+    save_calls = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            if doctype != "Overseas Cost Batch":
+                return []
+            return [
+                {
+                    "name": "BATCH-OLD",
+                    "batch_no": "HPCU5155607",
+                    "waybill_no": "HPCU5155607",
+                    "current_version": "VER-OLD",
+                    "source_approval_no": "202607010001",
+                    "source_instance_id": "PROC-SEA-OLD",
+                    "source_dingtalk_url": "",
+                    "extra_json": "{}",
+                },
+                {
+                    "name": "BATCH-MISSING-ID",
+                    "batch_no": "NO-ID",
+                    "waybill_no": "",
+                    "current_version": "VER-MISSING",
+                    "source_approval_no": "",
+                    "source_instance_id": "",
+                    "source_dingtalk_url": "",
+                    "extra_json": "{}",
+                },
+                {
+                    "name": "BATCH-REVOKED",
+                    "batch_no": "REVOKED",
+                    "waybill_no": "REVOKED",
+                    "current_version": "VER-REVOKED",
+                    "source_approval_no": "202607010002",
+                    "source_instance_id": "PROC-REVOKED",
+                    "source_dingtalk_url": "",
+                    "extra_json": "{}",
+                },
+            ]
+
+    def fake_get_process_instance_detail(**kwargs):
+        detail_calls.append(kwargs)
+        return {"processInstanceId": kwargs["process_instance_id"]}
+
+    def fake_summarize_approval(detail, **_kwargs):
+        instance_id = detail["processInstanceId"]
+        if instance_id == "PROC-REVOKED":
+            return {
+                "source_instance_id": instance_id,
+                "source_approval_no": "202607010002",
+                "approval_status": "TERMINATED",
+                "form_fields": {"物流方式": "海运"},
+                "transport_mode_raw": "海运",
+                "logistics_no": "REVOKED",
+            }
+        return {
+            "source_instance_id": instance_id,
+            "source_approval_no": "202607010001",
+            "approval_status": "COMPLETED",
+            "form_fields": {"物流方式": "海运"},
+            "transport_mode_raw": "海运",
+            "logistics_no": "HPCU5155607",
+            "linked_purchase_approvals": [
+                {"approval_no": "202604300000000596348", "source_instance_id": "PROC-PURCHASE-001"}
+            ],
+            "oa_form_attachments": [],
+        }
+
+    def fake_save_sea_approvals_to_erp(result):
+        save_calls.append(result)
+        return {
+            "ok": True,
+            "created_count": 0,
+            "updated_count": 1,
+            "unchanged_count": 0,
+            "skipped_count": 0,
+            "items": [
+                {
+                    "batch_name": "BATCH-OLD",
+                    "purchase_sync": {
+                        "ok": True,
+                        "linked_purchase_count": 1,
+                        "updated_count": 2,
+                        "changed_field_count": 6,
+                    },
+                    "attachment_sync": {"attachment_count": 0},
+                }
+            ],
+            "skipped_items": [],
+        }
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_oa_logistics, "resolve_dingtalk_env_file", lambda env_file=None: "")
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "TOKEN")
+    monkeypatch.setattr(import_oa_logistics, "get_process_instance_detail", fake_get_process_instance_detail)
+    monkeypatch.setattr(import_oa_logistics, "summarize_approval", fake_summarize_approval)
+    monkeypatch.setattr(import_oa_logistics, "save_sea_approvals_to_erp", fake_save_sea_approvals_to_erp)
+
+    result = refresh_existing_oa_logistics_details(limit=50)
+
+    assert result["ok"] is True
+    assert result["scanned_count"] == 3
+    assert result["detail_count"] == 1
+    assert result["saved_count"] == 1
+    assert result["purchase_updated_count"] == 2
+    assert result["purchase_changed_field_count"] == 6
+    assert {call["process_instance_id"] for call in detail_calls} == {"PROC-SEA-OLD", "PROC-REVOKED"}
+    assert len(save_calls) == 1
+    assert save_calls[0]["items"][0]["source_instance_id"] == "PROC-SEA-OLD"
+    assert save_calls[0]["items"][0]["linked_purchase_approvals"][0]["source_instance_id"] == "PROC-PURCHASE-001"
+    assert result["skipped_count"] == 2
+    assert {item["batch_name"] for item in result["skipped_items"]} == {"BATCH-MISSING-ID", "BATCH-REVOKED"}
 
 
 def test_revoked_approval_is_skipped_when_saving_oa_trace() -> None:

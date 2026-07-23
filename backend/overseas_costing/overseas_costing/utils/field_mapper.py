@@ -48,6 +48,8 @@ EXCEL_EXTRA_FIELD_MAP = {
     "unit": "unit",
     "actualShippedQty": "actual_shipped_qty",
     "volumeM3": "volume_m3",
+    "volumeWeightKg": "volume_weight_kg",
+    "chargeableWeightKg": "chargeable_weight_kg",
     "sourceRemark": "source_remark",
     "ccRate": "cc_rate",
     "ccAntiDumping": "cc_anti_dumping",

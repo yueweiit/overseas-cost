@@ -38,6 +38,7 @@ TAX_CERTIFICATE_PARSE_TARGETS = [
     "tax_totals",
     "line_items",
 ]
+DEFAULT_FX_RMB_TO_MXN = 2.6
 
 
 def enqueue_parse_task(attachment_name: str) -> dict:
@@ -136,6 +137,14 @@ def save_tax_certificate_parse_result(
             "message": "未匹配到系统批次，暂不保存解析结果。请先确认报关单号或柜号。",
         }
 
+    fx_sync = _sync_tax_certificate_exchange_rate_to_version(
+        parsed=parsed,
+        batch=matched_batch,
+        source_name=source_name or parsed.get("file_name") or "",
+    )
+    cost_refresh = _refresh_costing_after_fx_sync(fx_sync=fx_sync, batch=matched_batch)
+    parsed["fx_sync"] = fx_sync
+    parsed["cost_refresh"] = cost_refresh
     values = _build_tax_certificate_attachment_values(
         parsed=parsed,
         batch=matched_batch,
@@ -163,8 +172,10 @@ def save_tax_certificate_parse_result(
         "attachment_name": doc.name,
         "batch_name": matched_batch.get("name") or "",
         "source_doc_no": values.get("source_doc_no") or "",
+        "fx_sync": fx_sync,
+        "cost_refresh": cost_refresh,
         "preview": parsed,
-        "message": "完税凭证解析结果已保存到附件记录，未写入成本字段。",
+        "message": _tax_certificate_save_message(fx_sync, cost_refresh),
     }
 
 
@@ -772,6 +783,8 @@ def _build_tax_certificate_attachment_values(
         "tax_totals": parsed.get("tax_totals") or {},
         "line_items": parsed.get("line_items") or [],
         "validation": parsed.get("validation") or {},
+        "fx_sync": parsed.get("fx_sync") or {},
+        "cost_refresh": parsed.get("cost_refresh") or {},
     }
     reconciliation_snapshot = parsed.get("reconciliation") or {}
     file_ref = file_url or file_path or parsed.get("file_url") or parsed.get("file_path") or ""
@@ -789,6 +802,181 @@ def _build_tax_certificate_attachment_values(
         "mapped_result_json": _json_dumps(reconciliation_snapshot),
         "remark": "完税凭证解析快照，仅用于复核，未写入成本字段。",
     }
+
+
+def _numbers_close(left, right, tolerance: float = 0.000001) -> bool:
+    left_number = _to_number(left)
+    right_number = _to_number(right)
+    if left_number is None and right_number is None:
+        return True
+    if left_number is None or right_number is None:
+        return False
+    return abs(float(left_number) - float(right_number)) <= tolerance
+
+
+def _append_version_remark(existing_remark: str | None, line: str) -> str:
+    base = str(existing_remark or "").strip()
+    if not base:
+        return line
+    if line in base:
+        return base
+    return f"{base}\n{line}".strip()
+
+
+def _insert_fx_sync_audit_log(
+    *,
+    batch_name: str,
+    version_name: str,
+    field_name: str,
+    old_value,
+    new_value,
+    remark: str,
+) -> None:
+    operator_name = ""
+    session_user = getattr(getattr(frappe, "session", None), "user", None)
+    if session_user and session_user != "Guest":
+        operator_name = session_user
+    frappe.get_doc(
+        {
+            "doctype": "Overseas Cost Audit Log",
+            "batch": batch_name,
+            "version": version_name,
+            "action_type": "EDIT",
+            "field_name": field_name,
+            "old_value": "" if old_value is None else str(old_value),
+            "new_value": "" if new_value is None else str(new_value),
+            "operator_name": operator_name,
+            "action_remark": remark,
+        }
+    ).insert(ignore_permissions=True)
+
+
+def _sync_tax_certificate_exchange_rate_to_version(*, parsed: dict, batch: dict, source_name: str | None = None) -> dict:
+    header = parsed.get("header") or {}
+    usd_to_mxn = _to_number(header.get("exchange_rate"))
+    if usd_to_mxn is None:
+        return {"action": "skipped", "reason": "完税凭证未识别到汇率。"}
+
+    version_name = batch.get("current_version") or ""
+    batch_name = batch.get("name") or ""
+    if not version_name or not batch_name:
+        return {"action": "skipped", "reason": "当前批次没有可更新的版本。", "usd_to_mxn": usd_to_mxn}
+
+    version = frappe.db.get_value(
+        "Overseas Cost Version",
+        version_name,
+        ["fx_usd_to_rmb", "fx_rmb_to_mxn", "remark"],
+        as_dict=True,
+    ) or {}
+    old_usd_to_rmb = _to_number(version.get("fx_usd_to_rmb"))
+    old_rmb_to_mxn = _to_number(version.get("fx_rmb_to_mxn"))
+    rmb_to_mxn = old_rmb_to_mxn or DEFAULT_FX_RMB_TO_MXN
+    usd_to_rmb = _round_money(float(usd_to_mxn) / float(rmb_to_mxn), 6)
+
+    updates = {}
+    changed_fields = []
+    if not _numbers_close(old_usd_to_rmb, usd_to_rmb):
+        updates["fx_usd_to_rmb"] = usd_to_rmb
+        changed_fields.append({"field_name": "fx_usd_to_rmb", "old_value": old_usd_to_rmb, "new_value": usd_to_rmb})
+    if old_rmb_to_mxn is None:
+        updates["fx_rmb_to_mxn"] = rmb_to_mxn
+        changed_fields.append({"field_name": "fx_rmb_to_mxn", "old_value": old_rmb_to_mxn, "new_value": rmb_to_mxn})
+
+    source_label = source_name or header.get("pedimento_ref") or header.get("pedimento_no") or "完税凭证"
+    remark = (
+        f"完税凭证汇率同步：来源 {source_label}，USD→MXN {usd_to_mxn}，"
+        f"RMB→MXN {rmb_to_mxn}，推导 USD→RMB {usd_to_rmb}"
+    )
+
+    if not updates:
+        return {
+            "action": "unchanged",
+            "version_name": version_name,
+            "usd_to_mxn": usd_to_mxn,
+            "rmb_to_mxn": rmb_to_mxn,
+            "usd_to_rmb": usd_to_rmb,
+            "message": "凭证汇率与当前版本汇率一致，未更新版本。",
+        }
+
+    updates["remark"] = _append_version_remark(version.get("remark"), remark)
+    frappe.db.set_value("Overseas Cost Version", version_name, updates, update_modified=True)
+    frappe.db.set_value("Overseas Cost Batch", batch_name, "status", "Dirty", update_modified=True)
+    for changed in changed_fields:
+        _insert_fx_sync_audit_log(
+            batch_name=batch_name,
+            version_name=version_name,
+            field_name=changed["field_name"],
+            old_value=changed["old_value"],
+            new_value=changed["new_value"],
+            remark=remark,
+        )
+
+    return {
+        "action": "updated",
+        "version_name": version_name,
+        "usd_to_mxn": usd_to_mxn,
+        "rmb_to_mxn": rmb_to_mxn,
+        "usd_to_rmb": usd_to_rmb,
+        "changed_fields": changed_fields,
+        "message": "已按完税凭证汇率更新当前版本，批次已标记为待重算。",
+    }
+
+
+def _refresh_costing_after_fx_sync(*, fx_sync: dict | None, batch: dict) -> dict:
+    if (fx_sync or {}).get("action") != "updated":
+        return {"action": "skipped", "reason": "版本汇率未变化，不需要自动刷新核算。"}
+    batch_name = batch.get("name") or ""
+    version_name = batch.get("current_version") or ""
+    if not batch_name or not version_name:
+        return {"action": "skipped", "reason": "当前批次或版本为空。"}
+
+    purchase_sync = {}
+    recalculate_sync = {}
+    try:
+        from overseas_costing.services import import_service
+
+        purchase_sync = import_service.apply_linked_purchase_expense_fillable_fields(
+            batch_name=batch_name,
+            version_name=version_name,
+        )
+    except Exception as exc:
+        return {
+            "action": "failed",
+            "stage": "purchase_sync",
+            "message": f"汇率更新后自动同步采购字段失败：{exc}",
+        }
+
+    try:
+        from overseas_costing.services.calculate_service import recalculate_batch
+
+        recalculate_sync = recalculate_batch(batch_name=batch_name, version_name=version_name)
+    except Exception as exc:
+        recalculate_sync = {
+            "ok": False,
+            "message": f"汇率更新后自动重算失败：{exc}",
+        }
+
+    return {
+        "action": "refreshed",
+        "purchase_sync": purchase_sync,
+        "recalculate_sync": recalculate_sync,
+        "updated_purchase_rows": purchase_sync.get("updated_count") or 0,
+        "changed_purchase_fields": purchase_sync.get("changed_field_count") or 0,
+        "recalculated": bool(recalculate_sync.get("ok")),
+        "message": "汇率更新后已尝试重新同步采购字段并重算。",
+    }
+
+
+def _tax_certificate_save_message(fx_sync: dict | None = None, cost_refresh: dict | None = None) -> str:
+    fx_sync = fx_sync or {}
+    cost_refresh = cost_refresh or {}
+    if fx_sync.get("action") == "updated":
+        if cost_refresh.get("action") == "refreshed" and cost_refresh.get("recalculated"):
+            return "完税凭证解析结果已保存；凭证汇率已同步到当前版本，并已尝试重新同步采购字段和重算。"
+        return "完税凭证解析结果已保存；凭证汇率已同步到当前版本，批次已标记为待重算。"
+    if fx_sync.get("action") == "unchanged":
+        return "完税凭证解析结果已保存；凭证汇率与当前版本一致。"
+    return "完税凭证解析结果已保存到附件记录，未写入成本字段。"
 
 
 def _find_existing_tax_certificate_attachment(values: dict) -> str | None:

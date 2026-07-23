@@ -175,6 +175,7 @@ EXCEL_COLUMNS = [
     {"excel_col": "A", "fieldname": "material_code", "label": "物料编码"},
     {"excel_col": "B", "fieldname": "product_name", "label": "产品名称"},
     {"excel_col": "C", "fieldname": "unit_price", "label": "单价"},
+    {"excel_col": "C1", "fieldname": "purchase_currency", "label": "采购币种"},
     {"excel_col": "D", "fieldname": "quantity", "label": "数量"},
     {"excel_col": "E", "fieldname": "goods_value", "label": "总货值"},
     {"excel_col": "F", "fieldname": "import_name", "label": "海关进口名称"},
@@ -263,6 +264,7 @@ ITEM_FILTER_FIELDS = (
 )
 ITEM_KEYWORD_FIELDS = ITEM_FILTER_FIELDS + ("project_collection", "transport_mode")
 DEFAULT_FX_RMB_TO_MXN = 2.6
+DEFAULT_FX_USD_TO_RMB = round(1 / 0.1393, 6)
 HIDDEN_APPROVAL_STATUSES = ("TERMINATED", "CANCELED", "CANCELLED", "REVOKED", "撤销", "已撤销")
 
 
@@ -344,6 +346,7 @@ def create_batch(batch_payload: str | dict | None = None) -> dict:
         "status": "Active",
         "is_current": 1,
         "source_type": "Manual",
+        "fx_usd_to_rmb": DEFAULT_FX_USD_TO_RMB,
         "fx_rmb_to_mxn": DEFAULT_FX_RMB_TO_MXN,
         "remark": "前端手工新增批次默认版本",
     }

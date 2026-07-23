@@ -2978,11 +2978,26 @@
 }
 
 .ocw-attachment-actions {
-  display: inline-flex;
-  flex-wrap: wrap;
+  display: flex;
+  width: 92px;
+  flex-direction: column;
   gap: 6px;
-  align-items: center;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: flex-start;
+}
+
+.ocw-attachment-file-name {
+  color: #0f172a;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.ocw-attachment-file-url {
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .ocw-link-btn {
@@ -2997,12 +3012,15 @@
   color: #1d4ed8;
   font-size: 12px;
   font-weight: 700;
+  text-decoration: none;
   cursor: pointer;
 }
 
 .ocw-link-btn:hover {
   border-color: #2563eb;
   background: #eff6ff;
+  color: #1d4ed8;
+  text-decoration: none;
 }
 
 .ocw-purchase-apply {
@@ -3057,9 +3075,42 @@
 
 .ocw-purchase-table {
   width: 100%;
-  min-width: 880px;
+  min-width: 960px;
+  table-layout: fixed;
   border-collapse: collapse;
   background: #fff;
+}
+
+.ocw-purchase-table .ocw-col-index {
+  width: 42px;
+}
+
+.ocw-purchase-table .ocw-col-file {
+  width: 180px;
+}
+
+.ocw-purchase-table .ocw-col-type {
+  width: 58px;
+}
+
+.ocw-purchase-table .ocw-col-status {
+  width: 58px;
+}
+
+.ocw-purchase-table .ocw-col-source {
+  width: 160px;
+}
+
+.ocw-purchase-table .ocw-col-file-id {
+  width: 122px;
+}
+
+.ocw-purchase-table .ocw-col-target {
+  width: 168px;
+}
+
+.ocw-purchase-table .ocw-col-action {
+  width: 118px;
 }
 
 .ocw-purchase-table th,
@@ -3070,6 +3121,7 @@
   vertical-align: top;
   font-size: 12px;
   color: #334155;
+  overflow-wrap: anywhere;
 }
 
 .ocw-purchase-table th {
@@ -3079,6 +3131,19 @@
   background: #f8fafc;
   color: #475569;
   font-weight: 700;
+}
+
+.ocw-purchase-table th:last-child,
+.ocw-purchase-table td:last-child {
+  text-align: center;
+}
+
+.ocw-purchase-table td:last-child {
+  vertical-align: top;
+}
+
+.ocw-purchase-table td:last-child .ocw-link-btn {
+  width: 100%;
 }
 
 .ocw-purchase-change {

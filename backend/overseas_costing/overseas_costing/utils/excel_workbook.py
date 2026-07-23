@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
@@ -101,12 +102,19 @@ def parse_yuewei_excel_workbook(file_path: str | Path, sheet_name: str | None = 
     path = Path(file_path).expanduser()
     workbook = load_workbook(path, data_only=True, read_only=False)
     try:
-        selected_sheet_name, parser_name, warning = _select_sheet(workbook, sheet_name)
-        worksheet = workbook[selected_sheet_name]
-        if parser_name == "oa_attachment_detail":
-            blocks = parse_oa_attachment_detail_sheet(worksheet, source_sheet=selected_sheet_name)
+        requested_sheet = (sheet_name or "").strip()
+        if not requested_sheet and _looks_like_ci_pl_workbook(workbook):
+            selected_sheet_name = "CI+PL"
+            parser_name = "ci_pl_workbook"
+            warning = ""
+            blocks = parse_ci_pl_workbook(workbook)
         else:
-            blocks = parse_yuewei_sheet(worksheet, source_sheet=selected_sheet_name)
+            selected_sheet_name, parser_name, warning = _select_sheet(workbook, sheet_name)
+            worksheet = workbook[selected_sheet_name]
+            if parser_name == "oa_attachment_detail":
+                blocks = parse_oa_attachment_detail_sheet(worksheet, source_sheet=selected_sheet_name)
+            else:
+                blocks = parse_yuewei_sheet(worksheet, source_sheet=selected_sheet_name)
         meta = {
             "sheetCount": len(workbook.sheetnames),
             "blockCount": len(blocks),
@@ -231,6 +239,212 @@ def parse_oa_attachment_detail_sheet(worksheet, source_sheet: str | None = None)
     return blocks
 
 
+def _looks_like_ci_pl_workbook(workbook) -> bool:
+    sheet_keys = {_normalize_header(name): name for name in workbook.sheetnames}
+    return "ci" in sheet_keys and "pl" in sheet_keys
+
+
+def parse_ci_pl_workbook(workbook) -> list[dict]:
+    """解析同一工作簿内的 Commercial Invoice + Packing List。
+
+    CI 里通常有数量、单价、金额；PL 里通常有每箱体积和毛重。
+    两者没有物料编码时，按品名中的规格型号合并。
+    """
+
+    sheet_keys = {_normalize_header(name): name for name in workbook.sheetnames}
+    ci_rows = _read_ci_sheet_rows(workbook[sheet_keys["ci"]], source_sheet=sheet_keys["ci"])
+    pl_rows = _read_pl_sheet_rows(workbook[sheet_keys["pl"]], source_sheet=sheet_keys["pl"])
+    specs = []
+    for row in ci_rows + pl_rows:
+        spec = row.get("spec_model")
+        if spec and spec not in specs:
+            specs.append(spec)
+
+    items = []
+    for spec in specs:
+        ci_row = next((row for row in ci_rows if row.get("spec_model") == spec), {})
+        pl_row = next((row for row in pl_rows if row.get("spec_model") == spec), {})
+        product_name = ci_row.get("product_name") or pl_row.get("product_name")
+        quantity = ci_row.get("quantity")
+        extra = {
+            "sourceSheet": "CI+PL",
+            "sourceType": "PACKING_LIST",
+            "sourceDocNo": ci_row.get("invoice_no") or "",
+            "specModel": spec,
+            "actualShippedQty": quantity,
+            "grossWeightKg": pl_row.get("gross_weight_kg"),
+            "volumeM3": pl_row.get("volume_m3"),
+            "packageCount": pl_row.get("package_count"),
+            "sourceRemark": "CI 数量与 PL 重量体积按规格合并",
+        }
+        items.append(
+            [
+                None,
+                product_name,
+                ci_row.get("unit_price"),
+                quantity,
+                ci_row.get("goods_value"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                {key: value for key, value in extra.items() if value not in (None, "")},
+            ]
+        )
+
+    if not items:
+        return []
+    invoice_no = next((row.get("invoice_no") for row in ci_rows if row.get("invoice_no")), "")
+    return [
+        {
+            "id": invoice_no or "CI+PL",
+            "batchNo": invoice_no or "CI+PL",
+            "sourceSheet": "CI+PL",
+            "sourceRange": "CI+PL",
+            "sourceTemplate": "ci_pl_workbook",
+            "sourceType": "PACKING_LIST",
+            "sourceDocNo": invoice_no,
+            "remark": "商业发票与装箱单合并解析",
+            "items": items,
+        }
+    ]
+
+
+def _read_ci_sheet_rows(worksheet, source_sheet: str) -> list[dict]:
+    header_row, header_map = _find_header_row(
+        worksheet,
+        required_aliases={
+            "article_name": ("Article Name", "品名", "货品名称"),
+            "quantity": ("Quantity", "数量"),
+        },
+        optional_aliases={
+            "article_no": ("Article No", "序号"),
+            "unit_price": ("Unit Price", "单价"),
+            "goods_value": ("Amount", "金额", "总价"),
+        },
+    )
+    if not header_row:
+        return []
+
+    invoice_no = _find_ci_invoice_no(worksheet)
+    rows = []
+    for row_no in range(header_row + 1, worksheet.max_row + 1):
+        product_name = _normalize_cell_value(worksheet.cell(row_no, header_map["article_name"]).value)
+        if not product_name or "total" in str(product_name).lower():
+            continue
+        quantity = _normalize_cell_value(worksheet.cell(row_no, header_map["quantity"]).value)
+        spec_model = _extract_spec_model(product_name)
+        if not spec_model:
+            continue
+        rows.append(
+            {
+                "source_sheet": source_sheet,
+                "row_no": row_no,
+                "invoice_no": invoice_no,
+                "product_name": product_name,
+                "spec_model": spec_model,
+                "quantity": quantity,
+                "unit_price": _value_by_header(worksheet, row_no, header_map, "unit_price"),
+                "goods_value": _value_by_header(worksheet, row_no, header_map, "goods_value"),
+            }
+        )
+    return rows
+
+
+def _read_pl_sheet_rows(worksheet, source_sheet: str) -> list[dict]:
+    header_row, header_map = _find_header_row(
+        worksheet,
+        required_aliases={
+            "article_name": ("Article Name", "品名", "货品名称"),
+            "volume_m3": ("Dimension", "M³", "M3", "CBM", "体积"),
+            "gross_weight_kg": ("Weight", "KG", "毛重"),
+        },
+        optional_aliases={"package_no": ("Package No", "箱号", "包号")},
+    )
+    if not header_row:
+        return []
+
+    grouped: dict[str, dict] = {}
+    for row_no in range(header_row + 1, worksheet.max_row + 1):
+        product_name = _normalize_cell_value(worksheet.cell(row_no, header_map["article_name"]).value)
+        spec_model = _extract_spec_model(product_name)
+        if not spec_model:
+            continue
+        target = grouped.setdefault(
+            spec_model,
+            {
+                "source_sheet": source_sheet,
+                "product_name": product_name,
+                "spec_model": spec_model,
+                "package_count": 0,
+                "gross_weight_kg": 0,
+                "volume_m3": 0,
+            },
+        )
+        target["package_count"] += 1
+        target["gross_weight_kg"] += _to_number(_value_by_header(worksheet, row_no, header_map, "gross_weight_kg"))
+        target["volume_m3"] += _to_number(_value_by_header(worksheet, row_no, header_map, "volume_m3"))
+    return list(grouped.values())
+
+
+def _find_header_row(
+    worksheet,
+    *,
+    required_aliases: dict[str, tuple[str, ...]],
+    optional_aliases: dict[str, tuple[str, ...]] | None = None,
+) -> tuple[int, dict[str, int]]:
+    aliases = {**required_aliases, **(optional_aliases or {})}
+    for row_no in range(1, min(worksheet.max_row, 40) + 1):
+        normalized_headers = {
+            col_no: _normalize_header(worksheet.cell(row_no, col_no).value)
+            for col_no in range(1, worksheet.max_column + 1)
+        }
+        field_map: dict[str, int] = {}
+        for fieldname, field_aliases in aliases.items():
+            for col_no, header in normalized_headers.items():
+                if header and any(_normalize_header(alias) in header for alias in field_aliases):
+                    field_map[fieldname] = col_no
+                    break
+        if all(field in field_map for field in required_aliases):
+            return row_no, field_map
+    return 0, {}
+
+
+def _value_by_header(worksheet, row_no: int, header_map: dict[str, int], fieldname: str):
+    col_no = header_map.get(fieldname)
+    if not col_no:
+        return None
+    return _normalize_cell_value(worksheet.cell(row_no, col_no).value)
+
+
+def _find_ci_invoice_no(worksheet) -> str:
+    for row_no in range(1, min(worksheet.max_row, 12) + 1):
+        for col_no in range(1, worksheet.max_column + 1):
+            value = _normalize_cell_value(worksheet.cell(row_no, col_no).value)
+            text = str(value or "")
+            match = re.search(r"C/?I\s*No\.?\s*:?\s*([A-Z0-9-]+)", text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+    return ""
+
+
+def _extract_spec_model(value) -> str | None:
+    text = str(value or "")
+    match = re.search(r"\b([A-Z]{1,6}-[A-Z0-9]+(?:-[A-Z0-9]+)*)\b", text, flags=re.IGNORECASE)
+    return match.group(1).upper() if match else None
+
+
+def _to_number(value) -> float:
+    if value in (None, ""):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class MergedCellReader:
     def __init__(self, worksheet):
         self.worksheet = worksheet
@@ -326,7 +540,7 @@ def _build_item(reader: MergedCellReader, source_sheet: str, row_no: int) -> lis
 
 ATTACHMENT_HEADER_ALIASES = {
     "purchase_order_no": ("对应钉钉采购订单号", "采购订单号", "采购订单"),
-    "material_code": ("品目编码", "物料编码", "itemcode"),
+    "material_code": ("品目编码", "物料编码", "itemcode", "itemno", "partno", "sku"),
     "brand": ("品牌",),
     "import_name": ("申报名称",),
     "unit": ("申报单位", "单位"),
@@ -346,11 +560,13 @@ ATTACHMENT_HEADER_ALIASES = {
     "unit_cbm": ("单件cbm",),
     "qty_per_piece": ("个数每件", "numberevery"),
     "piece_count": ("件数", "numberofpieces"),
-    "quantity": ("总个数", "totalnumberof"),
+    "quantity": ("总个数", "totalnumberof", "实际发货数量", "发货数量", "数量", "quantity", "qty", "pcs"),
     "packing": ("包装", "packing"),
     "total_net_weight_kg": ("总净重",),
-    "gross_weight_kg": ("总毛重", "grossweight"),
-    "volume_m3": ("总体积", "totalcapacity"),
+    "gross_weight_kg": ("总毛重", "grossweight", "毛重", "gw"),
+    "volume_m3": ("总体积", "totalcapacity", "体积", "volume", "cbm"),
+    "volume_weight_kg": ("体积重", "volumeweight"),
+    "chargeable_weight_kg": ("计费重", "chargeableweight"),
     "unit_price": ("单价", "unitprice"),
     "goods_value": ("总价", "总金额", "rmb"),
     "planned_ship_date": ("计划出货日期",),
@@ -361,17 +577,45 @@ ATTACHMENT_HEADER_ALIASES = {
 
 
 def _find_oa_attachment_header(worksheet) -> tuple[int, dict[str, int]] | None:
-    for row_no in range(1, min(worksheet.max_row, 15) + 1):
+    for row_no in range(1, min(worksheet.max_row, 30) + 1):
         normalized_headers = {
             col_no: _normalize_header(worksheet.cell(row_no, col_no).value)
             for col_no in range(1, worksheet.max_column + 1)
         }
         field_map = _build_attachment_header_map(normalized_headers)
-        required_hits = sum(1 for field in ("material_code", "quantity", "unit_price", "goods_value") if field in field_map)
-        source_hits = sum(1 for field in ("purchase_order_no", "export_mode", "project_collection") if field in field_map)
-        if "material_code" in field_map and required_hits >= 3 and source_hits >= 1:
+        if _looks_like_oa_attachment_header(field_map):
             return row_no, field_map
     return None
+
+
+def _looks_like_oa_attachment_header(field_map: dict[str, int]) -> bool:
+    if "material_code" not in field_map:
+        return False
+
+    quantity_hits = sum(1 for field in ("quantity", "piece_count", "qty_per_piece") if field in field_map)
+    money_hits = sum(1 for field in ("unit_price", "goods_value") if field in field_map)
+    physical_hits = sum(
+        1
+        for field in (
+            "gross_weight_kg",
+            "volume_m3",
+            "volume_weight_kg",
+            "chargeable_weight_kg",
+            "total_net_weight_kg",
+            "net_weight_each_kg",
+            "gross_weight_each_kg",
+            "unit_cbm",
+        )
+        if field in field_map
+    )
+    source_hits = sum(1 for field in ("purchase_order_no", "export_mode", "project_collection") if field in field_map)
+    name_hits = sum(1 for field in ("product_name", "import_name", "product_name_en", "product_name_es", "spec_model") if field in field_map)
+
+    # 采购明细类附件通常有价格/总价；装箱单类附件通常没有价格，
+    # 但会有实际发货数量、毛重、体积等物理字段。
+    if quantity_hits and money_hits and source_hits:
+        return True
+    return bool(quantity_hits and (physical_hits or source_hits or name_hits))
 
 
 def _build_attachment_header_map(normalized_headers: dict[int, str]) -> dict[str, int]:
@@ -390,7 +634,7 @@ def _normalize_header(value) -> str:
     if value is None:
         return ""
     text = str(value).replace("\xa0", "").replace("\n", "").replace("\r", "")
-    for char in (" ", "\t", "（", "）", "(", ")", "/", "\\", "-", "_"):
+    for char in (" ", "\t", "（", "）", "(", ")", "/", "\\", "-", "_", ".", "。", ":", "："):
         text = text.replace(char, "")
     return text.strip().lower()
 
@@ -454,6 +698,8 @@ def _build_attachment_item(row: dict, source_sheet: str) -> list:
         "actualShippedQty": quantity,
         "grossWeightKg": row.get("gross_weight_kg"),
         "volumeM3": row.get("volume_m3"),
+        "volumeWeightKg": row.get("volume_weight_kg"),
+        "chargeableWeightKg": row.get("chargeable_weight_kg"),
         "projectCollection": row.get("project_collection"),
         "transportMode": row.get("transport_mode"),
         "purchaseCurrency": "RMB",

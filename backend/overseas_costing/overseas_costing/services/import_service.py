@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 try:
     import frappe
@@ -38,6 +41,8 @@ from overseas_costing.utils.field_mapper import (
 
 ITEM_KEY_FIELDS = ("material_code", "product_name", "spec_model")
 DEFAULT_FX_RMB_TO_MXN = 2.6
+DEFAULT_FX_USD_TO_RMB = round(1 / 0.1393, 6)
+DEFAULT_DINGTALK_CORP_ID = "ding144583309b2fb01c35c2f4657eb6378f"
 PURCHASE_WRITEBACK_FIELDS = (
     "unit_price",
     "purchase_currency",
@@ -73,8 +78,14 @@ PACKING_FIELD_LABELS = {
     "parse_status": "解析状态",
 }
 DINGTALK_ENV_FILE_CANDIDATES = (
+    "/mnt/e/Yuewei开发/预算管理系统/dingtalk-expense-sync-main/.env",
     "/mnt/e/Yuewei开发/预算管理系统/dingtalk-budget-main/server/.env",
+    "/mnt/e/Yuewei开发/dingtalk-expense-sync-main/.env",
+    "/mnt/e/Yuewei开发/dingtalk-budget-main/server/.env",
+    "E:/Yuewei开发/预算管理系统/dingtalk-expense-sync-main/.env",
     "E:/Yuewei开发/预算管理系统/dingtalk-budget-main/server/.env",
+    "E:/Yuewei开发/dingtalk-expense-sync-main/.env",
+    "E:/Yuewei开发/dingtalk-budget-main/server/.env",
 )
 NUMERIC_ITEM_FIELDS = {
     "unit_price",
@@ -168,6 +179,7 @@ def import_main_excel(
         }
 
     created_batches = []
+    resolved_fx_usd_to_rmb = fx_usd_to_rmb or DEFAULT_FX_USD_TO_RMB
     resolved_fx_rmb_to_mxn = fx_rmb_to_mxn or DEFAULT_FX_RMB_TO_MXN
 
     for block in blocks:
@@ -181,7 +193,7 @@ def import_main_excel(
         version_doc, version_action = _resolve_or_create_excel_version(
             batch_doc_name=batch_doc.name,
             version_type=version_type,
-            fx_usd_to_rmb=fx_usd_to_rmb,
+            fx_usd_to_rmb=resolved_fx_usd_to_rmb,
             fx_rmb_to_mxn=resolved_fx_rmb_to_mxn,
         )
         frappe.db.set_value(
@@ -478,6 +490,7 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
                 "space_id": parse_result.get("space_id") or "",
                 "file_ext": parse_result.get("file_ext") or "",
                 "parse_targets": mapped_result.get("parse_targets") or [],
+                "can_download": bool(parse_result.get("file_id")) and not bool(row.get("file_url")),
                 "remark": row.get("remark") or "",
                 "creation": row.get("creation"),
                 "modified": row.get("modified"),
@@ -492,6 +505,144 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
         "total": len(items),
         "comment_attachments_included": False,
         "message": "钉钉发起表单附件记录已返回；评论附件未纳入。",
+    }
+
+
+def download_oa_form_attachment(
+    attachment_name: str,
+    env_file: str | None = None,
+    access_token: str | None = None,
+) -> dict:
+    """下载钉钉审批发起表单附件，并回填系统文件地址。"""
+
+    resolved_attachment_name = str(attachment_name or "").strip()
+    if not resolved_attachment_name:
+        return {"ok": False, "message": "缺少附件记录名称。"}
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "attachment_name": resolved_attachment_name,
+            "message": "当前未连接 Frappe，不能下载并保存钉钉附件。",
+        }
+
+    try:
+        attachment_doc = frappe.get_doc("Overseas Cost Attachment", resolved_attachment_name)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "attachment_name": resolved_attachment_name,
+            "message": f"未找到附件记录：{exc}",
+        }
+
+    if getattr(attachment_doc, "source_type", "") != "OA":
+        return {
+            "ok": False,
+            "attachment_name": resolved_attachment_name,
+            "message": "该记录不是钉钉 OA 发起附件，不能用钉钉附件下载接口处理。",
+        }
+
+    existing_file_url = str(getattr(attachment_doc, "file_url", "") or "").strip()
+    if existing_file_url:
+        return {
+            "ok": True,
+            "downloaded": False,
+            "attachment_name": resolved_attachment_name,
+            "file_url": existing_file_url,
+            "message": "附件已经有系统文件地址，无需重复下载。",
+        }
+
+    parse_snapshot = _json_loads_dict(getattr(attachment_doc, "parse_result_json", ""))
+    raw_attachment = parse_snapshot.get("raw_attachment") if isinstance(parse_snapshot.get("raw_attachment"), dict) else {}
+    process_instance_id = str(
+        parse_snapshot.get("instance_id")
+        or parse_snapshot.get("process_instance_id")
+        or parse_snapshot.get("proc_inst_id")
+        or ""
+    ).strip()
+    file_id = str(
+        parse_snapshot.get("file_id")
+        or raw_attachment.get("fileId")
+        or raw_attachment.get("file_id")
+        or raw_attachment.get("mediaId")
+        or raw_attachment.get("id")
+        or ""
+    ).strip()
+
+    if not process_instance_id or not file_id:
+        return {
+            "ok": False,
+            "attachment_name": resolved_attachment_name,
+            "message": "附件记录缺少钉钉审批实例 ID 或 file_id，请先重新拉取国际物流 OA。",
+            "missing": {
+                "process_instance_id": not bool(process_instance_id),
+                "file_id": not bool(file_id),
+            },
+        }
+
+    file_name = str(getattr(attachment_doc, "file_name", "") or raw_attachment.get("fileName") or file_id).strip()
+    try:
+        from overseas_costing.scripts.import_oa_logistics import (
+            get_access_token,
+            get_process_attachment_download_url,
+            load_env_file,
+        )
+
+        resolved_env_file = _resolve_dingtalk_env_file(env_file)
+        if resolved_env_file:
+            load_env_file(resolved_env_file)
+        corp_id = _resolve_attachment_corp_id(attachment_doc, parse_snapshot)
+        token = get_access_token(
+            api_style="new",
+            access_token=str(access_token or "").strip(),
+            corp_id=corp_id,
+        )
+        download_info = get_process_attachment_download_url(
+            token=token,
+            process_instance_id=process_instance_id,
+            file_id=file_id,
+        )
+        content, response_meta = _fetch_dingtalk_attachment_content(download_info["download_uri"])
+        file_doc = _save_content_as_frappe_file(
+            file_name=file_name,
+            content=content,
+            attached_to_name=resolved_attachment_name,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "attachment_name": resolved_attachment_name,
+            "file_name": file_name,
+            "message": f"钉钉附件下载失败：{exc}",
+        }
+
+    file_url = _get_doc_value(file_doc, "file_url") or ""
+    parse_snapshot["download"] = {
+        "source": "dingtalk_oa_form_attachment",
+        "process_instance_id": process_instance_id,
+        "file_id": file_id,
+        "download_uri_obtained": True,
+        "content_type": response_meta.get("content_type") or "",
+        "content_length": response_meta.get("content_length") or len(content),
+    }
+    attachment_doc.file_url = file_url
+    attachment_doc.parse_status = getattr(attachment_doc, "parse_status", "") or "Queued"
+    attachment_doc.parse_result_json = _json_dumps(parse_snapshot)
+    attachment_doc.remark = "钉钉发起表单附件已保存，可在附件列表中下载到本地；评论附件暂不处理。"
+    attachment_doc.save(ignore_permissions=True)
+    if hasattr(frappe.db, "commit"):
+        frappe.db.commit()
+
+    return {
+        "ok": True,
+        "downloaded": True,
+        "attachment_name": resolved_attachment_name,
+        "file_name": file_name,
+        "file_url": file_url,
+        "content_type": response_meta.get("content_type") or "",
+        "content_length": response_meta.get("content_length") or len(content),
+        "message": "钉钉附件已保存，可点击下载到本地，也可以继续解析预览。",
     }
 
 
@@ -638,6 +789,97 @@ def _ensure_supported_excel_path(path: Path) -> Path:
     return path
 
 
+def _fetch_dingtalk_attachment_content(download_uri: str) -> tuple[bytes, dict]:
+    url = str(download_uri or "").strip()
+    if not url:
+        raise ValueError("缺少钉钉附件下载地址。")
+    request = Request(url, headers={"User-Agent": "overseas-costing/1.0"})
+    try:
+        with urlopen(request, timeout=60) as response:
+            content = response.read()
+            return content, {
+                "content_type": response.headers.get("Content-Type", ""),
+                "content_length": int(response.headers.get("Content-Length") or len(content)),
+            }
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"附件下载 HTTP {exc.code}: {body[:300]}") from exc
+    except (URLError, TimeoutError) as exc:
+        raise RuntimeError(f"附件下载网络失败：{exc}") from exc
+
+
+def _save_content_as_frappe_file(*, file_name: str, content: bytes, attached_to_name: str):
+    if frappe is None:
+        raise RuntimeError("当前未连接 Frappe。")
+    from frappe.utils.file_manager import save_file
+
+    try:
+        return save_file(
+            fname=file_name or "dingtalk-attachment",
+            content=content,
+            dt="Overseas Cost Attachment",
+            dn=attached_to_name,
+            is_private=1,
+            decode=False,
+        )
+    except Exception as exc:
+        if not _is_frappe_file_size_error(exc):
+            raise
+        return _save_large_content_as_private_file(
+            file_name=file_name,
+            content=content,
+            attached_to_name=attached_to_name,
+        )
+
+
+def _is_frappe_file_size_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "File size exceeded" in text or "maximum allowed size" in text
+
+
+def _save_large_content_as_private_file(*, file_name: str, content: bytes, attached_to_name: str):
+    safe_name = _safe_private_file_name(file_name or "dingtalk-attachment")
+    private_dir = Path(frappe.get_site_path("private", "files"))
+    private_dir.mkdir(parents=True, exist_ok=True)
+    target_path = _deduplicate_private_file_path(private_dir / safe_name)
+    target_path.write_bytes(content)
+    file_url = f"/private/files/{target_path.name}"
+    return frappe.get_doc(
+        {
+            "doctype": "File",
+            "file_name": target_path.name,
+            "file_url": file_url,
+            "is_private": 1,
+            "attached_to_doctype": "Overseas Cost Attachment",
+            "attached_to_name": attached_to_name,
+            "folder": "Home/Attachments",
+        }
+    ).insert(ignore_permissions=True)
+
+
+def _safe_private_file_name(file_name: str) -> str:
+    name = Path(str(file_name or "dingtalk-attachment")).name.strip() or "dingtalk-attachment"
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+
+
+def _deduplicate_private_file_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for index in range(1, 1000):
+        candidate = path.with_name(f"{stem}-{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"无法生成不重名的附件文件名：{path.name}")
+
+
+def _get_doc_value(doc, fieldname: str, default: str = ""):
+    if isinstance(doc, dict):
+        return doc.get(fieldname, default)
+    return getattr(doc, fieldname, default)
+
+
 def _json_dumps(value) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
@@ -652,6 +894,48 @@ def _json_loads_dict(value) -> dict:
     except (TypeError, ValueError):
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _extract_dingtalk_corp_id(value: str | None = None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"(?:[?&]|^)corpid=([^&#]+)", text, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def _resolve_attachment_corp_id(attachment_doc, parse_snapshot: dict) -> str:
+    env_value = (
+        os.environ.get("DINGTALK_CORP_ID")
+        or os.environ.get("DINGTALK_CORPID")
+        or os.environ.get("DINGTALK_CORP")
+        or ""
+    )
+    corp_id = _extract_dingtalk_corp_id(env_value) or str(env_value or "").strip()
+    if corp_id:
+        return corp_id
+
+    for key in ("source_dingtalk_url", "official_url", "url", "open_url"):
+        corp_id = _extract_dingtalk_corp_id(parse_snapshot.get(key))
+        if corp_id:
+            return corp_id
+
+    batch_name = str(getattr(attachment_doc, "batch", "") or "").strip()
+    if frappe is not None and batch_name:
+        try:
+            row = frappe.db.get_value(
+                "Overseas Cost Batch",
+                batch_name,
+                ["source_dingtalk_url"],
+                as_dict=True,
+            )
+        except Exception:
+            row = None
+        if row:
+            corp_id = _extract_dingtalk_corp_id(row.get("source_dingtalk_url"))
+            if corp_id:
+                return corp_id
+    return DEFAULT_DINGTALK_CORP_ID
 
 
 def _to_float(value, default: float = 0.0) -> float:
@@ -703,7 +987,7 @@ def _values_equal_for_import(old_value, new_value) -> bool:
     if old_value in (None, "") and new_value in (None, ""):
         return True
     try:
-        return float(old_value) == float(new_value)
+        return abs(float(old_value) - float(new_value)) <= 0.000001
     except (TypeError, ValueError):
         return str(old_value or "").strip() == str(new_value or "").strip()
 
@@ -953,6 +1237,68 @@ def _normalize_key(value) -> str:
     return str(value).strip().lower()
 
 
+def _normalize_currency_code(value) -> str:
+    normalized = _normalize_key(value).replace(" ", "")
+    if not normalized:
+        return "RMB"
+    if any(token in normalized for token in ("rmb", "cny", "人民币")):
+        return "RMB"
+    if any(token in normalized for token in ("usd", "dólar", "dolar", "美元", "美金")):
+        return "USD"
+    if any(token in normalized for token in ("mxn", "peso", "pesos", "墨西哥")):
+        return "MXN"
+    return normalized.upper()
+
+
+def _get_version_fx_context(version_name: str | None) -> dict:
+    context = {
+        "fx_usd_to_rmb": DEFAULT_FX_USD_TO_RMB,
+        "fx_rmb_to_mxn": DEFAULT_FX_RMB_TO_MXN,
+    }
+    if frappe is None or not version_name:
+        return context
+
+    row = frappe.db.get_value(
+        "Overseas Cost Version",
+        version_name,
+        ["fx_usd_to_rmb", "fx_rmb_to_mxn"],
+        as_dict=True,
+    )
+    if row:
+        fx_usd_to_rmb = _to_float(row.get("fx_usd_to_rmb")) or DEFAULT_FX_USD_TO_RMB
+        fx_rmb_to_mxn = _to_float(row.get("fx_rmb_to_mxn")) or DEFAULT_FX_RMB_TO_MXN
+        context["fx_usd_to_rmb"] = fx_usd_to_rmb
+        context["fx_rmb_to_mxn"] = fx_rmb_to_mxn
+        updates = {}
+        if not _to_float(row.get("fx_usd_to_rmb")):
+            updates["fx_usd_to_rmb"] = fx_usd_to_rmb
+        if not _to_float(row.get("fx_rmb_to_mxn")):
+            updates["fx_rmb_to_mxn"] = fx_rmb_to_mxn
+        if updates:
+            frappe.db.set_value("Overseas Cost Version", version_name, updates, update_modified=False)
+    return context
+
+
+def _amount_to_rmb(amount, currency, fx_context: dict) -> float:
+    value = _to_float(amount, default=0.0)
+    currency_code = _normalize_currency_code(currency)
+    if currency_code == "USD":
+        return value * (_to_float(fx_context.get("fx_usd_to_rmb")) or DEFAULT_FX_USD_TO_RMB)
+    if currency_code == "MXN":
+        return value / (_to_float(fx_context.get("fx_rmb_to_mxn")) or DEFAULT_FX_RMB_TO_MXN)
+    return value
+
+
+def _convert_purchase_updates_to_rmb(field_updates: dict, fx_context: dict) -> dict:
+    converted = dict(field_updates or {})
+    currency = converted.get("purchase_currency")
+    if "unit_price" in converted:
+        converted["unit_price"] = _amount_to_rmb(converted.get("unit_price"), currency, fx_context)
+    if "goods_value" in converted:
+        converted["goods_value"] = _amount_to_rmb(converted.get("goods_value"), currency, fx_context)
+    return converted
+
+
 def _build_preview_rows(
     raw_rows: list[dict],
     mapper: Callable[[dict], dict],
@@ -1136,6 +1482,7 @@ def _get_batch_items(batch_doc_name: str, version_name: str | None) -> list[dict
             "material_code",
             "product_name",
             "spec_model",
+            "quantity",
             "unit_price",
             "purchase_currency",
             "goods_value",
@@ -1185,6 +1532,72 @@ def _match_item(
                 return field, candidates
             return field, _narrow_item_candidates(mapped_row, candidates)
     return "", []
+
+
+def _source_quantity_for_sequence_match(mapped_row: dict) -> float | None:
+    for fieldname in ("actual_shipped_qty", "quantity"):
+        value = mapped_row.get(fieldname)
+        if value not in (None, ""):
+            return _to_float(value, default=0.0)
+    return None
+
+
+def _candidate_sort_key(candidate: dict) -> tuple[int, str]:
+    try:
+        row_no = int(candidate.get("row_no") or 0)
+    except (TypeError, ValueError):
+        row_no = 0
+    return row_no, str(candidate.get("name") or "")
+
+
+def _assign_sequence_candidate(match: dict, candidate: dict, strategy: str) -> None:
+    match["assigned_candidate"] = candidate
+    match["disambiguation_strategy"] = strategy
+
+
+def _resolve_ambiguous_matches_by_sequence(raw_matches: list[dict]) -> None:
+    """把来源多行和系统重复物料多行按数量/顺序拆开。
+
+    只在“同一批来源行数量 = 同一组候选行数量”时生效，避免把不确定的单行强行写入。
+    """
+
+    groups: dict[tuple[str, tuple[str, ...]], list[dict]] = defaultdict(list)
+    for match in raw_matches:
+        candidates = match.get("candidates") or []
+        if len(candidates) <= 1:
+            continue
+        candidate_names = tuple(sorted(str(candidate.get("name") or "") for candidate in candidates if candidate.get("name")))
+        if len(candidate_names) != len(candidates):
+            continue
+        groups[(match.get("matched_by") or "", candidate_names)].append(match)
+
+    for group in groups.values():
+        first_candidates = group[0].get("candidates") or []
+        candidates_by_name = {str(candidate.get("name")): candidate for candidate in first_candidates if candidate.get("name")}
+        if len(group) != len(candidates_by_name):
+            continue
+
+        available = dict(candidates_by_name)
+        for match in sorted(group, key=lambda row: row.get("source_index") or 0):
+            source_quantity = _source_quantity_for_sequence_match(match.get("mapped_row") or {})
+            if source_quantity is None:
+                continue
+            exact_candidates = [
+                candidate
+                for candidate in available.values()
+                if _values_equal_for_import(candidate.get("quantity"), source_quantity)
+            ]
+            if len(exact_candidates) == 1:
+                candidate = exact_candidates[0]
+                _assign_sequence_candidate(match, candidate, "duplicate_quantity")
+                available.pop(str(candidate.get("name")), None)
+
+        remaining_matches = [match for match in group if not match.get("assigned_candidate")]
+        remaining_candidates = sorted(available.values(), key=_candidate_sort_key)
+        if len(remaining_matches) != len(remaining_candidates):
+            continue
+        for match, candidate in zip(sorted(remaining_matches, key=lambda row: row.get("source_index") or 0), remaining_candidates):
+            _assign_sequence_candidate(match, candidate, "duplicate_row_order")
 
 
 def _narrow_item_candidates(mapped_row: dict, candidates: list[dict]) -> list[dict]:
@@ -1257,7 +1670,7 @@ def _update_item_fields(
 
     for field_name, new_value in field_updates.items():
         old_value = getattr(item_doc, field_name, None)
-        if old_value == new_value:
+        if _values_equal_for_import(old_value, new_value):
             continue
         setattr(item_doc, field_name, new_value)
         changed_fields.append(
@@ -1314,6 +1727,9 @@ def _mark_attachment_parsed(attachment_name: str | None, summary: dict) -> bool:
         "unmatched_count": summary.get("unmatched_count", 0),
         "ambiguous_count": summary.get("ambiguous_count", 0),
     }
+    parse_targets = summary.get("parse_targets")
+    if parse_targets:
+        snapshot["parse_targets"] = parse_targets
     try:
         frappe.db.set_value("Overseas Cost Attachment", attachment_name, "parse_status", "Parsed", update_modified=True)
         frappe.db.set_value(
@@ -1336,6 +1752,7 @@ def _run_item_writeback(
     update_builder: Callable[[dict, dict], dict],
     action_remark: str,
     trust_unique_material_code: bool = False,
+    resolve_ambiguous_by_sequence: bool = False,
 ) -> dict:
     if frappe is None:
         return {
@@ -1382,15 +1799,34 @@ def _run_item_writeback(
     unmatched_rows: list[dict] = []
     updated_count = 0
 
-    for mapped_row in mapped_rows:
+    raw_matches: list[dict] = []
+    for source_index, mapped_row in enumerate(mapped_rows):
         matched_by, candidates = _match_item(
             mapped_row,
             indexes,
             trust_unique_material_code=trust_unique_material_code,
         )
+        raw_matches.append(
+            {
+                "source_index": source_index,
+                "mapped_row": mapped_row,
+                "matched_by": matched_by,
+                "candidates": candidates,
+            }
+        )
+
+    if resolve_ambiguous_by_sequence:
+        _resolve_ambiguous_matches_by_sequence(raw_matches)
+
+    for match in raw_matches:
+        mapped_row = match["mapped_row"]
+        matched_by = match.get("matched_by") or ""
+        candidates = match.get("candidates") or []
         if not candidates:
             unmatched_rows.append(mapped_row)
             continue
+        if match.get("assigned_candidate"):
+            candidates = [match["assigned_candidate"]]
         if len(candidates) > 1:
             ambiguous_rows.append(
                 {
@@ -1483,6 +1919,81 @@ def _build_purchase_updates_for_preview(mapped_row: dict, _target: dict) -> dict
     }
 
 
+def _currency_group_key(value) -> str:
+    return _normalize_key(value) or "unknown"
+
+
+def _unique_join(values: list) -> str:
+    seen: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.append(text)
+    return "、".join(seen)
+
+
+def _sum_purchase_rows(rows: list[dict], fieldname: str) -> float:
+    return sum(_to_float((row.get("mapped_row") or {}).get(fieldname), default=0.0) for row in rows)
+
+
+def _select_purchase_rows_for_target(rows: list[dict]) -> tuple[list[dict], list[dict], str]:
+    if len(rows) <= 1:
+        return rows, [], "single"
+
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        mapped_row = row.get("mapped_row") or {}
+        groups[_currency_group_key(mapped_row.get("purchase_currency"))].append(row)
+
+    if len(groups) <= 1:
+        return rows, [], "same_currency"
+
+    target_quantity = _to_float(rows[0].get("target_quantity"), default=0.0)
+
+    def score(group_rows: list[dict]) -> tuple[float, float]:
+        group_quantity = _sum_purchase_rows(group_rows, "quantity")
+        group_goods_value = _sum_purchase_rows(group_rows, "goods_value")
+        quantity_delta = abs(group_quantity - target_quantity) if target_quantity else 0
+        return (quantity_delta, -group_goods_value)
+
+    selected = min(groups.values(), key=score)
+    selected_ids = {id(row) for row in selected}
+    ignored = [row for row in rows if id(row) not in selected_ids]
+    return selected, ignored, "closest_quantity_currency_group"
+
+
+def _build_aggregated_purchase_updates(rows: list[dict]) -> tuple[dict, dict]:
+    selected_rows, ignored_rows, strategy = _select_purchase_rows_for_target(rows)
+    if not selected_rows:
+        return {}, {"strategy": "empty", "selected_count": 0, "ignored_count": len(ignored_rows)}
+
+    mapped_rows = [row.get("mapped_row") or {} for row in selected_rows]
+    total_source_quantity = sum(_to_float(row.get("quantity"), default=0.0) for row in mapped_rows)
+    total_source_goods_value = sum(_to_float(row.get("goods_value"), default=0.0) for row in mapped_rows)
+    target_quantity = _to_float(selected_rows[0].get("target_quantity"), default=0.0)
+    unit_price = total_source_goods_value / total_source_quantity if total_source_goods_value and total_source_quantity else 0
+    if not unit_price:
+        unit_price = _to_float(mapped_rows[0].get("unit_price"), default=0.0)
+    goods_value = unit_price * target_quantity if unit_price and target_quantity else total_source_goods_value
+    purchase_currency = mapped_rows[0].get("purchase_currency") or ""
+
+    updates = {
+        "unit_price": unit_price,
+        "purchase_currency": purchase_currency,
+        "goods_value": goods_value,
+    }
+    meta = {
+        "strategy": strategy,
+        "selected_count": len(selected_rows),
+        "ignored_count": len(ignored_rows),
+        "selected_source_approval_no": _unique_join([row.get("source_approval_no") for row in mapped_rows]),
+        "ignored_source_approval_no": _unique_join([(row.get("mapped_row") or {}).get("source_approval_no") for row in ignored_rows]),
+        "source_quantity": total_source_quantity,
+        "target_quantity": target_quantity,
+    }
+    return updates, meta
+
+
 def _field_change_status(field_name: str, old_value, new_value, numeric_zero_fillable_fields: set[str] | None = None) -> str:
     if new_value in (None, ""):
         return "empty_source"
@@ -1541,6 +2052,7 @@ def _preview_item_writeback(
     preview_message_prefix: str = "采购支出 OA",
     fillable_message: str = "可写入匹配行的业务字段。",
     trust_unique_material_code: bool = False,
+    resolve_ambiguous_by_sequence: bool = False,
 ) -> dict:
     compact = compact_row or _compact_purchase_row
     if frappe is None:
@@ -1598,15 +2110,34 @@ def _preview_item_writeback(
     ambiguous_rows: list[dict] = []
     unmatched_rows: list[dict] = []
 
-    for mapped_row in mapped_rows:
+    raw_matches: list[dict] = []
+    for source_index, mapped_row in enumerate(mapped_rows):
         matched_by, candidates = _match_item(
             mapped_row,
             indexes,
             trust_unique_material_code=trust_unique_material_code,
         )
+        raw_matches.append(
+            {
+                "source_index": source_index,
+                "mapped_row": mapped_row,
+                "matched_by": matched_by,
+                "candidates": candidates,
+            }
+        )
+
+    if resolve_ambiguous_by_sequence:
+        _resolve_ambiguous_matches_by_sequence(raw_matches)
+
+    for match in raw_matches:
+        mapped_row = match["mapped_row"]
+        matched_by = match.get("matched_by") or ""
+        candidates = match.get("candidates") or []
         if not candidates:
             unmatched_rows.append(compact(mapped_row))
             continue
+        if match.get("assigned_candidate"):
+            candidates = [match["assigned_candidate"]]
         if len(candidates) > 1:
             ambiguous_rows.append(
                 {
@@ -1644,7 +2175,9 @@ def _preview_item_writeback(
                 "target_material_code": target.get("material_code"),
                 "target_product_name": target.get("product_name"),
                 "target_spec_model": target.get("spec_model"),
+                "target_quantity": target.get("quantity"),
                 "mapped_row": compact(mapped_row),
+                "disambiguation_strategy": match.get("disambiguation_strategy") or "",
                 "proposed_changes": proposed_changes,
                 "business_changes": business_changes,
                 "has_fillable": any(change["status"] == "fillable" for change in business_changes),
@@ -1752,11 +2285,20 @@ def preview_linked_purchase_expense_oa(
                 }
             )
 
+    preview_version_name = _resolve_version_name(batch_doc_name, version_name) if batch_doc_name else version_name
+    fx_context = _get_version_fx_context(preview_version_name)
+
+    def build_purchase_updates(mapped_row: dict, target: dict) -> dict:
+        return _convert_purchase_updates_to_rmb(
+            _build_purchase_updates_for_preview(mapped_row, target),
+            fx_context,
+        )
+
     writeback_preview = _preview_item_writeback(
         batch_name=batch_doc_name or batch_name,
         version_name=version_name,
         mapped_rows=mapped_rows,
-        update_builder=_build_purchase_updates_for_preview,
+        update_builder=build_purchase_updates,
         fillable_message="可写入匹配行的单价Precio、币种Moneda、总金额Monto Total。",
         trust_unique_material_code=True,
     )
@@ -1831,20 +2373,52 @@ def apply_linked_purchase_expense_fillable_fields(
     skipped_rows: list[dict] = []
     changed_field_count = 0
     matched_rows = writeback_preview.get("matched_rows") or []
-    target_match_counts: dict[str, int] = {}
+    fx_context = _get_version_fx_context(resolved_version_name)
+    matched_rows_by_target: dict[str, list[dict]] = defaultdict(list)
     for row in matched_rows:
         target_item_name = row.get("target_item_name")
         if target_item_name:
-            target_match_counts[target_item_name] = target_match_counts.get(target_item_name, 0) + 1
+            matched_rows_by_target[target_item_name].append(row)
 
+    processed_duplicate_targets: set[str] = set()
     for row in matched_rows:
         target_item_name = row.get("target_item_name")
         business_changes = row.get("business_changes") or []
         if not target_item_name:
             skipped_rows.append({"row": row, "reason": "缺少目标物料行"})
             continue
-        if target_match_counts.get(target_item_name, 0) > 1:
-            skipped_rows.append({"row": row, "reason": "同一系统物料匹配到多条采购明细，未自动覆盖"})
+        duplicate_group = matched_rows_by_target.get(target_item_name) or []
+        if len(duplicate_group) > 1:
+            if target_item_name in processed_duplicate_targets:
+                continue
+            processed_duplicate_targets.add(target_item_name)
+            field_updates, aggregate_meta = _build_aggregated_purchase_updates(duplicate_group)
+            field_updates = _convert_purchase_updates_to_rmb(field_updates, fx_context)
+            if not field_updates:
+                skipped_rows.append({"row": row, "reason": "同一物料多条采购明细聚合失败", "aggregate_meta": aggregate_meta})
+                continue
+            source_no = aggregate_meta.get("selected_source_approval_no") or "关联采购支出 OA"
+            changed_fields = _update_item_fields(
+                item_name=target_item_name,
+                batch_doc_name=batch_doc_name,
+                version_name=resolved_version_name,
+                row_no=row.get("target_row_no"),
+                field_updates=field_updates,
+                action_remark=f"采购支出 OA 多行聚合写入；来源审批：{source_no}；策略：{aggregate_meta.get('strategy')}",
+            )
+            if changed_fields:
+                applied_rows.append(
+                    {
+                        "target_item_name": target_item_name,
+                        "target_row_no": row.get("target_row_no"),
+                        "source_approval_no": source_no,
+                        "changed_fields": changed_fields,
+                        "aggregate_meta": aggregate_meta,
+                    }
+                )
+                changed_field_count += len(changed_fields)
+            if int(aggregate_meta.get("ignored_count") or 0) > 0:
+                skipped_rows.append({"row": row, "reason": "同一物料存在多币种采购来源，已按数量最接近的一组写入，其余组未写入", "aggregate_meta": aggregate_meta})
             continue
         field_updates = {
             change.get("field_name"): change.get("new_value")
@@ -1900,7 +2474,7 @@ def apply_linked_purchase_expense_fillable_fields(
         "skipped_rows": skipped_rows,
         "preview_result": preview_result,
         "message": (
-            f"已同步 {updated_count} 行采购字段，共 {changed_field_count} 个字段；未匹配、多匹配或同物料多条来源的行未写入。"
+            f"已同步 {updated_count} 行采购字段，共 {changed_field_count} 个字段；未匹配、多匹配或多币种保留的行未写入。"
             if updated_count
             else "没有可同步的采购字段，未写入数据。"
         ),
@@ -1938,7 +2512,7 @@ def _build_packing_preview_items(
     if not file_url:
         return [], {"parser": "empty", "source": "none"}
 
-    path = _resolve_excel_file_path(file_url)
+    path = _resolve_excel_file_path(file_url=file_url)
     parser_meta, blocks = parse_yuewei_excel_workbook(path)
     rows: list[dict] = []
     for block in blocks:
@@ -1991,6 +2565,7 @@ def preview_packing_list_attachment(
         numeric_zero_fillable_fields=set(PACKING_WRITEBACK_FIELDS),
         preview_message_prefix="装箱单/物流附件",
         fillable_message="可用于补齐空的实际发货数量、毛重或体积。",
+        resolve_ambiguous_by_sequence=True,
     )
 
     return {
@@ -2111,6 +2686,7 @@ def apply_packing_list_fillable_fields(
                 "conflict_row_count": writeback_preview.get("conflict_row_count", 0),
                 "unmatched_count": writeback_preview.get("unmatched_count", 0),
                 "ambiguous_count": writeback_preview.get("ambiguous_count", 0),
+                "parse_targets": list(PACKING_WRITEBACK_FIELDS),
             },
         )
         commit = getattr(getattr(frappe, "db", None), "commit", None)
@@ -2139,6 +2715,337 @@ def apply_packing_list_fillable_fields(
             f"已补入 {updated_count} 行装箱单字段，共 {changed_field_count} 个字段；冲突、未匹配和多匹配行未写入。"
             if updated_count
             else "没有可安全补入的装箱单字段，未写入数据。"
+        ),
+    }
+
+
+def _attachment_ext_from_row(row: dict) -> str:
+    parse_result = _json_loads_dict(row.get("parse_result_json"))
+    explicit = str(parse_result.get("file_ext") or "").strip().lower().lstrip(".")
+    if explicit:
+        return explicit
+    for fieldname in ("file_url", "file_name"):
+        value = str(row.get(fieldname) or "").strip()
+        if value:
+            suffix = Path(value.split("?", 1)[0]).suffix.lower().lstrip(".")
+            if suffix:
+                return suffix
+    return ""
+
+
+def _attachment_parse_targets_from_row(row: dict) -> list[str]:
+    mapped_result = _json_loads_dict(row.get("mapped_result_json"))
+    targets = mapped_result.get("parse_targets") or []
+    return [str(target) for target in targets if target]
+
+
+def _is_excel_packing_attachment(row: dict) -> bool:
+    extension = _attachment_ext_from_row(row)
+    if extension not in {"xlsx", "xlsm"}:
+        return False
+    targets = _attachment_parse_targets_from_row(row)
+    return row.get("attachment_type") == "Packing List" or "actual_shipped_qty" in targets
+
+
+def _query_oa_attachment_rows(batch_name: str | None = None, limit: int | None = 200) -> tuple[str, list[dict]]:
+    resolved_batch_name = _resolve_batch_name(batch_name) if batch_name else ""
+    filters = {"source_type": "OA"}
+    if batch_name:
+        if not resolved_batch_name:
+            return "", []
+        filters["batch"] = resolved_batch_name
+
+    rows = frappe.get_all(
+        "Overseas Cost Attachment",
+        filters=filters,
+        fields=[
+            "name",
+            "batch",
+            "version",
+            "source_type",
+            "attachment_type",
+            "source_doc_no",
+            "file_name",
+            "file_url",
+            "parse_status",
+            "parse_result_json",
+            "mapped_result_json",
+        ],
+        order_by="creation asc",
+        limit_page_length=max(1, min(int(limit or 200), 1000)),
+    )
+    return resolved_batch_name, rows
+
+
+def _compact_download_result(result: dict) -> dict:
+    return {
+        "ok": result.get("ok"),
+        "downloaded": result.get("downloaded"),
+        "file_url": result.get("file_url") or "",
+        "message": result.get("message") or "",
+    }
+
+
+def _compact_packing_apply_result(result: dict) -> dict:
+    return {
+        "ok": result.get("ok"),
+        "updated_count": result.get("updated_count", 0),
+        "changed_field_count": result.get("changed_field_count", 0),
+        "skipped_count": result.get("skipped_count", 0),
+        "conflict_row_count": result.get("conflict_row_count", 0),
+        "unmatched_count": result.get("unmatched_count", 0),
+        "ambiguous_count": result.get("ambiguous_count", 0),
+        "attachment_marked_parsed": result.get("attachment_marked_parsed", False),
+        "message": result.get("message") or "",
+    }
+
+
+def _extract_dingtalk_permission_scopes(message: str | None) -> list[str]:
+    text = str(message or "")
+    scopes: list[str] = []
+    for match in re.finditer(r"Workflow\.[A-Za-z.]+", text):
+        scope = match.group(0)
+        if scope not in scopes:
+            scopes.append(scope)
+    return scopes
+
+
+def _is_dingtalk_permission_error(message: str | None) -> bool:
+    text = str(message or "")
+    return (
+        "AccessTokenPermissionDenied" in text
+        or "requiredScopes" in text
+        or "未开通所需的权限" in text
+    )
+
+
+def _build_oa_packing_parse_message(
+    *,
+    scanned_count: int,
+    downloaded_count: int,
+    parsed_count: int,
+    updated_count: int,
+    changed_field_count: int,
+    skipped_count: int,
+    failed_count: int,
+    permission_blocked_count: int,
+    permission_scopes: list[str],
+) -> str:
+    base = (
+        f"已扫描 {scanned_count} 个 OA 发起附件，下载 {downloaded_count} 个 Excel 装箱单，"
+        f"解析 {parsed_count} 个，写入 {updated_count} 行、{changed_field_count} 个字段；"
+        f"跳过 {skipped_count} 个，失败 {failed_count} 个。"
+    )
+    if permission_blocked_count:
+        scope_text = "、".join(permission_scopes) or "钉钉审批附件下载"
+        return f"{base} 其中 {permission_blocked_count} 个 Excel 装箱单因钉钉应用缺少 {scope_text} 权限，暂时无法下载解析。"
+    return base
+
+
+def _recalculate_batches_after_attachment_parse(batch_versions: dict[str, str]) -> list[dict]:
+    if not batch_versions:
+        return []
+
+    results: list[dict] = []
+    try:
+        from overseas_costing.services.calculate_service import recalculate_batch
+    except Exception as exc:
+        return [{"ok": False, "message": f"成本重算服务不可用：{exc}"}]
+
+    for batch_doc_name, version_name in batch_versions.items():
+        try:
+            result = recalculate_batch(batch_name=batch_doc_name, version_name=version_name or None)
+            results.append(
+                {
+                    "ok": result.get("ok", True) if isinstance(result, dict) else True,
+                    "batch_name": batch_doc_name,
+                    "version_name": version_name,
+                    "message": result.get("message") if isinstance(result, dict) else "",
+                }
+            )
+        except Exception as exc:
+            results.append(
+                {
+                    "ok": False,
+                    "batch_name": batch_doc_name,
+                    "version_name": version_name,
+                    "message": str(exc),
+                }
+            )
+    return results
+
+
+def parse_oa_packing_list_attachments(
+    *,
+    batch_name: str | None = None,
+    limit: int | None = 200,
+    env_file: str | None = None,
+    access_token: str | None = None,
+    skip_parsed: bool = True,
+    recalculate: bool = True,
+) -> dict:
+    """批量下载并解析钉钉发起附件里的 Excel 装箱单，写入可补字段。"""
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，不能批量解析钉钉附件。",
+        }
+
+    resolved_batch_name, rows = _query_oa_attachment_rows(batch_name=batch_name, limit=limit)
+    if batch_name and not resolved_batch_name:
+        return {
+            "ok": False,
+            "batch_name": batch_name,
+            "message": f"未找到批次：{batch_name}",
+            "items": [],
+        }
+
+    processed_items: list[dict] = []
+    parsed_batch_versions: dict[str, str] = {}
+    downloaded_count = 0
+    parsed_count = 0
+    updated_count = 0
+    changed_field_count = 0
+    skipped_count = 0
+    failed_count = 0
+    permission_blocked_count = 0
+    permission_scopes: list[str] = []
+    permission_blocked = False
+
+    for row in rows:
+        item = {
+            "attachment_name": row.get("name"),
+            "batch_name": row.get("batch"),
+            "version_name": row.get("version"),
+            "file_name": row.get("file_name") or "",
+            "attachment_type": row.get("attachment_type") or "Other",
+            "parse_status": row.get("parse_status") or "",
+            "file_ext": _attachment_ext_from_row(row),
+        }
+        if skip_parsed and str(row.get("parse_status") or "").strip().lower() == "parsed":
+            item["action"] = "skipped"
+            item["reason"] = "附件已解析"
+            skipped_count += 1
+            processed_items.append(item)
+            continue
+
+        if not _is_excel_packing_attachment(row):
+            item["action"] = "skipped"
+            item["reason"] = "当前批处理只解析 Excel 装箱单；PDF、PO、合同和其他资料等待对应解析器。"
+            skipped_count += 1
+            processed_items.append(item)
+            continue
+
+        file_url = str(row.get("file_url") or "").strip()
+        if not file_url and permission_blocked:
+            item["action"] = "blocked"
+            item["error_type"] = "dingtalk_permission"
+            item["permission_scopes"] = permission_scopes
+            item["reason"] = (
+                f"本次批处理已确认钉钉应用缺少 {'、'.join(permission_scopes) or '审批附件下载'} 权限，"
+                "该 Excel 装箱单暂不重复请求下载。"
+            )
+            permission_blocked_count += 1
+            skipped_count += 1
+            processed_items.append(item)
+            continue
+
+        if not file_url:
+            download_result = download_oa_form_attachment(
+                row.get("name"),
+                env_file=env_file,
+                access_token=access_token,
+            )
+            item["download"] = _compact_download_result(download_result)
+            if not download_result.get("ok"):
+                item["action"] = "failed"
+                item["reason"] = download_result.get("message") or "附件下载失败"
+                if _is_dingtalk_permission_error(item["reason"]):
+                    item["error_type"] = "dingtalk_permission"
+                    scopes = _extract_dingtalk_permission_scopes(item["reason"])
+                    item["permission_scopes"] = scopes
+                    permission_blocked = True
+                    permission_blocked_count += 1
+                    for scope in scopes:
+                        if scope not in permission_scopes:
+                            permission_scopes.append(scope)
+                failed_count += 1
+                processed_items.append(item)
+                continue
+            if download_result.get("downloaded"):
+                downloaded_count += 1
+            file_url = download_result.get("file_url") or file_url
+
+        if not file_url:
+            item["action"] = "failed"
+            item["reason"] = "附件没有系统文件地址，无法解析。"
+            failed_count += 1
+            processed_items.append(item)
+            continue
+
+        try:
+            parse_result = apply_packing_list_fillable_fields(
+                batch_name=row.get("batch"),
+                version_name=row.get("version"),
+                attachment_name=row.get("name"),
+                file_url=file_url,
+            )
+        except Exception as exc:
+            item["action"] = "failed"
+            item["reason"] = f"装箱单解析失败：{exc}"
+            failed_count += 1
+            processed_items.append(item)
+            continue
+
+        item["parse"] = _compact_packing_apply_result(parse_result)
+        if not parse_result.get("ok"):
+            item["action"] = "failed"
+            item["reason"] = parse_result.get("message") or "装箱单解析失败"
+            failed_count += 1
+            processed_items.append(item)
+            continue
+
+        item["action"] = "parsed"
+        parsed_count += 1
+        row_updated_count = int(parse_result.get("updated_count") or 0)
+        row_changed_field_count = int(parse_result.get("changed_field_count") or 0)
+        updated_count += row_updated_count
+        changed_field_count += row_changed_field_count
+        if row_updated_count:
+            parsed_batch_versions[parse_result.get("batch_doc_name") or row.get("batch")] = (
+                parse_result.get("version_name") or row.get("version") or ""
+            )
+        processed_items.append(item)
+
+    recalculate_results = _recalculate_batches_after_attachment_parse(parsed_batch_versions) if recalculate else []
+
+    return {
+        "ok": failed_count == 0,
+        "batch_name": batch_name or "",
+        "resolved_batch_name": resolved_batch_name,
+        "scanned_count": len(rows),
+        "downloaded_count": downloaded_count,
+        "parsed_count": parsed_count,
+        "updated_count": updated_count,
+        "changed_field_count": changed_field_count,
+        "skipped_count": skipped_count,
+        "failed_count": failed_count,
+        "permission_blocked_count": permission_blocked_count,
+        "permission_scopes": permission_scopes,
+        "recalculate_results": recalculate_results,
+        "items": processed_items,
+        "message": _build_oa_packing_parse_message(
+            scanned_count=len(rows),
+            downloaded_count=downloaded_count,
+            parsed_count=parsed_count,
+            updated_count=updated_count,
+            changed_field_count=changed_field_count,
+            skipped_count=skipped_count,
+            failed_count=failed_count,
+            permission_blocked_count=permission_blocked_count,
+            permission_scopes=permission_scopes,
         ),
     }
 
@@ -2277,6 +3184,7 @@ def parse_packing_list_attachment(
         mapped_rows=preview_items,
         update_builder=build_packing_updates,
         action_remark="装箱单附件解析回填实际发货与物理属性字段",
+        resolve_ambiguous_by_sequence=True,
     )
 
     return {
