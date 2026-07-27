@@ -113,6 +113,8 @@ def parse_yuewei_excel_workbook(file_path: str | Path, sheet_name: str | None = 
             worksheet = workbook[selected_sheet_name]
             if parser_name == "oa_attachment_detail":
                 blocks = parse_oa_attachment_detail_sheet(worksheet, source_sheet=selected_sheet_name)
+            elif parser_name == "sisa_warehouse_receipt":
+                blocks = parse_sisa_warehouse_receipt_sheet(worksheet, source_sheet=selected_sheet_name)
             else:
                 blocks = parse_yuewei_sheet(worksheet, source_sheet=selected_sheet_name)
         meta = {
@@ -140,9 +142,10 @@ def _select_sheet(workbook, sheet_name: str | None) -> tuple[str, str, str]:
         parser_name = _detect_sheet_parser(workbook[requested_sheet])
         return requested_sheet, parser_name, ""
 
+    detected_parsers = {"oa_attachment_detail", "sisa_warehouse_receipt"}
     for candidate in available_sheets:
         parser_name = _detect_sheet_parser(workbook[candidate])
-        if parser_name == "oa_attachment_detail":
+        if parser_name in detected_parsers:
             warning = ""
             if requested_sheet:
                 warning = f"未找到工作表“{requested_sheet}”，已自动识别并使用“{candidate}”。"
@@ -161,6 +164,8 @@ def _select_sheet(workbook, sheet_name: str | None) -> tuple[str, str, str]:
 
 
 def _detect_sheet_parser(worksheet) -> str:
+    if _find_sisa_warehouse_receipt_header(worksheet):
+        return "sisa_warehouse_receipt"
     return "oa_attachment_detail" if _find_oa_attachment_header(worksheet) else "yuewei_cost_workbook"
 
 
@@ -219,6 +224,7 @@ def parse_oa_attachment_detail_sheet(worksheet, source_sheet: str | None = None)
 
     blocks = []
     for group_key, rows in grouped_rows.items():
+        rows = _normalize_attachment_price_rows(rows)
         row_numbers = row_ranges[group_key]
         first = rows[0]
         block = {
@@ -237,6 +243,77 @@ def parse_oa_attachment_detail_sheet(worksheet, source_sheet: str | None = None)
         blocks.append(block)
 
     return blocks
+
+
+SISA_WAREHOUSE_HEADER_ALIASES = {
+    "image": ("产品图片", "图片"),
+    "box_no": ("箱号",),
+    "box_count": ("箱数",),
+    "material_code": ("型号", "物料编码", "品目编码", "sku", "itemcode"),
+    "product_name": ("品名", "物料名称", "产品名称"),
+    "declaration_unit_price_usd": ("报关单价",),
+    "qty_per_box": ("单箱产品数", "每箱数量"),
+    "quantity": ("总产品数", "总个数", "总数量", "数量"),
+    "length_cm": ("长cm", "长"),
+    "width_cm": ("宽cm", "宽"),
+    "height_cm": ("高cm", "高"),
+    "volume_per_box_m3": ("体积箱cmb", "体积箱cbm", "体积箱", "体积每箱"),
+    "volume_m3": ("总体积cmb", "总体积cbm", "总体积", "体积"),
+    "gross_weight_each_kg": ("毛重箱kg", "毛重每箱kg", "毛重箱", "毛重每箱"),
+    "gross_weight_kg": ("总毛重kg", "总毛重", "毛重"),
+    "source_remark": ("备注",),
+}
+
+
+def parse_sisa_warehouse_receipt_sheet(worksheet, source_sheet: str | None = None) -> list[dict]:
+    """解析 SiSA 墨西哥专线进仓单中的“产品清单+派件信息”模板。"""
+
+    source_sheet = source_sheet or worksheet.title
+    header_row, header_map = _find_sisa_warehouse_receipt_header(worksheet) or (0, {})
+    if not header_row:
+        return []
+
+    rows: list[dict] = []
+    current_box_no = ""
+    current_box_count = None
+    for row_no in range(header_row + 1, worksheet.max_row + 1):
+        row = _read_sisa_warehouse_receipt_row(
+            worksheet,
+            row_no=row_no,
+            header_map=header_map,
+            current_box_no=current_box_no,
+            current_box_count=current_box_count,
+        )
+        if row.get("_stop"):
+            break
+        if not row:
+            continue
+        row_box_no = str(row.get("_box_no") or "")
+        if row_box_no and not row_box_no.startswith("未标箱号"):
+            current_box_no = row_box_no
+        if row.get("piece_count") not in (None, ""):
+            current_box_count = row.get("piece_count")
+        rows.append(row)
+
+    rows = _allocate_sisa_warehouse_physical_fields(rows)
+    if not rows:
+        return []
+
+    row_numbers = [int(row["excel_row_no"]) for row in rows if row.get("excel_row_no")]
+    block_id = _find_sisa_warehouse_batch_id(worksheet, source_sheet)
+    block = {
+        "id": block_id,
+        "batchNo": block_id,
+        "sourceSheet": source_sheet,
+        "sourceRange": f"{source_sheet}!{min(row_numbers)}:{max(row_numbers)}" if row_numbers else source_sheet,
+        "sourceTemplate": "sisa_warehouse_receipt",
+        "sourceType": "PACKING_LIST",
+        "sourceDocNo": block_id,
+        "transportMode": "海运",
+        "remark": "SiSA墨西哥专线进仓单产品清单",
+        "items": [_build_attachment_item(row, source_sheet) for row in rows],
+    }
+    return [block]
 
 
 def _looks_like_ci_pl_workbook(workbook) -> bool:
@@ -410,6 +487,217 @@ def _find_header_row(
         if all(field in field_map for field in required_aliases):
             return row_no, field_map
     return 0, {}
+
+
+def _find_sisa_warehouse_receipt_header(worksheet) -> tuple[int, dict[str, int]] | None:
+    for row_no in range(1, min(worksheet.max_row, 40) + 1):
+        normalized_headers = {
+            col_no: _normalize_header(worksheet.cell(row_no, col_no).value)
+            for col_no in range(1, worksheet.max_column + 1)
+        }
+        field_map = _build_sisa_warehouse_header_map(normalized_headers)
+        if _looks_like_sisa_warehouse_header(worksheet, row_no, field_map):
+            return row_no, field_map
+    return None
+
+
+def _build_sisa_warehouse_header_map(normalized_headers: dict[int, str]) -> dict[str, int]:
+    field_map: dict[str, int] = {}
+    for fieldname, aliases in SISA_WAREHOUSE_HEADER_ALIASES.items():
+        for col_no, header in normalized_headers.items():
+            if not header:
+                continue
+            if any(_normalize_header(alias) in header for alias in aliases):
+                field_map[fieldname] = col_no
+                break
+    return field_map
+
+
+def _looks_like_sisa_warehouse_header(worksheet, row_no: int, field_map: dict[str, int]) -> bool:
+    required = {"box_no", "box_count", "material_code", "product_name", "quantity"}
+    if not required.issubset(field_map):
+        return False
+
+    context_values = [worksheet.title]
+    for context_row in range(max(1, row_no - 8), row_no + 1):
+        for col_no in range(1, min(worksheet.max_column, 8) + 1):
+            value = worksheet.cell(context_row, col_no).value
+            if value not in (None, ""):
+                context_values.append(str(value))
+    context_text = " ".join(context_values)
+    return any(keyword in context_text for keyword in ("产品清单", "派件信息", "进仓单", "墨西哥专线", "混装模板"))
+
+
+def _read_sisa_warehouse_receipt_row(
+    worksheet,
+    *,
+    row_no: int,
+    header_map: dict[str, int],
+    current_box_no: str,
+    current_box_count,
+) -> dict:
+    values = [_normalize_cell_value(worksheet.cell(row_no, col_no).value) for col_no in range(1, worksheet.max_column + 1)]
+    row_text = " ".join(str(value) for value in values if value not in (None, ""))
+    if not row_text:
+        return {}
+    if _normalize_header(values[0]).startswith("total") or "合计" in row_text:
+        return {"_stop": True}
+
+    raw_model = _sisa_value(worksheet, row_no, header_map, "material_code")
+    raw_product_name = _sisa_value(worksheet, row_no, header_map, "product_name")
+    model_is_code = _looks_like_sisa_material_code(raw_model)
+    material_code = str(raw_model).strip() if model_is_code else None
+    product_name = str(raw_product_name).strip() if raw_product_name not in (None, "") else None
+    spec_model = None
+    if not model_is_code and raw_model not in (None, ""):
+        model_text = str(raw_model).strip()
+        if product_name:
+            spec_model = model_text
+        else:
+            product_name = model_text
+    if not product_name:
+        return {}
+
+    box_no = _sisa_value(worksheet, row_no, header_map, "box_no") or current_box_no
+    box_count = _positive_number(_sisa_value(worksheet, row_no, header_map, "box_count"))
+    if box_count is None and current_box_count not in (None, ""):
+        box_count = _positive_number(current_box_count)
+    box_count = box_count or 1
+
+    qty_per_box = _positive_number(_sisa_value(worksheet, row_no, header_map, "qty_per_box"))
+    quantity = _positive_number(_sisa_value(worksheet, row_no, header_map, "quantity"))
+    if quantity is None and qty_per_box is not None:
+        quantity = qty_per_box * box_count
+
+    volume_m3 = _positive_number(_sisa_value(worksheet, row_no, header_map, "volume_m3"))
+    if volume_m3 is None:
+        volume_per_box = _positive_number(_sisa_value(worksheet, row_no, header_map, "volume_per_box_m3"))
+        if volume_per_box is not None:
+            volume_m3 = volume_per_box * box_count
+    if volume_m3 is None:
+        volume_m3 = _calculate_sisa_volume_m3(worksheet, row_no, header_map, box_count)
+
+    gross_weight_kg = _positive_number(_sisa_value(worksheet, row_no, header_map, "gross_weight_kg"))
+    if gross_weight_kg is None:
+        gross_weight_each = _positive_number(_sisa_value(worksheet, row_no, header_map, "gross_weight_each_kg"))
+        if gross_weight_each is not None:
+            gross_weight_kg = gross_weight_each * box_count
+
+    declaration_unit_price = _positive_number(_sisa_value(worksheet, row_no, header_map, "declaration_unit_price_usd"))
+    source_remark = _join_remark(
+        _sisa_value(worksheet, row_no, header_map, "source_remark"),
+        f"箱号：{box_no}" if box_no else None,
+        f"箱数：{_format_number(box_count)}" if box_count else None,
+        f"报关单价USD：{_format_number(declaration_unit_price)}" if declaration_unit_price is not None else None,
+    )
+
+    return {
+        "excel_row_no": row_no,
+        "material_code": material_code,
+        "product_name": product_name,
+        "spec_model": spec_model,
+        "quantity": quantity,
+        "qty_per_piece": qty_per_box,
+        "piece_count": box_count,
+        "gross_weight_kg": gross_weight_kg,
+        "volume_m3": volume_m3,
+        "transport_mode": "海运",
+        "packing": f"{_format_number(box_count)}箱" if box_count else None,
+        "source_remark": source_remark,
+        "_box_no": box_no or f"未标箱号-{row_no}",
+        "_box_total_quantity": quantity,
+        "_box_gross_weight_kg": gross_weight_kg,
+        "_box_volume_m3": volume_m3,
+    }
+
+
+def _sisa_value(worksheet, row_no: int, header_map: dict[str, int], fieldname: str):
+    col_no = header_map.get(fieldname)
+    if not col_no:
+        return None
+    value, _merged_range = _attachment_cell_value(worksheet, row_no, col_no)
+    return _normalize_cell_value(value)
+
+
+def _looks_like_sisa_material_code(value) -> bool:
+    if value in (None, ""):
+        return False
+    text = str(value).strip()
+    if not text or text.startswith("="):
+        return False
+    normalized = _normalize_header(text)
+    if normalized in {"total", "合计", "总计"}:
+        return False
+    if len(text) > 32:
+        return False
+    if any(char.isspace() for char in text):
+        return False
+    if any(ord(char) > 127 for char in text):
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", text):
+        return False
+    code_with_digits = re.fullmatch(r"[A-Za-z]{1,8}\d{2,}[A-Za-z0-9._/-]*", text)
+    uppercase_token = re.fullmatch(r"[A-Z0-9._/-]{2,32}", text) and any("A" <= char <= "Z" for char in text)
+    return bool(code_with_digits or uppercase_token)
+
+
+def _calculate_sisa_volume_m3(worksheet, row_no: int, header_map: dict[str, int], box_count: float) -> float | None:
+    length = _positive_number(_sisa_value(worksheet, row_no, header_map, "length_cm"))
+    width = _positive_number(_sisa_value(worksheet, row_no, header_map, "width_cm"))
+    height = _positive_number(_sisa_value(worksheet, row_no, header_map, "height_cm"))
+    if length is None or width is None or height is None:
+        return None
+    return length * width * height / 1_000_000 * (box_count or 1)
+
+
+def _allocate_sisa_warehouse_physical_fields(rows: list[dict]) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get("_box_no") or row.get("excel_row_no")), []).append(row)
+
+    for group_rows in grouped.values():
+        if len(group_rows) <= 1:
+            continue
+
+        total_quantity = sum(_positive_number(row.get("quantity")) or 0 for row in group_rows)
+        group_weight = next((_positive_number(row.get("_box_gross_weight_kg")) for row in group_rows if _positive_number(row.get("_box_gross_weight_kg"))), None)
+        group_volume = next((_positive_number(row.get("_box_volume_m3")) for row in group_rows if _positive_number(row.get("_box_volume_m3"))), None)
+        if not total_quantity:
+            continue
+
+        for row in group_rows:
+            quantity = _positive_number(row.get("quantity")) or 0
+            ratio = quantity / total_quantity if total_quantity else 0
+            if group_weight is not None:
+                row["gross_weight_kg"] = group_weight * ratio
+            if group_volume is not None:
+                row["volume_m3"] = group_volume * ratio
+            if group_weight is not None or group_volume is not None:
+                row["source_remark"] = _join_remark(row.get("source_remark"), "同箱重量/体积按产品数量占比分摊")
+
+    return [{key: value for key, value in row.items() if not key.startswith("_")} for row in rows]
+
+
+def _format_number(value) -> str:
+    if value is None:
+        return ""
+    number = _positive_number(value)
+    if number is None:
+        return str(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.6f}".rstrip("0").rstrip(".")
+
+
+def _find_sisa_warehouse_batch_id(worksheet, source_sheet: str) -> str:
+    for row_no in range(1, min(worksheet.max_row, 8) + 1):
+        for col_no in range(1, min(worksheet.max_column, 8) + 1):
+            header = _normalize_header(worksheet.cell(row_no, col_no).value)
+            if header in {"货件号", "客户号"}:
+                value = _normalize_cell_value(worksheet.cell(row_no + 1, col_no).value)
+                if value not in (None, ""):
+                    return str(value).strip()
+    return source_sheet
 
 
 def _value_by_header(worksheet, row_no: int, header_map: dict[str, int], fieldname: str):
@@ -642,10 +930,140 @@ def _normalize_header(value) -> str:
 def _read_attachment_row(worksheet, row_no: int, header_map: dict[str, int]) -> dict:
     row = {"excel_row_no": row_no}
     for fieldname, col_no in header_map.items():
-        row[fieldname] = _normalize_cell_value(worksheet.cell(row_no, col_no).value)
+        value, merged_range = _attachment_cell_value(worksheet, row_no, col_no)
+        row[fieldname] = _normalize_cell_value(value)
+        if merged_range and fieldname in {"unit_price", "goods_value"}:
+            row[f"_{fieldname}_merge_range"] = merged_range
     export_mode = row.get("export_mode")
     row["transport_mode"] = _attachment_transport_mode(export_mode, worksheet.title)
     return row
+
+
+def _attachment_cell_value(worksheet, row_no: int, col_no: int) -> tuple[Any, str]:
+    value = worksheet.cell(row_no, col_no).value
+    for merged_range in worksheet.merged_cells.ranges:
+        if merged_range.min_row <= row_no <= merged_range.max_row and merged_range.min_col <= col_no <= merged_range.max_col:
+            top_value = worksheet.cell(merged_range.min_row, merged_range.min_col).value
+            return (top_value if top_value not in (None, "") else value), str(merged_range)
+    return value, ""
+
+
+def _positive_number(value) -> float | None:
+    number = _to_number(value)
+    return number if number > 0 else None
+
+
+def _almost_same_amount(left: float, right: float) -> bool:
+    return abs(left - right) <= max(0.01, abs(right) * 0.000001)
+
+
+def _attachment_price_group_key(row: dict) -> tuple[str, str]:
+    return (
+        _normalize_header(row.get("material_code")),
+        _normalize_header(row.get("spec_model") or row.get("product_name") or row.get("import_name")),
+    )
+
+
+def _set_attachment_row_price(row: dict, unit_price: float, *, force_goods_value: bool = False) -> None:
+    quantity = _positive_number(row.get("quantity") or row.get("qty_per_piece"))
+    if not _positive_number(row.get("unit_price")):
+        row["unit_price"] = unit_price
+    if quantity and (force_goods_value or not _positive_number(row.get("goods_value"))):
+        row["goods_value"] = unit_price * quantity
+
+
+def _normalize_attachment_merged_price_ranges(rows: list[dict]) -> None:
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        merge_key = row.get("_unit_price_merge_range") or row.get("_goods_value_merge_range")
+        if merge_key:
+            groups.setdefault(str(merge_key), []).append(row)
+
+    for group_rows in groups.values():
+        if len(group_rows) <= 1:
+            continue
+
+        merged_goods_values = [_positive_number(row.get("goods_value")) for row in group_rows]
+        merged_goods_values = [value for value in merged_goods_values if value is not None]
+        merged_unit_prices = [_positive_number(row.get("unit_price")) for row in group_rows]
+        merged_unit_prices = [value for value in merged_unit_prices if value is not None]
+        merged_goods_value = merged_goods_values[0] if merged_goods_values else None
+        merged_unit_price = merged_unit_prices[0] if merged_unit_prices else None
+        total_quantity = sum(_positive_number(row.get("quantity") or row.get("qty_per_piece")) or 0 for row in group_rows)
+
+        if merged_unit_price:
+            for row in group_rows:
+                _set_attachment_row_price(row, merged_unit_price, force_goods_value=True)
+                if _positive_number(row.get("unit_price")) or _positive_number(row.get("goods_value")):
+                    row["purchase_currency"] = row.get("purchase_currency") or "人民币RMB"
+                    if row.get("_goods_value_merge_range"):
+                        row["source_remark"] = _join_remark(
+                            row.get("source_remark"),
+                            f"合并单价按本行数量重算：源单价 {merged_unit_price}",
+                        )
+            continue
+
+        if merged_goods_value and total_quantity:
+            allocated_unit_price = merged_goods_value / total_quantity
+            for row in group_rows:
+                quantity = _positive_number(row.get("quantity") or row.get("qty_per_piece"))
+                if not quantity:
+                    continue
+                row["unit_price"] = allocated_unit_price
+                row["goods_value"] = allocated_unit_price * quantity
+                row["purchase_currency"] = row.get("purchase_currency") or "人民币RMB"
+                row["source_remark"] = _join_remark(
+                    row.get("source_remark"),
+                    f"合并价格按数量拆分：源单价 {merged_unit_price or ''}，源总价 {merged_goods_value}",
+                )
+            continue
+
+
+def _normalize_attachment_price_rows(rows: list[dict]) -> list[dict]:
+    """把附件里按同物料汇总填写的单价/总价拆回每一行。"""
+
+    normalized_rows = [dict(row) for row in rows]
+    _normalize_attachment_merged_price_ranges(normalized_rows)
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for row in normalized_rows:
+        key = _attachment_price_group_key(row)
+        if not key[0]:
+            continue
+        groups.setdefault(key, []).append(row)
+
+    for group_rows in groups.values():
+        for row in group_rows:
+            unit_price = _positive_number(row.get("unit_price"))
+            goods_value = _positive_number(row.get("goods_value"))
+            quantity = _positive_number(row.get("quantity") or row.get("qty_per_piece"))
+            if not unit_price and goods_value and quantity:
+                row["unit_price"] = goods_value / quantity
+
+        unit_prices = [_positive_number(row.get("unit_price")) for row in group_rows]
+        unit_prices = [price for price in unit_prices if price is not None]
+        if not unit_prices:
+            continue
+
+        first_price = unit_prices[0]
+        if any(not _almost_same_amount(price, first_price) for price in unit_prices[1:]):
+            continue
+
+        total_quantity = sum(_positive_number(row.get("quantity") or row.get("qty_per_piece")) or 0 for row in group_rows)
+        goods_values = [_positive_number(row.get("goods_value")) for row in group_rows]
+        goods_values = [value for value in goods_values if value is not None]
+        split_group_total = (
+            len(group_rows) > 1
+            and len(goods_values) == 1
+            and total_quantity > 0
+            and _almost_same_amount(goods_values[0], first_price * total_quantity)
+        )
+
+        for row in group_rows:
+            _set_attachment_row_price(row, first_price, force_goods_value=split_group_total)
+            if _positive_number(row.get("unit_price")) or _positive_number(row.get("goods_value")):
+                row["purchase_currency"] = row.get("purchase_currency") or "人民币RMB"
+
+    return normalized_rows
 
 
 def _is_attachment_data_row(row: dict) -> bool:
@@ -702,7 +1120,7 @@ def _build_attachment_item(row: dict, source_sheet: str) -> list:
         "chargeableWeightKg": row.get("chargeable_weight_kg"),
         "projectCollection": row.get("project_collection"),
         "transportMode": row.get("transport_mode"),
-        "purchaseCurrency": "RMB",
+        "purchaseCurrency": row.get("purchase_currency"),
         "sourceRemark": source_remark,
         "supplier": row.get("supplier"),
         "packing": row.get("packing"),

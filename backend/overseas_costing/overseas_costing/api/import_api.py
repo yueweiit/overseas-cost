@@ -166,6 +166,72 @@ def download_oa_form_attachment(
 
 
 @frappe.whitelist()
+def diagnose_oa_form_attachment_download(
+    attachment_name: str,
+    env_file: str | None = None,
+    access_token: str | None = None,
+) -> dict:
+    """诊断钉钉发起表单附件自动下载链路，不保存文件。"""
+
+    return import_service.diagnose_oa_form_attachment_download(
+        attachment_name=attachment_name,
+        env_file=env_file,
+        access_token=access_token,
+    )
+
+
+@frappe.whitelist()
+def preview_oa_source_attachment(attachment_name: str) -> dict:
+    """识别已下载的 OA 附件内容，返回资料类型和字段候选，不写入核算明细。"""
+
+    return import_service.preview_oa_source_attachment(attachment_name=attachment_name)
+
+
+@frappe.whitelist()
+def confirm_oa_source_attachment_type(
+    attachment_name: str,
+    confirmed_type: str,
+    remark: str | None = None,
+) -> dict:
+    """保存人工确认的 OA 附件资料类型，不写入单价、货值或费用。"""
+
+    return import_service.confirm_oa_source_attachment_type(
+        attachment_name=attachment_name,
+        confirmed_type=confirmed_type,
+        remark=remark,
+    )
+
+
+@frappe.whitelist()
+def preview_oa_purchase_order_match(
+    attachment_name: str,
+    version_name: str | None = None,
+) -> dict:
+    """预览采购订单附件与当前批次物料的匹配结果，不写入数据。"""
+
+    return import_service.preview_oa_purchase_order_match(
+        attachment_name=attachment_name,
+        version_name=version_name,
+    )
+
+
+@frappe.whitelist()
+def apply_oa_purchase_order_fillable_fields(
+    attachment_name: str,
+    version_name: str | None = None,
+    recalculate_after_writeback=1,
+) -> dict:
+    """确认补入采购订单附件中匹配且为空的采购字段。"""
+
+    recalculate_flag = str(recalculate_after_writeback or "").strip().lower() in ("1", "true", "yes", "y")
+    return import_service.apply_oa_purchase_order_fillable_fields(
+        attachment_name=attachment_name,
+        version_name=version_name,
+        recalculate_after_writeback=recalculate_flag,
+    )
+
+
+@frappe.whitelist()
 def preview_tax_certificate_pdf(
     source_name: str | None = None,
     file_path: str | None = None,
@@ -284,15 +350,35 @@ def apply_linked_purchase_expense_fillable_fields(
     env_file: str | None = None,
     linked_purchase_json: str | None = None,
     purchase_summaries_json: str | None = None,
+    recalculate_after_writeback=1,
 ) -> dict:
     """确认补入当前批次关联采购支出 OA 中可安全写入的采购字段。"""
 
+    recalculate_flag = str(recalculate_after_writeback or "").strip().lower() in ("1", "true", "yes", "y")
     return import_service.apply_linked_purchase_expense_fillable_fields(
         batch_name=batch_name,
         version_name=version_name,
         env_file=env_file,
         linked_purchase_json=linked_purchase_json,
         purchase_summaries_json=purchase_summaries_json,
+        recalculate_after_writeback=recalculate_flag,
+    )
+
+
+@frappe.whitelist()
+def confirm_logistics_quote_candidate(
+    batch_name: str,
+    candidate_index: int,
+    version_name: str | None = None,
+    confirmation_note: str | None = None,
+) -> dict:
+    """人工确认一条物流报价候选后，生成对应的整票物流费用分摊规则。"""
+
+    return import_service.confirm_logistics_quote_candidate(
+        batch_name=batch_name,
+        candidate_index=candidate_index,
+        version_name=version_name,
+        confirmation_note=confirmation_note,
     )
 
 
@@ -325,9 +411,11 @@ def apply_packing_list_fillable_fields(
     version_name: str | None = None,
     template_hint: str | None = None,
     sheet_rows_json: str | None = None,
+    recalculate_after_writeback=1,
 ) -> dict:
     """确认补入装箱单/物流附件中可安全写入的实际发货、重量、体积字段。"""
 
+    recalculate_flag = str(recalculate_after_writeback or "").strip().lower() in ("1", "true", "yes", "y")
     return import_service.apply_packing_list_fillable_fields(
         batch_name=batch_name,
         attachment_name=attachment_name,
@@ -335,6 +423,35 @@ def apply_packing_list_fillable_fields(
         version_name=version_name,
         template_hint=template_hint,
         sheet_rows_json=sheet_rows_json,
+        recalculate_after_writeback=recalculate_flag,
+    )
+
+
+@frappe.whitelist()
+def resolve_packing_list_conflict_row(
+    batch_name: str,
+    attachment_name: str | None,
+    target_item_name: str,
+    resolution_action: str,
+    file_url: str | None = None,
+    version_name: str | None = None,
+    template_hint: str | None = None,
+    sheet_rows_json: str | None = None,
+    recalculate_after_writeback=1,
+) -> dict:
+    """保存单条装箱单差异处理结果。"""
+
+    recalculate_flag = str(recalculate_after_writeback or "").strip().lower() in ("1", "true", "yes", "y")
+    return import_service.resolve_packing_list_conflict_row(
+        batch_name=batch_name,
+        attachment_name=attachment_name,
+        target_item_name=target_item_name,
+        resolution_action=resolution_action,
+        file_url=file_url,
+        version_name=version_name,
+        template_hint=template_hint,
+        sheet_rows_json=sheet_rows_json,
+        recalculate_after_writeback=recalculate_flag,
     )
 
 

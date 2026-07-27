@@ -196,6 +196,12 @@ def map_purchase_expense_row_to_item(row: dict) -> dict:
 def map_packing_list_row_to_item(row: dict) -> dict:
     """把装箱单 / Packing List 行映射为实际发货与物理属性字段。"""
 
+    unit_price = _first_value(row, "单价", "unit price", "unit_price", "采购单价")
+    goods_value = _first_value(row, "总价", "总价（RMB)", "总金额", "goods_value", "总货值")
+    purchase_currency = _first_value(row, "币种", "采购币种", "purchase_currency")
+    if (unit_price not in (None, "") or goods_value not in (None, "")) and not purchase_currency:
+        purchase_currency = "人民币RMB"
+
     return {
         "material_code": _first_value(row, "物料编码", "物品编码", "SKU", "code", "material_code"),
         "product_name": _first_value(row, "物料名称", "品名", "material", "product_name"),
@@ -219,6 +225,9 @@ def map_packing_list_row_to_item(row: dict) -> dict:
         "volume_m3": _first_value(row, "体积m3", "体积", "volume_m3"),
         "volume_weight_kg": _first_value(row, "体积重KG", "体积重", "volume_weight_kg"),
         "chargeable_weight_kg": _first_value(row, "计费重KG", "计费重", "chargeable_weight_kg"),
+        "unit_price": unit_price,
+        "purchase_currency": purchase_currency,
+        "goods_value": goods_value,
         "hs_code": _first_value(row, "海关分类编码", "HS CODE", "hs_code"),
         "source_type": "PACKING_LIST",
     }

@@ -1,14 +1,13 @@
-"""中文用途：商品品类归类预览服务。
+"""中文用途：商品名称归并预览服务。
 
-第一版先做“规则优先 + AI 可接入”的建议结果，不直接回写商品明细。
-后续接真实 AI 时，只替换 `_suggest_category` 的兜底分支即可。
+只提示少量、证据明确的同义名称归并，例如“墨镜”统一为“太阳眼镜”。
+普通商品不强行归类，也不直接回写商品明细。
 """
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Any
 
 try:
     import frappe
@@ -30,46 +29,10 @@ ITEM_FIELDS = [
     "purchase_order_no",
 ]
 
-STANDARD_CATEGORIES = [
+NAME_NORMALIZATION_RULES = [
     {
-        "category": "太阳眼镜",
+        "canonical_name": "太阳眼镜",
         "aliases": ("墨镜", "太阳镜", "太阳眼镜", "sunglasses", "gafas de sol", "lentes de sol"),
-        "hs_prefixes": ("9004",),
-    },
-    {
-        "category": "钢化膜",
-        "aliases": ("钢化膜", "tempered film", "mica de celular", "screen protector", "protector de pantalla"),
-        "hs_prefixes": (),
-    },
-    {
-        "category": "服装",
-        "aliases": ("衣服", "裤子", "上衣", "外套", "服装", "camiseta", "pantalon", "pantalón", "ropa"),
-        "hs_prefixes": ("61", "62"),
-    },
-    {
-        "category": "彩妆",
-        "aliases": ("口红", "唇膏", "化妆品", "彩妆", "lipstick", "makeup", "cosmetic", "cosmetico", "cosmético"),
-        "hs_prefixes": ("3304",),
-    },
-    {
-        "category": "手机配件",
-        "aliases": ("手机壳", "数据线", "充电器", "phone case", "cable", "charger", "funda"),
-        "hs_prefixes": (),
-    },
-    {
-        "category": "包装材料",
-        "aliases": ("包装袋", "纸箱", "编织袋", "包装材料", "packing", "carton", "cartón", "bag", "bolsa"),
-        "hs_prefixes": ("3923", "4819"),
-    },
-    {
-        "category": "TPU原材料",
-        "aliases": ("tpu", "热塑性聚氨酯", "聚氨酯", "poliuretano", "polyurethane"),
-        "hs_prefixes": ("390950",),
-    },
-    {
-        "category": "磁铁",
-        "aliases": ("磁铁", "magnet", "imán", "iman"),
-        "hs_prefixes": ("8505",),
     },
 ]
 
@@ -102,8 +65,8 @@ def preview_batch_categories(batch_name: str | None = None, version_name: str | 
         "version_name": resolved_version_name,
         "items": suggestions,
         "summary": summary,
-        "taxonomy": [row["category"] for row in STANDARD_CATEGORIES],
-        "message": "商品品类归类预览已生成。",
+        "taxonomy": [row["canonical_name"] for row in NAME_NORMALIZATION_RULES],
+        "message": "商品名称归并预览已生成。",
     }
 
 
@@ -155,7 +118,7 @@ def _load_rows(rows_json: str | None) -> list[dict]:
 
 
 def _build_preview_row(row: dict) -> dict:
-    suggestion = _suggest_category(row)
+    suggestion = _suggest_name_normalization(row)
     return {
         "item_name": row.get("name") or "",
         "row_no": row.get("row_no") or "",
@@ -170,69 +133,46 @@ def _build_preview_row(row: dict) -> dict:
     }
 
 
-def _suggest_category(row: dict) -> dict:
-    haystack = _category_haystack(row)
-    hs_code = _normalize_hs_code(row.get("hs_code"))
-    scored: list[dict[str, Any]] = []
+def _suggest_name_normalization(row: dict) -> dict:
+    name_fields = ("product_name", "product_name_es", "import_name", "spec_model")
+    source_names = [str(row.get(field) or "").strip() for field in name_fields if str(row.get(field) or "").strip()]
+    normalized_names = {_normalize_text(name) for name in source_names}
 
-    for definition in STANDARD_CATEGORIES:
-        alias_hits = _alias_hits(haystack, definition.get("aliases") or ())
-        hs_hit = bool(hs_code and any(hs_code.startswith(prefix) for prefix in definition.get("hs_prefixes") or ()))
-        if not alias_hits and not hs_hit:
+    for definition in NAME_NORMALIZATION_RULES:
+        canonical_name = definition["canonical_name"]
+        canonical_key = _normalize_text(canonical_name)
+        alias_hits = _alias_hits(" ".join(source_names), definition.get("aliases") or ())
+        if not alias_hits or canonical_key in normalized_names:
             continue
-
-        confidence = 0.62
-        reasons = []
-        if alias_hits:
-            confidence += min(0.28, 0.18 * len(alias_hits))
-            reasons.append(f"命中关键词：{'、'.join(alias_hits[:3])}")
-        if hs_hit:
-            confidence += 0.2
-            reasons.append(f"海关编码 {hs_code} 命中品类范围")
-        confidence = min(0.98, round(confidence, 2))
-        scored.append(
-            {
-                "suggested_category": definition["category"],
-                "confidence": confidence,
-                "reason": "；".join(reasons),
-                "match_type": "rule_keyword_hs" if alias_hits and hs_hit else ("rule_hs" if hs_hit else "rule_keyword"),
-            }
-        )
-
-    if scored:
-        best = sorted(scored, key=lambda item: item["confidence"], reverse=True)[0]
-        best["needs_review"] = best["confidence"] < 0.78
-        best["ai_ready"] = False
-        return best
+        return {
+            "suggested_category": canonical_name,
+            "suggested_name": canonical_name,
+            "confidence": 0.95,
+            "reason": f"命中同义名称：{'、'.join(alias_hits[:3])}；建议统一为“{canonical_name}”",
+            "match_type": "explicit_name_alias",
+            "needs_review": True,
+            "ai_ready": False,
+            "no_action": False,
+        }
 
     return {
         "suggested_category": "",
+        "suggested_name": "",
         "confidence": 0.0,
-        "reason": "规则未命中，建议交给 AI 根据品名、规格、海关编码综合判断。",
-        "match_type": "ai_pending",
-        "needs_review": True,
-        "ai_ready": True,
+        "reason": "未发现需要统一名称的同义商品。",
+        "match_type": "no_action",
+        "needs_review": False,
+        "ai_ready": False,
+        "no_action": True,
     }
 
 
-def _category_haystack(row: dict) -> str:
-    parts = [
-        row.get("material_code"),
-        row.get("product_name"),
-        row.get("product_name_es"),
-        row.get("import_name"),
-        row.get("spec_model"),
-        row.get("category"),
-        row.get("source_doc_no"),
-    ]
-    return _normalize_text(" ".join(str(part) for part in parts if part not in (None, "")))
-
-
 def _alias_hits(haystack: str, aliases: tuple[str, ...]) -> list[str]:
+    normalized_haystack = _normalize_text(haystack)
     hits = []
     for alias in aliases:
         normalized_alias = _normalize_text(alias)
-        if normalized_alias and normalized_alias in haystack:
+        if normalized_alias and normalized_alias in normalized_haystack:
             hits.append(alias)
     return hits
 
@@ -240,10 +180,6 @@ def _alias_hits(haystack: str, aliases: tuple[str, ...]) -> list[str]:
 def _normalize_text(value: str) -> str:
     text = str(value or "").lower()
     return re.sub(r"[\s\-_()/\\,，.。;；:：]+", "", text)
-
-
-def _normalize_hs_code(value) -> str:
-    return re.sub(r"\D", "", str(value or ""))
 
 
 def _normalize_limit(limit, default: int = 200, maximum: int = 1000) -> int:
@@ -257,17 +193,20 @@ def _normalize_limit(limit, default: int = 200, maximum: int = 1000) -> int:
 def _summarize_suggestions(items: list[dict]) -> dict:
     category_counts: dict[str, int] = {}
     needs_review_count = 0
-    ai_ready_count = 0
+    no_action_count = 0
     for item in items:
-        category = item.get("suggested_category") or "未识别"
-        category_counts[category] = category_counts.get(category, 0) + 1
+        category = item.get("suggested_name") or ""
+        if category:
+            category_counts[category] = category_counts.get(category, 0) + 1
         if item.get("needs_review"):
             needs_review_count += 1
-        if item.get("ai_ready"):
-            ai_ready_count += 1
+        if item.get("no_action"):
+            no_action_count += 1
     return {
         "item_count": len(items),
         "category_counts": category_counts,
         "needs_review_count": needs_review_count,
-        "ai_ready_count": ai_ready_count,
+        "normalization_candidate_count": needs_review_count,
+        "no_action_count": no_action_count,
+        "ai_ready_count": 0,
     }

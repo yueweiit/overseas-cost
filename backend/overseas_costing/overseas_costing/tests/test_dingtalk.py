@@ -15,12 +15,16 @@ from overseas_costing.utils.dingtalk import (
 from overseas_costing.scripts.import_oa_logistics import (
     DEFAULT_LOGISTICS_PROCESS_CODE,
     _merge_oa_extra_json,
+    _recalculate_after_purchase_sync,
     _sync_oa_form_attachments,
+    _sync_oa_logistics_allocation_rule,
     _sync_linked_purchase_fields,
     _normalize_legacy_instance,
     build_oa_item_values_from_approval,
     build_batch_values_from_approval,
     build_purchase_expense_item_values_from_approval,
+    extract_logistics_fee_from_approval,
+    extract_logistics_quote_candidates_from_approval,
     extract_form_attachments,
     extract_oa_goods_rows,
     extract_form_fields,
@@ -115,12 +119,289 @@ def test_get_process_attachment_download_url_uses_process_instance_and_file_id(m
         token="TOKEN-001",
         process_instance_id="PROC-SEA-001",
         file_id="FILE-001",
+        user_id="USER-001",
+        api_style="new",
     )
 
     assert result["download_uri"] == "https://download.example.com/packing.xlsx"
     assert calls[0]["method"] == "POST"
     assert calls[0]["token"] == "TOKEN-001"
     assert calls[0]["payload"] == {"processInstanceId": "PROC-SEA-001", "fileId": "FILE-001"}
+
+
+def test_get_process_attachment_download_url_uses_legacy_api_for_legacy_credentials(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    calls = []
+
+    def fake_request_json(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return {"errcode": 0, "result": {"download_uri": "https://download.example.com/packing.xlsx"}}
+
+    monkeypatch.delenv("DINGTALK_CORP_ID", raising=False)
+    monkeypatch.delenv("DINGTALK_CLIENT_ID", raising=False)
+    monkeypatch.setenv("DINGTALK_APP_KEY", "legacy-app-key")
+    monkeypatch.setenv("DINGTALK_APP_SECRET", "legacy-app-secret")
+    monkeypatch.setattr(import_oa_logistics, "_request_json", fake_request_json)
+
+    result = get_process_attachment_download_url(
+        token="TOKEN-001",
+        process_instance_id="PROC-SEA-001",
+        file_id="FILE-001",
+        user_id="USER-001",
+    )
+
+    assert result["api_style"] == "legacy"
+    assert result["download_uri"] == "https://download.example.com/packing.xlsx"
+    assert "/topapi/processinstance/file/url/get?access_token=TOKEN-001" in calls[0]["url"]
+    assert calls[0]["api_style"] == "legacy"
+    assert calls[0]["payload"] == {
+        "request": {
+            "process_instance_id": "PROC-SEA-001",
+            "file_id": "FILE-001",
+        },
+    }
+
+
+def test_get_process_attachment_download_url_legacy_does_not_require_user_id(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    calls = []
+
+    def fake_request_json(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return {"errcode": 0, "result": {"downloadUri": "https://download.example.com/no-user.xlsx"}}
+
+    monkeypatch.setattr(import_oa_logistics, "_request_json", fake_request_json)
+
+    result = get_process_attachment_download_url(
+        token="TOKEN-001",
+        process_instance_id="PROC-SEA-001",
+        file_id="FILE-001",
+        api_style="legacy",
+    )
+
+    assert result["download_uri"] == "https://download.example.com/no-user.xlsx"
+    assert "user_id" not in calls[0]["payload"]["request"]
+
+
+def test_get_process_attachment_download_url_uses_legacy_dentry_auth_before_new_fallback(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    calls = []
+
+    def fake_request_json(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        if "/topapi/processinstance/file/url/get" in url and len([call for call in calls if "/topapi/processinstance/file/url/get" in call["url"]]) == 1:
+            return {"errcode": 60121, "errmsg": "找不到该用户", "success": False}
+        if "/topapi/processinstance/cspace/info" in url:
+            return {"errcode": 0, "result": {"space_id": "764607503"}}
+        if "/topapi/process/dentry/auth" in url:
+            return {"errcode": 0, "result": True}
+        if "/topapi/processinstance/file/url/get" in url:
+            return {"errcode": 0, "result": {"downloadUri": "https://download.example.com/legacy-auth.xlsx"}}
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(import_oa_logistics, "_request_json", fake_request_json)
+
+    result = get_process_attachment_download_url(
+        token="LEGACY-TOKEN",
+        process_instance_id="PROC-SEA-001",
+        file_id="207632357484",
+        user_id="03435534375526711913",
+        api_style="legacy",
+    )
+
+    assert result["download_uri"] == "https://download.example.com/legacy-auth.xlsx"
+    assert result["fallback_api"] == "legacy_dentry_auth_then_file_url"
+    auth_call = next(call for call in calls if "/topapi/process/dentry/auth" in call["url"])
+    assert auth_call["payload"] == {
+        "request": {
+            "file_infos": [
+                {
+                    "file_id": 207632357484,
+                    "space_id": 764607503,
+                }
+            ],
+            "userid": "03435534375526711913",
+        }
+    }
+
+
+def test_get_process_attachment_download_url_falls_back_to_storage_download(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    calls = []
+
+    def fake_request_json(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        if "/topapi/processinstance/file/url/get" in url:
+            return {"errcode": 60121, "errmsg": "找不到该用户", "success": False}
+        if "/topapi/processinstance/cspace/info" in url:
+            return {"errcode": 0, "result": {"space_id": "SPACE-001"}}
+        if "/topapi/process/dentry/auth" in url:
+            raise RuntimeError("legacy auth failed")
+        if "/topapi/v2/user/get" in url:
+            return {"errcode": 0, "result": {"unionid": "UNION-001"}}
+        if "/v1.0/workflow/processInstances/spaces/files/authDownload" in url:
+            raise RuntimeError("noPermission")
+        if "/v1.0/storage/spaces/SPACE-001/dentries/FILE-001/downloadInfos/query" in url:
+            return {
+                "headerSignatureInfo": {
+                    "resourceUrls": ["https://download.example.com/storage.xlsx"],
+                    "headers": {"x-acs-signature": "SIG-001"},
+                }
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(import_oa_logistics, "_request_json", fake_request_json)
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "NEW-TOKEN")
+
+    result = get_process_attachment_download_url(
+        token="LEGACY-TOKEN",
+        process_instance_id="PROC-SEA-001",
+        file_id="FILE-001",
+        user_id="USER-001",
+        corp_id="ding-corp-001",
+        api_style="legacy",
+    )
+
+    assert result["download_uri"] == "https://download.example.com/storage.xlsx"
+    assert result["download_headers"] == {"x-acs-signature": "SIG-001"}
+    assert result["space_id"] == "SPACE-001"
+    assert result["fallback_api"] == "storage_dentry_download_info"
+    assert [call["payload"] for call in calls[:4]] == [
+        {"request": {"process_instance_id": "PROC-SEA-001", "file_id": "FILE-001"}},
+        {"process_instance_id": "PROC-SEA-001", "file_id": "FILE-001", "user_id": "USER-001"},
+        {"request": {"file_infos": [{"file_id": "FILE-001", "space_id": "SPACE-001"}], "userid": "USER-001"}},
+        {"userid": "USER-001", "language": "zh_CN"},
+    ]
+    assert any("/v1.0/workflow/processInstances/spaces/files/authDownload" in call["url"] for call in calls)
+    assert any("unionId=UNION-001" in call["url"] for call in calls)
+
+
+def test_get_process_attachment_download_url_uses_new_auth_before_storage(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    calls = []
+
+    def fake_request_json(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        if "/topapi/processinstance/file/url/get" in url:
+            return {"errcode": 60121, "errmsg": "找不到该用户", "success": False}
+        if "/topapi/processinstance/cspace/info" in url:
+            return {"errcode": 0, "result": {"space_id": "SPACE-001"}}
+        if "/topapi/v2/user/get" in url:
+            return {"errcode": 0, "result": {"unionid": "UNION-001"}}
+        if "/v1.0/workflow/processInstances/spaces/files/authDownload" in url:
+            return {"result": {"success": True}}
+        if "/v1.0/workflow/processInstances/spaces/files/urls/download" in url:
+            return {"result": {"downloadUri": "https://download.example.com/auth.xlsx"}}
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(import_oa_logistics, "_request_json", fake_request_json)
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "NEW-TOKEN")
+
+    result = get_process_attachment_download_url(
+        token="LEGACY-TOKEN",
+        process_instance_id="PROC-SEA-001",
+        file_id="FILE-001",
+        user_id="USER-001",
+        corp_id="ding-corp-001",
+        api_style="legacy",
+    )
+
+    assert result["download_uri"] == "https://download.example.com/auth.xlsx"
+    assert result["fallback_api"] == "new_auth_then_approval_download"
+    auth_call = next(call for call in calls if "/v1.0/workflow/processInstances/spaces/files/authDownload" in call["url"])
+    assert auth_call["payload"]["fileInfos"] == [{"spaceId": "SPACE-001", "fileId": "FILE-001"}]
+
+
+def test_get_process_attachment_download_url_keeps_new_auth_file_id_as_string(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    calls = []
+
+    def fake_request_json(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        if "/topapi/processinstance/file/url/get" in url:
+            return {"errcode": 60121, "errmsg": "找不到该用户", "success": False}
+        if "/topapi/processinstance/cspace/info" in url:
+            return {"errcode": 0, "result": {"space_id": "764607503"}}
+        if "/topapi/process/dentry/auth" in url:
+            raise RuntimeError("legacy auth failed")
+        if "/topapi/v2/user/get" in url:
+            return {"errcode": 0, "result": {"unionid": "UNION-001"}}
+        if "/v1.0/workflow/processInstances/spaces/files/authDownload" in url:
+            return {"result": {"success": True}}
+        if "/v1.0/workflow/processInstances/spaces/files/urls/download" in url:
+            return {"result": {"downloadUri": "https://download.example.com/auth.xlsx"}}
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(import_oa_logistics, "_request_json", fake_request_json)
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "NEW-TOKEN")
+
+    result = get_process_attachment_download_url(
+        token="LEGACY-TOKEN",
+        process_instance_id="PROC-SEA-001",
+        file_id="207632357484",
+        user_id="03435534375526711913",
+        corp_id="ding-corp-001",
+        api_style="legacy",
+    )
+
+    auth_call = next(call for call in calls if "/v1.0/workflow/processInstances/spaces/files/authDownload" in call["url"])
+    assert result["download_uri"] == "https://download.example.com/auth.xlsx"
+    assert auth_call["payload"]["fileInfos"] == [{"spaceId": 764607503, "fileId": "207632357484"}]
+
+
+def test_get_process_attachment_download_url_resolves_storage_dentry_by_file_name(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    calls = []
+
+    def fake_request_json(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        if "/topapi/processinstance/file/url/get" in url:
+            return {"errcode": 60121, "errmsg": "找不到该用户", "success": False}
+        if "/topapi/processinstance/cspace/info" in url:
+            return {"errcode": 0, "result": {"space_id": "SPACE-001"}}
+        if "/topapi/v2/user/get" in url:
+            return {"errcode": 0, "result": {"unionid": "UNION-001"}}
+        if "/v1.0/workflow/processInstances/spaces/files/authDownload" in url:
+            raise RuntimeError("noPermission")
+        if "/v1.0/storage/spaces/SPACE-001/dentries/FILE-001/downloadInfos/query" in url:
+            raise RuntimeError("permissionDenied")
+        if "/v1.0/storage/spaces/SPACE-001/dentries?" in url:
+            return {"dentries": [{"id": "DENTRY-002", "name": "packing.xlsx"}]}
+        if "/v1.0/storage/spaces/SPACE-001/dentries/DENTRY-002/downloadInfos/query" in url:
+            return {
+                "headerSignatureInfo": {
+                    "resourceUrls": ["https://download.example.com/resolved.xlsx"],
+                    "headers": {"x-acs-signature": "RESOLVED-SIG"},
+                }
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(import_oa_logistics, "_request_json", fake_request_json)
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "NEW-TOKEN")
+
+    result = get_process_attachment_download_url(
+        token="LEGACY-TOKEN",
+        process_instance_id="PROC-SEA-001",
+        file_id="FILE-001",
+        file_name="packing.xlsx",
+        user_id="USER-001",
+        corp_id="ding-corp-001",
+        api_style="legacy",
+    )
+
+    assert result["download_uri"] == "https://download.example.com/resolved.xlsx"
+    assert result["download_headers"] == {"x-acs-signature": "RESOLVED-SIG"}
+    assert result["fallback_api"] == "storage_dentry_list_then_download_info"
+    assert any("/v1.0/storage/spaces/SPACE-001/dentries/FILE-001/downloadInfos/query" in call["url"] for call in calls)
+    assert any("/v1.0/storage/spaces/SPACE-001/dentries?" in call["url"] for call in calls)
+    assert any("/v1.0/storage/spaces/SPACE-001/dentries/DENTRY-002/downloadInfos/query" in call["url"] for call in calls)
 
 
 def test_logistics_approval_summary_extracts_sea_trace_fields() -> None:
@@ -145,6 +426,65 @@ def test_logistics_approval_summary_extracts_sea_trace_fields() -> None:
     assert summary["transport_mode_raw"] == "海运"
     assert summary["logistics_no"] == "HPCU5155607"
     assert summary["open_url"].startswith("dingtalk://")
+
+
+def test_extract_logistics_fee_from_approval_only_reads_explicit_amount() -> None:
+    fee = extract_logistics_fee_from_approval(
+        {
+            "form_fields": {
+                "物流费用": "900",
+                "币种Moneda": "美元Dólar",
+                "物流报价Cotización de logística": "40HQ / 900美金",
+            }
+        }
+    )
+
+    assert fee["amount"] == 900
+    assert fee["currency"] == "USD"
+    assert fee["source_field"] == "物流费用"
+
+    quote_fee = extract_logistics_fee_from_approval(
+        {
+            "form_fields": {
+                "物流报价Cotización de logística": "货物预估方数：1.5方\n1.SISA报价：3720/立方\n合计价格：5730元\n2.大墨仓报价：2900/立方\n合计价格：4350元"
+            }
+        }
+    )
+
+    assert quote_fee == {}
+
+    candidates = extract_logistics_quote_candidates_from_approval(
+        {
+            "form_fields": {
+                "物流报价Cotización de logística": "货物预估方数：1.5方\n1.SISA报价：3720/立方\n合计价格：5730元\n2.大墨仓报价：2900/立方\n合计价格：4350元"
+            }
+        }
+    )
+
+    assert candidates == [
+        {
+            "carrier": "SISA",
+            "amount": 5730,
+            "currency": "RMB",
+            "volume_m3": 1.5,
+            "source_field": "物流报价Cotización de logística",
+            "source_value": "货物预估方数：1.5方\n1.SISA报价：3720/立方\n合计价格：5730元\n2.大墨仓报价：2900/立方\n合计价格：4350元",
+            "evidence_line": "合计价格：5730元",
+            "evidence_line_no": 3,
+            "status": "待确认",
+        },
+        {
+            "carrier": "大墨仓",
+            "amount": 4350,
+            "currency": "RMB",
+            "volume_m3": 1.5,
+            "source_field": "物流报价Cotización de logística",
+            "source_value": "货物预估方数：1.5方\n1.SISA报价：3720/立方\n合计价格：5730元\n2.大墨仓报价：2900/立方\n合计价格：4350元",
+            "evidence_line": "合计价格：4350元",
+            "evidence_line_no": 5,
+            "status": "待确认",
+        },
+    ]
 
 
 def test_extract_linked_purchase_approvals_from_relate_field_ext_value() -> None:
@@ -679,6 +1019,18 @@ def test_extract_oa_goods_rows_and_build_item_values() -> None:
             "货物信息Bienes": [
                 {
                     "rowValue": [
+                        {"label": "物料编码 Código de material", "value": "物料编码"},
+                        {"label": "物料名称（中文）Nombre del material (chino)", "value": "物料名称中文"},
+                        {"label": "物料名称（西语）Nombre del material (español)", "value": "物料名称西语"},
+                        {"label": "规格型号Especificación / Modelo", "value": "规格型号"},
+                        {"label": "数量Cantidad", "value": "数量"},
+                        {"label": "单位Unidad", "value": "单位"},
+                        {"label": "收件人Destinatario", "value": "收货人"},
+                    ],
+                    "rowNumber": "TableField_HEADER",
+                },
+                {
+                    "rowValue": [
                         {"label": "物料编码 Código de material", "value": "YL000097"},
                         {"label": "物料名称（中文）Nombre del material (chino)", "value": "TPU原料 HF-8695AU"},
                         {"label": "物料名称（西语）Nombre del material (español)", "value": "Elastómero de poliuretano termoplástico"},
@@ -696,6 +1048,8 @@ def test_extract_oa_goods_rows_and_build_item_values() -> None:
     rows = extract_oa_goods_rows(approval)
     items = build_oa_item_values_from_approval(approval)
 
+    assert len(rows) == 1
+    assert len(items) == 1
     assert rows[0]["项目proyecto"] == "YW ODM"
     assert items[0]["material_code"] == "YL000097"
     assert items[0]["product_name"] == "TPU原料 HF-8695AU"
@@ -707,6 +1061,39 @@ def test_extract_oa_goods_rows_and_build_item_values() -> None:
     assert items[0]["waybill_no"] == "FSCU8486789"
     assert items[0]["source_doc_no"] == "202606101808000475588"
     assert items[0]["parse_status"] == "SUCCESS"
+
+
+def test_extract_oa_goods_text_rows_and_skip_summary() -> None:
+    approval = {
+        "source_approval_no": "202601121522000486665",
+        "source_instance_id": "PROC-SEA-TEXT",
+        "transport_mode_raw": "海运",
+        "logistics_no": "202601121522000486665",
+        "form_fields": {
+            "货物信息Bienes": """
+                GJ003786-灯管-8pcs
+                FL002598-灯管+连接线-30pcs
+                热熔胶--100pcs
+                合计47件，重量470.71kg，体积：1.53方
+            """,
+        },
+    }
+
+    rows = extract_oa_goods_rows(approval)
+    items = build_oa_item_values_from_approval(approval)
+
+    assert len(rows) == 3
+    assert rows[0]["material_code"] == "GJ003786"
+    assert rows[0]["product_name"] == "灯管"
+    assert rows[0]["quantity"] == "8"
+    assert rows[0]["unit"].lower() == "pcs"
+    assert rows[1]["material_code"] == "FL002598"
+    assert rows[1]["product_name"] == "灯管+连接线"
+    assert "material_code" not in rows[2]
+    assert rows[2]["product_name"] == "热熔胶"
+    assert rows[2]["quantity"] == "100"
+    assert [item["quantity"] for item in items] == [8.0, 30.0, 100.0]
+    assert items[2]["material_code"] is None
 
 
 def test_save_sea_approvals_to_erp_dry_run_returns_trace_preview() -> None:
@@ -848,6 +1235,72 @@ def test_sync_linked_purchase_fields_applies_existing_import_service(monkeypatch
     assert calls[0]["batch_name"] == "BATCH-001"
     assert calls[0]["version_name"] == "VER-001"
     assert "202604300000000596348" in calls[0]["linked_purchase_json"]
+
+
+def test_sync_oa_logistics_allocation_rule_creates_rule_and_recalculates(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    inserted_rules = []
+    recalculate_calls = []
+
+    class FakeDoc:
+        def __init__(self, payload):
+            self.payload = dict(payload)
+            self.name = payload.get("name") or f"RULE-{len(inserted_rules) + 1}"
+
+        def insert(self, **_kwargs):
+            self.name = f"RULE-{len(inserted_rules) + 1}"
+            self.payload["name"] = self.name
+            inserted_rules.append(self.payload)
+            return self
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
+            if doctype == "Overseas Cost Allocation Rule":
+                return None
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_doc(payload):
+            return FakeDoc(payload)
+
+    def fake_recalculate_batch(**kwargs):
+        recalculate_calls.append(kwargs)
+        return {"ok": True, "summary_snapshot": {"total_cost_rmb": 1234}}
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr("overseas_costing.services.calculate_service.recalculate_batch", fake_recalculate_batch)
+
+    rule_result = _sync_oa_logistics_allocation_rule(
+        batch_name="BATCH-001",
+        version_name="VER-001",
+        approval_item={
+            "logistics_fee": {
+                "amount": "900",
+                "currency": "美元Dólar",
+                "source_label": "物流费用",
+                "source_field": "物流费用",
+                "source_value": "900",
+            }
+        },
+    )
+    recalc_result = _recalculate_after_purchase_sync(
+        batch_name="BATCH-001",
+        version_name="VER-001",
+        purchase_sync={"ok": True, "updated_count": 0},
+        logistics_fee_sync=rule_result,
+    )
+
+    assert rule_result["action"] == "created"
+    assert rule_result["rule"]["rule_code"] == "oa_logistics_freight"
+    assert rule_result["rule"]["amount"] == 900
+    assert inserted_rules[0]["currency"] == "USD"
+    assert recalc_result["action"] == "recalculated"
+    assert recalculate_calls == [{"batch_name": "BATCH-001", "version_name": "VER-001"}]
 
 
 def test_refresh_existing_oa_logistics_details_repulls_missing_trace(monkeypatch) -> None:

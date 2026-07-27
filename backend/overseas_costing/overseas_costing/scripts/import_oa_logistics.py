@@ -49,10 +49,18 @@ NEW_TOKEN_PATH = "/v1.0/oauth2/{corp_id}/token"
 NEW_LIST_INSTANCE_IDS_PATH = "/v1.0/workflow/processes/instanceIds/query"
 NEW_INSTANCE_DETAIL_PATH = "/v1.0/workflow/processInstances?processInstanceId={process_instance_id}"
 NEW_APPROVAL_ATTACHMENT_DOWNLOAD_PATH = "/v1.0/workflow/processInstances/spaces/files/urls/download"
+NEW_APPROVAL_ATTACHMENT_AUTH_DOWNLOAD_PATH = "/v1.0/workflow/processInstances/spaces/files/authDownload"
 
 LEGACY_TOKEN_PATH = "/gettoken"
 LEGACY_LIST_INSTANCE_IDS_PATH = "/topapi/processinstance/listids?access_token={access_token}"
 LEGACY_INSTANCE_DETAIL_PATH = "/topapi/processinstance/get?access_token={access_token}"
+LEGACY_APPROVAL_ATTACHMENT_DOWNLOAD_PATH = "/topapi/processinstance/file/url/get?access_token={access_token}"
+LEGACY_APPROVAL_ATTACHMENT_SPACE_PATH = "/topapi/processinstance/cspace/info?access_token={access_token}"
+LEGACY_APPROVAL_ATTACHMENT_DENTRY_AUTH_PATH = "/topapi/process/dentry/auth?access_token={access_token}"
+LEGACY_USER_DETAIL_PATH = "/topapi/v2/user/get?access_token={access_token}"
+NEW_STORAGE_DENTRY_DOWNLOAD_INFO_PATH = "/v1.0/storage/spaces/{space_id}/dentries/{dentry_id}/downloadInfos/query"
+NEW_STORAGE_DENTRY_LIST_PATH = "/v1.0/storage/spaces/{space_id}/dentries"
+NEW_DRIVE_FILE_DOWNLOAD_INFO_PATH = "/v1.0/drive/spaces/{space_id}/files/{file_id}/downloadInfos"
 
 DEFAULT_SEA_KEYWORDS = ("海运", "SEA", "OCEAN", "MARITIMO", "MARÍTIMO")
 HIDDEN_APPROVAL_STATUSES = ("TERMINATED", "CANCELED", "CANCELLED", "REVOKED", "撤销", "已撤销")
@@ -76,6 +84,28 @@ BATCH_NO_FIELD_ALIASES = (
     "运单号",
     "柜号",
     "单号",
+)
+LOGISTICS_FEE_FIELD_ALIASES = (
+    "物流费用",
+    "运费金额",
+    "国际运费",
+    "海运费",
+    "空运费",
+    "logisticsfee",
+    "freight",
+)
+LOGISTICS_QUOTE_FIELD_ALIASES = (
+    "物流报价",
+    "物流报价Cotización de logística",
+    "物流报价Cotizacion de logistica",
+    "Cotización de logística",
+    "Cotizacion de logistica",
+    "报价",
+)
+LOGISTICS_CURRENCY_FIELD_ALIASES = (
+    "币种Moneda",
+    "币种",
+    "Moneda",
 )
 GOODS_TABLE_FIELD_ALIASES = ("货物信息", "Bienes")
 PURCHASE_DETAIL_TABLE_FIELD_ALIASES = (
@@ -134,6 +164,16 @@ DINGTALK_ENV_FILE_CANDIDATES = (
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _dingtalk_id_value(value: Any) -> str | int:
+    text = _clean(value)
+    if text.isdigit():
+        try:
+            return int(text)
+        except ValueError:
+            return text
+    return text
 
 
 def load_env_file(env_file: str | None, *, override: bool = False) -> str:
@@ -544,27 +584,571 @@ def get_process_instance_detail(*, token: str, process_instance_id: str, api_sty
     return _get_process_instance_detail_by_new_api(token=token, process_instance_id=instance_id)
 
 
-def get_process_attachment_download_url(*, token: str, process_instance_id: str, file_id: str) -> dict:
+def _is_dingtalk_user_not_exist_response(result: dict) -> bool:
+    text = json.dumps(result or {}, ensure_ascii=False)
+    return any(marker in text for marker in ("userNotExist", "找不到该用户", "用户不存在"))
+
+
+def _configured_attachment_union_id() -> str:
+    for key in ("DINGTALK_ATTACHMENT_UNION_ID", "DINGTALK_DOWNLOAD_UNION_ID"):
+        value = _clean(os.environ.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _legacy_user_union_id(*, token: str, user_id: str) -> str:
+    configured_union_id = _configured_attachment_union_id()
+    if configured_union_id:
+        return configured_union_id
+
+    resolved_user_id = _clean(user_id)
+    if not resolved_user_id:
+        raise RuntimeError("钉钉附件备用下载链路缺少下载人 userId。")
+
+    result = _request_json(
+        f"{_oapi_url()}{LEGACY_USER_DETAIL_PATH.format(access_token=quote(token, safe=''))}",
+        method="POST",
+        api_style="legacy",
+        payload={"userid": resolved_user_id, "language": "zh_CN"},
+    )
+    if result.get("errcode") in (88, "88") or "qyapi_get_member" in json.dumps(result, ensure_ascii=False):
+        raise RuntimeError(
+            "钉钉附件备用下载需要应用开通 qyapi_get_member 权限，或在 .env 配置 DINGTALK_ATTACHMENT_UNION_ID。"
+        )
+    _ensure_dingtalk_success(result, api_style="legacy")
+    body = _unwrap_result(result)
+    union_id = _clean(body.get("unionid") or body.get("unionId"))
+    if not union_id:
+        raise RuntimeError("钉钉用户详情响应中没有 unionId，无法继续下载审批附件。")
+    return union_id
+
+
+def _legacy_process_attachment_space_id(
+    *,
+    token: str,
+    process_instance_id: str,
+    file_id: str,
+    user_id: str,
+) -> str:
+    resolved_user_id = _clean(user_id)
+    if not resolved_user_id:
+        raise RuntimeError("钉钉附件备用下载链路缺少下载人 userId。")
+
+    result = _request_json(
+        f"{_oapi_url()}{LEGACY_APPROVAL_ATTACHMENT_SPACE_PATH.format(access_token=quote(token, safe=''))}",
+        method="POST",
+        api_style="legacy",
+        payload={
+            "process_instance_id": process_instance_id,
+            "file_id": file_id,
+            "user_id": resolved_user_id,
+        },
+    )
+    _ensure_dingtalk_success(result, api_style="legacy")
+    body = _unwrap_result(result)
+    space_id = _clean(body.get("space_id") or body.get("spaceId"))
+    if not space_id:
+        raise RuntimeError(f"钉钉审批附件空间响应中没有 space_id：{result}")
+    return space_id
+
+
+def _legacy_process_attachment_dentry_auth(
+    *,
+    token: str,
+    file_id: str,
+    space_id: str,
+    user_id: str,
+) -> dict:
+    resolved_file_id = _clean(file_id)
+    resolved_space_id = _clean(space_id)
+    resolved_user_id = _clean(user_id)
+    if not resolved_file_id or not resolved_space_id or not resolved_user_id:
+        raise RuntimeError("钉钉旧版附件授权缺少 fileId、spaceId 或 userId。")
+
+    result = _request_json(
+        f"{_oapi_url()}{LEGACY_APPROVAL_ATTACHMENT_DENTRY_AUTH_PATH.format(access_token=quote(token, safe=''))}",
+        method="POST",
+        api_style="legacy",
+        payload={
+            "request": {
+                "file_infos": [
+                    {
+                        "file_id": _dingtalk_id_value(resolved_file_id),
+                        "space_id": _dingtalk_id_value(resolved_space_id),
+                    }
+                ],
+                "userid": resolved_user_id,
+            }
+        },
+    )
+    _ensure_dingtalk_success(result, api_style="legacy")
+    return result
+
+
+def _legacy_process_attachment_file_url(
+    *,
+    token: str,
+    process_instance_id: str,
+    file_id: str,
+) -> dict:
+    resolved_instance_id = _clean(process_instance_id)
+    resolved_file_id = _clean(file_id)
+    if not resolved_instance_id or not resolved_file_id:
+        raise RuntimeError("钉钉旧版附件下载缺少审批实例 ID 或 fileId。")
+    return _request_json(
+        f"{_oapi_url()}{LEGACY_APPROVAL_ATTACHMENT_DOWNLOAD_PATH.format(access_token=quote(token, safe=''))}",
+        method="POST",
+        api_style="legacy",
+        payload={
+            "request": {
+                "process_instance_id": resolved_instance_id,
+                "file_id": resolved_file_id,
+            },
+        },
+    )
+
+
+def _extract_storage_download_info(body: dict) -> tuple[str, dict]:
+    download_info = body.get("downloadInfo") or body.get("download_info")
+    if isinstance(download_info, dict):
+        body = {**body, **download_info}
+
+    header_info = body.get("headerSignatureInfo") or body.get("header_signature_info") or {}
+    if not isinstance(header_info, dict):
+        header_info = {}
+
+    urls = (
+        body.get("resourceUrls")
+        or body.get("resource_urls")
+        or header_info.get("resourceUrls")
+        or header_info.get("resource_urls")
+        or []
+    )
+    download_uri = _clean(
+        body.get("downloadUri")
+        or body.get("download_uri")
+        or body.get("downloadUrl")
+        or body.get("download_url")
+        or body.get("resourceUrl")
+        or body.get("resource_url")
+        or body.get("url")
+    )
+    if not download_uri and isinstance(urls, list) and urls:
+        download_uri = _clean(urls[0])
+
+    headers = (
+        body.get("headers")
+        or body.get("downloadHeaders")
+        or body.get("download_headers")
+        or header_info.get("headers")
+        or header_info.get("downloadHeaders")
+        or header_info.get("download_headers")
+        or {}
+    )
+    if not isinstance(headers, dict):
+        headers = {}
+    return download_uri, {str(key): str(value) for key, value in headers.items() if value not in (None, "")}
+
+
+def _extract_attachment_download_uri(result: dict) -> str:
+    body = _unwrap_result(result)
+    return _clean(
+        body.get("downloadUri")
+        or body.get("download_uri")
+        or body.get("downloadUrl")
+        or body.get("download_url")
+        or body.get("resourceUrl")
+        or body.get("resource_url")
+        or body.get("url")
+    )
+
+
+def _compact_dingtalk_response(result: dict | None) -> dict:
+    if not isinstance(result, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in ("errcode", "errmsg", "code", "message", "request_id", "requestId", "success"):
+        if key in result:
+            compact[key] = result.get(key)
+    body = _unwrap_result(result)
+    if body and body is not result:
+        compact["result_keys"] = sorted(str(key) for key in body.keys())
+        if _extract_attachment_download_uri(result):
+            compact["download_uri_obtained"] = True
+    return compact
+
+
+def _diagnostic_step(name: str, fn) -> tuple[dict, Any]:
+    try:
+        value = fn()
+    except Exception as exc:
+        return {"step": name, "ok": False, "error": str(exc)}, None
+    response = value if isinstance(value, dict) else None
+    step = {"step": name, "ok": True}
+    if response:
+        step["response"] = _compact_dingtalk_response(response)
+    return step, value
+
+
+def _storage_dentry_download_info(
+    *,
+    token: str,
+    space_id: str,
+    dentry_id: str,
+    union_id: str,
+) -> tuple[str, dict, dict]:
+    query = f"?unionId={quote(union_id, safe='')}" if union_id else ""
+    result = _request_json(
+        f"{_api_url()}{NEW_STORAGE_DENTRY_DOWNLOAD_INFO_PATH.format(space_id=quote(space_id, safe=''), dentry_id=quote(dentry_id, safe=''))}{query}",
+        method="POST",
+        token=token,
+        api_style="new",
+        payload={"option": {"version": 1, "preferIntranet": False}},
+    )
+    _ensure_dingtalk_success(result, api_style="new")
+    body = _unwrap_result(result)
+    download_uri, download_headers = _extract_storage_download_info(body)
+    if not download_uri:
+        raise RuntimeError(f"钉钉钉盘下载信息响应中没有下载地址：{result}")
+    return download_uri, download_headers, result
+
+
+def _new_auth_process_attachment_download(
+    *,
+    token: str,
+    user_id: str,
+    space_id: str,
+    file_id: str,
+) -> dict:
+    resolved_user_id = _clean(user_id)
+    resolved_space_id = _clean(space_id)
+    resolved_file_id = _clean(file_id)
+    if not resolved_user_id or not resolved_space_id or not resolved_file_id:
+        raise RuntimeError("钉钉新版附件授权下载缺少 userId、spaceId 或 fileId。")
+    result = _request_json(
+        f"{_api_url()}{NEW_APPROVAL_ATTACHMENT_AUTH_DOWNLOAD_PATH}",
+        method="POST",
+        token=token,
+        api_style="new",
+        payload={
+            "userId": resolved_user_id,
+            "fileInfos": [
+                {
+                    "spaceId": _dingtalk_id_value(resolved_space_id),
+                    "fileId": resolved_file_id,
+                }
+            ],
+        },
+    )
+    _ensure_dingtalk_success(result, api_style="new")
+    return result
+
+
+def _extract_storage_dentries(body: dict) -> list[dict]:
+    for key in ("dentries", "list", "items", "results", "data"):
+        value = body.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _storage_dentry_identity(row: dict) -> tuple[str, str]:
+    dentry_id = _clean(
+        row.get("dentryId")
+        or row.get("dentry_id")
+        or row.get("fileId")
+        or row.get("file_id")
+        or row.get("id")
+    )
+    file_name = _clean(
+        row.get("name")
+        or row.get("fileName")
+        or row.get("file_name")
+        or row.get("title")
+    )
+    return dentry_id, file_name
+
+
+def _list_storage_dentries(
+    *,
+    token: str,
+    space_id: str,
+    union_id: str,
+) -> tuple[list[dict], dict]:
+    query = urlencode({"parentId": "0", "maxResults": 100, "unionId": union_id})
+    result = _request_json(
+        f"{_api_url()}{NEW_STORAGE_DENTRY_LIST_PATH.format(space_id=quote(space_id, safe=''))}?{query}",
+        method="GET",
+        token=token,
+        api_style="new",
+    )
+    _ensure_dingtalk_success(result, api_style="new")
+    body = _unwrap_result(result)
+    return _extract_storage_dentries(body), result
+
+
+def _resolve_storage_dentry_id(
+    *,
+    token: str,
+    space_id: str,
+    union_id: str,
+    file_id: str,
+    file_name: str,
+) -> tuple[str, dict]:
+    dentries, result = _list_storage_dentries(token=token, space_id=space_id, union_id=union_id)
+    resolved_file_id = _clean(file_id)
+    resolved_file_name = _clean(file_name)
+    for row in dentries:
+        dentry_id, listed_name = _storage_dentry_identity(row)
+        if resolved_file_id and dentry_id == resolved_file_id:
+            return dentry_id, result
+        if resolved_file_name and listed_name == resolved_file_name:
+            return dentry_id, result
+    if resolved_file_name:
+        normalized_target = _normalize_key(resolved_file_name)
+        for row in dentries:
+            dentry_id, listed_name = _storage_dentry_identity(row)
+            if normalized_target and _normalize_key(listed_name) == normalized_target:
+                return dentry_id, result
+    raise RuntimeError(
+        "钉钉已允许读取附件空间文件列表，但没有找到与当前附件文件名匹配的文件。"
+    )
+
+
+def _drive_file_download_info(
+    *,
+    token: str,
+    space_id: str,
+    file_id: str,
+    union_id: str,
+) -> tuple[str, dict, dict]:
+    query = f"?unionId={quote(union_id, safe='')}" if union_id else ""
+    result = _request_json(
+        f"{_api_url()}{NEW_DRIVE_FILE_DOWNLOAD_INFO_PATH.format(space_id=quote(space_id, safe=''), file_id=quote(file_id, safe=''))}{query}",
+        method="GET",
+        token=token,
+        api_style="new",
+    )
+    _ensure_dingtalk_success(result, api_style="new")
+    body = _unwrap_result(result)
+    download_uri, download_headers = _extract_storage_download_info(body)
+    if not download_uri:
+        raise RuntimeError(f"钉钉钉盘文件下载信息响应中没有下载地址：{result}")
+    return download_uri, download_headers, result
+
+
+def _fallback_process_attachment_download_url(
+    *,
+    legacy_token: str,
+    process_instance_id: str,
+    file_id: str,
+    file_name: str = "",
+    user_id: str,
+    corp_id: str,
+) -> dict:
+    space_id = _legacy_process_attachment_space_id(
+        token=legacy_token,
+        process_instance_id=process_instance_id,
+        file_id=file_id,
+        user_id=user_id,
+    )
+    legacy_auth_result = {}
+    legacy_auth_error = ""
+    try:
+        legacy_auth_result = _legacy_process_attachment_dentry_auth(
+            token=legacy_token,
+            file_id=file_id,
+            space_id=space_id,
+            user_id=user_id,
+        )
+        legacy_download_result = _legacy_process_attachment_file_url(
+            token=legacy_token,
+            process_instance_id=process_instance_id,
+            file_id=file_id,
+        )
+        _ensure_dingtalk_success(legacy_download_result, api_style="legacy")
+        legacy_download_uri = _extract_attachment_download_uri(legacy_download_result)
+        if legacy_download_uri:
+            return {
+                "space_id": space_id,
+                "union_id_obtained": False,
+                "download_uri": legacy_download_uri,
+                "download_headers": {},
+                "fallback_api": "legacy_dentry_auth_then_file_url",
+                "storage_response": {
+                    "legacy_auth_response": legacy_auth_result,
+                    "download_response": legacy_download_result,
+                },
+            }
+    except Exception as exc:
+        legacy_auth_error = str(exc)
+
+    union_id = _legacy_user_union_id(token=legacy_token, user_id=user_id)
+    new_token = get_access_token(api_style="new", corp_id=corp_id)
+    auth_result = {}
+    auth_error = ""
+    try:
+        auth_result = _new_auth_process_attachment_download(
+            token=new_token,
+            user_id=user_id,
+            space_id=space_id,
+            file_id=file_id,
+        )
+        direct_result = _request_json(
+            f"{_api_url()}{NEW_APPROVAL_ATTACHMENT_DOWNLOAD_PATH}",
+            method="POST",
+            token=new_token,
+            api_style="new",
+            payload={
+                "processInstanceId": process_instance_id,
+                "fileId": file_id,
+            },
+        )
+        _ensure_dingtalk_success(direct_result, api_style="new")
+        direct_uri = _extract_attachment_download_uri(direct_result)
+        if direct_uri:
+            return {
+                "space_id": space_id,
+                "union_id_obtained": bool(union_id),
+                "download_uri": direct_uri,
+                "download_headers": {},
+                "fallback_api": "new_auth_then_approval_download",
+                "storage_response": {
+                    "legacy_auth_response": legacy_auth_result,
+                    "legacy_auth_error": legacy_auth_error,
+                    "auth_response": auth_result,
+                    "download_response": direct_result,
+                },
+            }
+    except Exception as exc:
+        auth_error = str(exc)
+    try:
+        download_uri, download_headers, storage_response = _storage_dentry_download_info(
+            token=new_token,
+            space_id=space_id,
+            dentry_id=file_id,
+            union_id=union_id,
+        )
+        fallback_api = "storage_dentry_download_info"
+    except Exception as storage_exc:
+        dentry_id, list_response = _resolve_storage_dentry_id(
+            token=new_token,
+            space_id=space_id,
+            union_id=union_id,
+            file_id=file_id,
+            file_name=file_name,
+        )
+        download_uri, download_headers, storage_response = _storage_dentry_download_info(
+            token=new_token,
+            space_id=space_id,
+            dentry_id=dentry_id,
+            union_id=union_id,
+        )
+        storage_response = {
+            "legacy_auth_response": legacy_auth_result,
+            "legacy_auth_error": legacy_auth_error,
+            "auth_response": auth_result,
+            "auth_error": auth_error,
+            "original_storage_error": str(storage_exc),
+            "dentry_list_response": list_response,
+            "download_response": storage_response,
+            "resolved_dentry_id": dentry_id,
+        }
+        fallback_api = "storage_dentry_list_then_download_info"
+    return {
+        "space_id": space_id,
+        "union_id_obtained": bool(union_id),
+        "download_uri": download_uri,
+        "download_headers": download_headers,
+        "fallback_api": fallback_api,
+        "storage_response": {
+            "legacy_auth_response": legacy_auth_result,
+            "legacy_auth_error": legacy_auth_error,
+            "auth_response": auth_result,
+            "auth_error": auth_error,
+            "download_response": storage_response,
+        },
+    }
+
+
+def get_process_attachment_download_url(
+    *,
+    token: str,
+    process_instance_id: str,
+    file_id: str,
+    file_name: str = "",
+    space_id: str = "",
+    user_id: str = "",
+    corp_id: str = "",
+    api_style: str = "auto",
+) -> dict:
     """换取钉钉审批发起表单附件的临时下载地址。"""
 
     instance_id = _clean(process_instance_id)
     resolved_file_id = _clean(file_id)
+    resolved_space_id = _clean(space_id)
+    resolved_user_id = _clean(user_id)
+    resolved_corp_id = _clean(corp_id)
     if not instance_id:
         raise ValueError("缺少钉钉审批实例 ID。")
     if not resolved_file_id:
         raise ValueError("缺少钉钉附件 file_id。")
 
-    result = _request_json(
-        f"{_api_url()}{NEW_APPROVAL_ATTACHMENT_DOWNLOAD_PATH}",
-        method="POST",
-        token=token,
-        api_style="new",
-        payload={
-            "processInstanceId": instance_id,
-            "fileId": resolved_file_id,
-        },
-    )
-    _ensure_dingtalk_success(result, api_style="new")
+    resolved_api_style = _resolve_api_style(api_style)
+    if resolved_api_style == "legacy":
+        result = _request_json(
+            f"{_oapi_url()}{LEGACY_APPROVAL_ATTACHMENT_DOWNLOAD_PATH.format(access_token=quote(token, safe=''))}",
+            method="POST",
+            api_style="legacy",
+            payload={
+                "request": {
+                    "process_instance_id": instance_id,
+                    "file_id": resolved_file_id,
+                },
+            },
+        )
+        if _is_dingtalk_user_not_exist_response(result):
+            fallback = _fallback_process_attachment_download_url(
+                legacy_token=token,
+                process_instance_id=instance_id,
+                file_id=resolved_file_id,
+                file_name=file_name,
+                user_id=resolved_user_id,
+                corp_id=resolved_corp_id,
+            )
+            return {
+                "process_instance_id": instance_id,
+                "file_id": resolved_file_id,
+                "user_id": resolved_user_id,
+                "download_uri": fallback["download_uri"],
+                "download_headers": fallback.get("download_headers") or {},
+                "space_id": fallback.get("space_id") or "",
+                "union_id_obtained": fallback.get("union_id_obtained") or False,
+                "api_style": resolved_api_style,
+                "fallback_api": fallback.get("fallback_api") or "",
+                "raw_response": result,
+                "storage_response": fallback.get("storage_response") or {},
+            }
+    else:
+        if resolved_space_id and resolved_user_id:
+            _new_auth_process_attachment_download(
+                token=token,
+                user_id=resolved_user_id,
+                space_id=resolved_space_id,
+                file_id=resolved_file_id,
+            )
+        result = _request_json(
+            f"{_api_url()}{NEW_APPROVAL_ATTACHMENT_DOWNLOAD_PATH}",
+            method="POST",
+            token=token,
+            api_style="new",
+            payload={
+                "processInstanceId": instance_id,
+                "fileId": resolved_file_id,
+            },
+        )
+    _ensure_dingtalk_success(result, api_style=resolved_api_style)
     body = _unwrap_result(result)
     download_uri = _clean(
         body.get("downloadUri")
@@ -578,8 +1162,193 @@ def get_process_attachment_download_url(*, token: str, process_instance_id: str,
     return {
         "process_instance_id": instance_id,
         "file_id": resolved_file_id,
+        "space_id": resolved_space_id,
+        "user_id": resolved_user_id,
         "download_uri": download_uri,
+        "download_headers": {},
+        "api_style": resolved_api_style,
         "raw_response": result,
+    }
+
+
+def diagnose_process_attachment_download(
+    *,
+    token: str,
+    process_instance_id: str,
+    file_id: str,
+    file_name: str = "",
+    space_id: str = "",
+    user_id: str = "",
+    corp_id: str = "",
+    api_style: str = "auto",
+) -> dict:
+    """诊断审批发起附件自动下载链路，不保存文件内容。"""
+
+    instance_id = _clean(process_instance_id)
+    resolved_file_id = _clean(file_id)
+    resolved_space_id = _clean(space_id)
+    resolved_user_id = _clean(user_id)
+    resolved_corp_id = _clean(corp_id)
+    resolved_api_style = _resolve_api_style(api_style)
+    steps: list[dict] = []
+    download_uri_obtained = False
+    downloaded_by = ""
+    storage_response: dict | None = None
+
+    if not instance_id or not resolved_file_id:
+        return {
+            "ok": False,
+            "api_style": resolved_api_style,
+            "message": "缺少审批实例 ID 或 fileId，不能诊断附件下载。",
+            "steps": steps,
+        }
+
+    if resolved_api_style == "legacy":
+        legacy_step, legacy_result = _diagnostic_step(
+            "legacy_file_url",
+            lambda: _legacy_process_attachment_file_url(
+                token=token,
+                process_instance_id=instance_id,
+                file_id=resolved_file_id,
+            ),
+        )
+        steps.append(legacy_step)
+        if legacy_result and _extract_attachment_download_uri(legacy_result):
+            download_uri_obtained = True
+            downloaded_by = "legacy_file_url"
+
+        if not download_uri_obtained and resolved_user_id:
+            space_step, space_result = _diagnostic_step(
+                "legacy_cspace_info",
+                lambda: _request_json(
+                    f"{_oapi_url()}{LEGACY_APPROVAL_ATTACHMENT_SPACE_PATH.format(access_token=quote(token, safe=''))}",
+                    method="POST",
+                    api_style="legacy",
+                    payload={
+                        "process_instance_id": instance_id,
+                        "file_id": resolved_file_id,
+                        "user_id": resolved_user_id,
+                    },
+                ),
+            )
+            steps.append(space_step)
+            if space_result:
+                try:
+                    _ensure_dingtalk_success(space_result, api_style="legacy")
+                    resolved_space_id = _clean(_unwrap_result(space_result).get("space_id") or _unwrap_result(space_result).get("spaceId"))
+                except Exception:
+                    pass
+
+        if not download_uri_obtained and resolved_space_id and resolved_user_id:
+            auth_step, _auth_result = _diagnostic_step(
+                "legacy_dentry_auth",
+                lambda: _legacy_process_attachment_dentry_auth(
+                    token=token,
+                    file_id=resolved_file_id,
+                    space_id=resolved_space_id,
+                    user_id=resolved_user_id,
+                ),
+            )
+            steps.append(auth_step)
+            retry_step, retry_result = _diagnostic_step(
+                "legacy_file_url_after_auth",
+                lambda: _legacy_process_attachment_file_url(
+                    token=token,
+                    process_instance_id=instance_id,
+                    file_id=resolved_file_id,
+                ),
+            )
+            steps.append(retry_step)
+            if retry_result and _extract_attachment_download_uri(retry_result):
+                download_uri_obtained = True
+                downloaded_by = "legacy_dentry_auth_then_file_url"
+
+    if not download_uri_obtained and resolved_user_id:
+        union_id = ""
+        union_step, union_result = _diagnostic_step(
+            "legacy_user_union_id",
+            lambda: _request_json(
+                f"{_oapi_url()}{LEGACY_USER_DETAIL_PATH.format(access_token=quote(token, safe=''))}",
+                method="POST",
+                api_style="legacy",
+                payload={"userid": resolved_user_id, "language": "zh_CN"},
+            ),
+        )
+        steps.append(union_step)
+        if union_result:
+            try:
+                _ensure_dingtalk_success(union_result, api_style="legacy")
+                union_id = _clean(_unwrap_result(union_result).get("unionid") or _unwrap_result(union_result).get("unionId"))
+            except Exception:
+                union_id = ""
+
+        new_token = ""
+        new_token_step, new_token_result = _diagnostic_step(
+            "new_access_token",
+            lambda: {"result": {"accessToken": get_access_token(api_style="new", corp_id=resolved_corp_id)}},
+        )
+        steps.append({"step": "new_access_token", "ok": new_token_step["ok"], "token_obtained": bool(new_token_result)})
+        if new_token_result:
+            new_token = _clean(_unwrap_result(new_token_result).get("accessToken"))
+
+        if new_token and resolved_space_id:
+            new_auth_step, _new_auth_result = _diagnostic_step(
+                "new_auth_download",
+                lambda: _new_auth_process_attachment_download(
+                    token=new_token,
+                    user_id=resolved_user_id,
+                    space_id=resolved_space_id,
+                    file_id=resolved_file_id,
+                ),
+            )
+            steps.append(new_auth_step)
+
+            new_download_step, new_download_result = _diagnostic_step(
+                "new_approval_download",
+                lambda: _request_json(
+                    f"{_api_url()}{NEW_APPROVAL_ATTACHMENT_DOWNLOAD_PATH}",
+                    method="POST",
+                    token=new_token,
+                    api_style="new",
+                    payload={"processInstanceId": instance_id, "fileId": resolved_file_id},
+                ),
+            )
+            steps.append(new_download_step)
+            if new_download_result and _extract_attachment_download_uri(new_download_result):
+                download_uri_obtained = True
+                downloaded_by = "new_auth_then_approval_download"
+
+            if not download_uri_obtained and union_id:
+                storage_step, storage_result = _diagnostic_step(
+                    "storage_dentry_download_info",
+                    lambda: _request_json(
+                        f"{_api_url()}{NEW_STORAGE_DENTRY_DOWNLOAD_INFO_PATH.format(space_id=quote(resolved_space_id, safe=''), dentry_id=quote(resolved_file_id, safe=''))}?unionId={quote(union_id, safe='')}",
+                        method="POST",
+                        token=new_token,
+                        api_style="new",
+                        payload={"option": {"version": 1, "preferIntranet": False}},
+                    ),
+                )
+                steps.append(storage_step)
+                storage_response = storage_result if isinstance(storage_result, dict) else None
+                if storage_result:
+                    uri, _headers = _extract_storage_download_info(_unwrap_result(storage_result))
+                    if uri:
+                        download_uri_obtained = True
+                        downloaded_by = "storage_dentry_download_info"
+
+    return {
+        "ok": download_uri_obtained,
+        "api_style": resolved_api_style,
+        "process_instance_id": instance_id,
+        "file_id": resolved_file_id,
+        "file_name": file_name,
+        "space_id": resolved_space_id,
+        "user_id_configured": bool(resolved_user_id),
+        "download_uri_obtained": download_uri_obtained,
+        "downloaded_by": downloaded_by,
+        "storage_response": _compact_dingtalk_response(storage_response),
+        "steps": steps,
     }
 
 
@@ -739,6 +1508,147 @@ def _find_field_value(fields: dict[str, Any], aliases: tuple[str, ...]) -> Any:
             if value not in (None, ""):
                 return value
     return ""
+
+
+def _find_field_entry(fields: dict[str, Any], aliases: tuple[str, ...]) -> tuple[str, Any]:
+    normalized_aliases = [_normalize_key(alias) for alias in aliases]
+    for key, value in fields.items():
+        normalized_key = _normalize_key(key)
+        if any(alias and alias in normalized_key for alias in normalized_aliases):
+            if value not in (None, ""):
+                return key, value
+    return "", ""
+
+
+def _normalize_currency_code(value: Any) -> str:
+    normalized = _normalize_key(value)
+    if not normalized:
+        return ""
+    if any(token in normalized for token in ("rmb", "cny", "人民币", "renminbi")):
+        return "RMB"
+    if any(token in normalized for token in ("usd", "dólar", "dolar", "dolares", "dólares", "美元", "美金")):
+        return "USD"
+    if any(token in normalized for token in ("mxn", "peso", "pesos", "比索", "墨西哥")):
+        return "MXN"
+    return ""
+
+
+def _parse_money_amount(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if number > 0 else None
+
+    text = _clean(value).replace("，", ",")
+    if not text:
+        return None
+
+    candidates: list[tuple[int, int, float]] = []
+    for match in re.finditer(r"[-+]?\d[\d,]*(?:\.\d+)?", text):
+        raw_number = match.group(0).replace(",", "")
+        try:
+            number = float(raw_number)
+        except ValueError:
+            continue
+        if number <= 0:
+            continue
+
+        before = text[max(0, match.start() - 12) : match.start()].lower()
+        after = text[match.end() : match.end() + 12].lower()
+        if re.match(r"\s*(hq|gp|kg|kgs|cbm|m3|pcs|pc|件|个|箱|柜|天|day)", after):
+            continue
+        score = 1
+        if _normalize_currency_code(f"{before}{after}") or any(symbol in before + after for symbol in ("$", "￥", "¥")):
+            score = 3
+        candidates.append((score, -match.start(), number))
+
+    if not candidates:
+        return None
+    return max(candidates)[2]
+
+
+def extract_logistics_fee_from_approval(item: dict) -> dict:
+    """只提取明确填写的物流费用，报价说明不能直接入账。"""
+
+    form_fields = item.get("form_fields") or {}
+    currency_field, currency_raw = _find_field_entry(form_fields, LOGISTICS_CURRENCY_FIELD_ALIASES)
+    explicit_currency = _normalize_currency_code(currency_raw)
+    source_field, raw_value = _find_field_entry(form_fields, LOGISTICS_FEE_FIELD_ALIASES)
+    amount = _parse_money_amount(raw_value)
+    if amount is None:
+        return {}
+    currency = _normalize_currency_code(raw_value) or explicit_currency or "RMB"
+    return {
+        "amount": amount,
+        "currency": currency,
+        "source_label": "物流费用",
+        "source_field": source_field,
+        "source_value": raw_value,
+        "currency_field": currency_field,
+        "currency_value": currency_raw,
+    }
+
+
+def _parse_quote_total_amount(value: Any) -> float | None:
+    """报价合计行优先取等号后的总额，否则取最后一个金额。"""
+
+    text = _clean(value).replace("，", ",")
+    if not text:
+        return None
+    numbers = re.findall(r"[-+]?\d[\d,]*(?:\.\d+)?", text)
+    if not numbers:
+        return None
+    if "=" in text:
+        after_equals = re.findall(r"[-+]?\d[\d,]*(?:\.\d+)?", text.rsplit("=", 1)[1])
+        if after_equals:
+            numbers = after_equals
+    try:
+        amount = float(numbers[-1].replace(",", ""))
+    except ValueError:
+        return None
+    return amount if amount > 0 else None
+
+
+def extract_logistics_quote_candidates_from_approval(item: dict) -> list[dict]:
+    """从物流报价文字中提取待确认候选，不生成任何费用分摊。"""
+
+    form_fields = item.get("form_fields") or {}
+    source_field, raw_value = _find_field_entry(form_fields, LOGISTICS_QUOTE_FIELD_ALIASES)
+    text = _clean(raw_value)
+    if not source_field or not text:
+        return []
+
+    volume_match = re.search(r"(?:预估方数|体积)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(?:方|立方|cbm|m3)", text, re.IGNORECASE)
+    volume_m3 = float(volume_match.group(1)) if volume_match else None
+    candidates: list[dict] = []
+    carrier = ""
+    for line_no, raw_line in enumerate(text.splitlines(), start=1):
+        line = _clean(raw_line)
+        if not line:
+            continue
+        carrier_match = re.search(r"^\s*\d+\s*[.、]?\s*(.+?)报价", line)
+        if carrier_match:
+            carrier = _clean(carrier_match.group(1)).strip("：:")
+        if not re.search(r"(?:合计|总计|总费用|总价)", line, re.IGNORECASE):
+            continue
+        amount = _parse_quote_total_amount(line)
+        if amount is None:
+            continue
+        candidates.append(
+            {
+                "carrier": carrier,
+                "amount": amount,
+                "currency": _normalize_currency_code(line) or "RMB",
+                "volume_m3": volume_m3,
+                "source_field": source_field,
+                "source_value": text,
+                "evidence_line": line,
+                "evidence_line_no": line_no,
+                "status": "待确认",
+            }
+        )
+    return candidates
 
 
 def _find_component_value(instance: dict, aliases: tuple[str, ...]) -> Any:
@@ -1208,6 +2118,8 @@ def summarize_approval(instance: dict, *, process_instance_id: str = "", include
         "oa_form_attachments": oa_form_attachments,
         "form_fields": fields,
     }
+    summary["logistics_fee"] = extract_logistics_fee_from_approval(summary)
+    summary["logistics_quote_candidates"] = extract_logistics_quote_candidates_from_approval(summary)
     if include_raw:
         summary["raw_instance"] = instance
     return summary
@@ -1292,6 +2204,8 @@ def _merge_oa_extra_json(old_value: Any, new_value: Any) -> str:
             "source": new_data.get("source"),
             "transport_mode_raw": new_data.get("transport_mode_raw"),
             "open_url": new_data.get("open_url"),
+            "logistics_fee": new_data.get("logistics_fee") or {},
+            "logistics_quote_candidates": new_data.get("logistics_quote_candidates") or [],
             "linked_purchase_approvals": new_data.get("linked_purchase_approvals") or [],
             "oa_form_attachments": new_data.get("oa_form_attachments") or [],
             "form_fields": new_data.get("form_fields") or {},
@@ -1387,16 +2301,99 @@ def _flatten_dingtalk_table_row(row: Any) -> dict:
     return {key: value for key, value in flattened.items() if key and value not in (None, "")}
 
 
+def _is_oa_goods_placeholder_row(row: dict) -> bool:
+    material_code = _clean(
+        row.get("物料编码 Código de material")
+        or row.get("物料编码")
+        or row.get("material_code")
+    )
+    product_name = _clean(
+        row.get("物料名称（中文）Nombre del material (chino)")
+        or row.get("物料名称（中文）")
+        or row.get("物料名称")
+        or row.get("产品名称")
+    )
+    quantity = row.get("数量Cantidad") or row.get("数量") or row.get("quantity")
+    placeholder_markers = {
+        "物料编码",
+        "品目编码",
+        "物料名称",
+        "物料名称中文",
+        "产品名称",
+        "规格型号",
+        "数量",
+        "单位",
+        "收货人",
+        "收件人",
+    }
+    if material_code in placeholder_markers:
+        return True
+    if product_name in placeholder_markers and _to_number_or_none(quantity) in (None, 0):
+        return True
+    values = [_clean(value) for value in row.values()]
+    marker_count = sum(1 for value in values if value in placeholder_markers)
+    return marker_count >= 3
+
+
+def _parse_oa_goods_text_rows(value: Any) -> list[dict]:
+    """解析普通文本填写的货物信息，兼容“编码-名称-数量pcs”格式。"""
+
+    text = _clean(value)
+    if not text:
+        return []
+
+    rows: list[dict] = []
+    quantity_pattern = re.compile(
+        r"^(?P<body>.+?)\s*(?:[-－—]+\s*)?(?P<quantity>\d+(?:\.\d+)?)\s*"
+        r"(?P<unit>pcs?|件|个|箱|袋|套|卷|支|台|片|kg|kgs|公斤|千克|吨|m3|cbm|方)\s*$",
+        re.IGNORECASE,
+    )
+    material_code_pattern = re.compile(
+        r"^(?P<material_code>[A-Za-z][A-Za-z0-9]*\d[A-Za-z0-9]*)\s*[-－—]\s*(?P<product_name>.+)$"
+    )
+
+    for raw_line in re.split(r"[\r\n;；]+", text):
+        line = re.sub(r"^\s*(?:\d+[.、)）]\s*)?[-*•]+\s*", "", _clean(raw_line))
+        if not line:
+            continue
+        if re.match(r"^(?:合计|总计|共计|总数|总重量|重量|体积|总体积)", line, re.IGNORECASE):
+            continue
+
+        quantity_match = quantity_pattern.match(line)
+        if not quantity_match:
+            continue
+
+        body = _clean(quantity_match.group("body")).rstrip("-－— ")
+        if not body:
+            continue
+        code_match = material_code_pattern.match(body)
+        row = {
+            "product_name": _clean(code_match.group("product_name")) if code_match else body,
+            "quantity": quantity_match.group("quantity"),
+            "unit": quantity_match.group("unit"),
+            "_oa_goods_source": "text",
+        }
+        if code_match:
+            row["material_code"] = _clean(code_match.group("material_code"))
+        rows.append(row)
+    return rows
+
+
 def extract_oa_goods_rows(item: dict) -> list[dict]:
-    """从钉钉国际物流审批摘要中提取货物信息表格行。"""
+    """从钉钉国际物流审批摘要中提取货物信息表格或文本行。"""
 
     form_fields = item.get("form_fields") or {}
-    goods_table = None
+    goods_value = None
     for fieldname, value in form_fields.items():
         if _is_goods_table_field(fieldname):
-            goods_table = _parse_json_text(value)
+            goods_value = value
             break
-    if not isinstance(goods_table, list):
+    goods_table = _parse_json_text(goods_value)
+    if isinstance(goods_table, list):
+        raw_rows = [_flatten_dingtalk_table_row(raw_row) for raw_row in goods_table]
+    elif isinstance(goods_value, str):
+        raw_rows = _parse_oa_goods_text_rows(goods_value)
+    else:
         return []
 
     common_values = {
@@ -1407,9 +2404,10 @@ def extract_oa_goods_rows(item: dict) -> list[dict]:
         "备注otro": form_fields.get("备注otro"),
     }
     rows: list[dict] = []
-    for raw_row in goods_table:
-        row = _flatten_dingtalk_table_row(raw_row)
+    for row in raw_rows:
         if not row:
+            continue
+        if _is_oa_goods_placeholder_row(row):
             continue
         for key, value in common_values.items():
             if value not in (None, "") and key not in row:
@@ -1648,6 +2646,8 @@ def build_batch_values_from_approval(item: dict) -> dict:
                 "source": "dingtalk_oa_logistics",
                 "transport_mode_raw": item.get("transport_mode_raw"),
                 "open_url": item.get("open_url"),
+                "logistics_fee": item.get("logistics_fee") or extract_logistics_fee_from_approval(item),
+                "logistics_quote_candidates": item.get("logistics_quote_candidates") or extract_logistics_quote_candidates_from_approval(item),
                 "linked_purchase_approvals": item.get("linked_purchase_approvals") or [],
                 "oa_form_attachments": oa_form_attachments,
                 "form_fields": form_fields,
@@ -1849,7 +2849,7 @@ def _sync_oa_goods_items(
             "action": "skipped",
             "created_count": 0,
             "skipped": True,
-            "reason": "钉钉审批单未解析到货物信息表格。",
+            "reason": "钉钉审批单未解析到可用的货物信息。",
         }
 
     created_names: list[str] = []
@@ -1926,6 +2926,7 @@ def _build_oa_attachment_values(
         "comment_attachments_included": False,
         "approval_no": approval_item.get("source_approval_no") or "",
         "instance_id": approval_item.get("source_instance_id") or "",
+        "originator_userid": approval_item.get("originator_userid") or "",
         "source_field": record.get("source_field") or "",
         "component_type": record.get("component_type") or "",
         "file_id": record.get("file_id") or "",
@@ -2067,6 +3068,7 @@ def _sync_linked_purchase_fields(
             batch_name=batch_name,
             version_name=version_name,
             linked_purchase_json=_json_dumps(linked_approvals),
+            recalculate_after_writeback=False,
         )
     except Exception as exc:
         return {
@@ -2090,11 +3092,124 @@ def _sync_linked_purchase_fields(
     }
 
 
-def _recalculate_after_purchase_sync(*, batch_name: str, version_name: str, purchase_sync: dict) -> dict:
+def _sync_oa_logistics_allocation_rule(
+    *,
+    batch_name: str,
+    version_name: str,
+    approval_item: dict,
+) -> dict:
+    """把国际物流 OA 的物流费用落成整票分摊规则。"""
+
+    fee = approval_item.get("logistics_fee") if isinstance(approval_item.get("logistics_fee"), dict) else {}
+    fee = fee or extract_logistics_fee_from_approval(approval_item)
+    parsed_amount = _parse_money_amount(fee.get("amount")) if fee else None
+    if not fee or parsed_amount is None:
+        return {
+            "action": "skipped",
+            "ok": True,
+            "created_count": 0,
+            "updated_count": 0,
+            "reason": "当前国际物流 OA 没有解析到明确物流费用，暂不生成分摊规则。",
+        }
+    if not version_name:
+        return {
+            "action": "skipped",
+            "ok": True,
+            "created_count": 0,
+            "updated_count": 0,
+            "reason": "当前批次没有版本，无法生成物流费用分摊规则。",
+        }
+
+    amount = float(parsed_amount)
+    currency = _normalize_currency_code(fee.get("currency")) or "RMB"
+    values = {
+        "batch": batch_name,
+        "version": version_name,
+        "rule_code": "oa_logistics_freight",
+        "expense_category": "国际物流费用",
+        "allocation_basis": "gross_weight",
+        "basis_field": "gross_weight",
+        "currency": currency,
+        "amount": amount,
+        "priority_no": 20,
+        "remark": f"从钉钉国际物流 OA {fee.get('source_label') or '物流费用'}生成：{fee.get('source_field') or ''}={fee.get('source_value')}",
+        "is_active": 1,
+        "is_enabled": 1,
+    }
+
+    if frappe is None:
+        return {
+            "action": "preview",
+            "ok": True,
+            "created_count": 0,
+            "updated_count": 0,
+            "rule": values,
+            "fee": fee,
+        }
+
+    existing_name = frappe.db.get_value(
+        "Overseas Cost Allocation Rule",
+        {"batch": batch_name, "version": version_name, "rule_code": values["rule_code"]},
+        "name",
+    )
+    if existing_name:
+        current = frappe.db.get_value(
+            "Overseas Cost Allocation Rule",
+            existing_name,
+            list(values.keys()),
+            as_dict=True,
+        ) or {}
+        if current and all(_values_match(current.get(fieldname), value) for fieldname, value in values.items()):
+            return {
+                "action": "unchanged",
+                "ok": True,
+                "rule_name": existing_name,
+                "created_count": 0,
+                "updated_count": 0,
+                "fee": fee,
+            }
+        frappe.db.set_value("Overseas Cost Allocation Rule", existing_name, values, update_modified=True)
+        action = "updated"
+        rule_name = existing_name
+        created_count = 0
+        updated_count = 1
+    else:
+        rule_name = frappe.get_doc({"doctype": "Overseas Cost Allocation Rule", **values}).insert(ignore_permissions=True).name
+        action = "created"
+        created_count = 1
+        updated_count = 0
+
+    _insert_batch_audit_log(
+        batch_name=batch_name,
+        field_name="oa_logistics_freight_rule",
+        old_value={"rule_name": existing_name} if existing_name else None,
+        new_value={**values, "rule_name": rule_name},
+        remark="从钉钉国际物流 OA 生成/更新物流费用分摊规则",
+    )
+    return {
+        "action": action,
+        "ok": True,
+        "rule_name": rule_name,
+        "created_count": created_count,
+        "updated_count": updated_count,
+        "fee": fee,
+        "rule": values,
+    }
+
+
+def _recalculate_after_purchase_sync(
+    *,
+    batch_name: str,
+    version_name: str,
+    purchase_sync: dict,
+    logistics_fee_sync: dict | None = None,
+) -> dict:
     if frappe is None:
         return {"action": "skipped", "reason": "当前未连接 Frappe。"}
-    if not purchase_sync.get("ok") or int(purchase_sync.get("updated_count") or 0) <= 0:
-        return {"action": "skipped", "reason": "采购字段没有新增写入，暂不自动试算。"}
+    purchase_changed = purchase_sync.get("ok") and int(purchase_sync.get("updated_count") or 0) > 0
+    fee_changed = bool(logistics_fee_sync and logistics_fee_sync.get("ok") and logistics_fee_sync.get("action") in {"created", "updated"})
+    if not purchase_changed and not fee_changed:
+        return {"action": "skipped", "reason": "采购字段和物流费用规则没有新增写入，暂不自动试算。"}
     try:
         from overseas_costing.services.calculate_service import recalculate_batch
 
@@ -2121,6 +3236,56 @@ def _set_oa_trace_in_extra(root: dict, trace: dict, is_root_trace: bool) -> str:
         merged = dict(root)
         merged["oa_logistics_trace"] = trace
     return _json_dumps(merged)
+
+
+def supplement_empty_oa_goods_items(batch_name: str) -> dict:
+    """只为没有 SKU 的指定 OA 批次补建表单货物明细，不覆盖已有明细。"""
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，无法补建历史批次明细。",
+        }
+
+    batch = frappe.db.get_value(
+        "Overseas Cost Batch",
+        _clean(batch_name),
+        ["name", "batch_no", "current_version", "source_approval_no", "source_instance_id", "source_dingtalk_url", "source_remark", "extra_json"],
+        as_dict=True,
+    )
+    if not batch:
+        return {"ok": False, "message": "未找到指定的海外成本批次。"}
+
+    root, trace, _is_root_trace = _get_oa_trace_from_extra(batch.get("extra_json"))
+    form_fields = trace.get("form_fields") or {}
+    if not form_fields:
+        return {
+            "ok": False,
+            "batch_name": batch.get("name"),
+            "message": "该批次没有保存原始审批字段，需先重拉对应钉钉审批单。",
+        }
+
+    approval_item = {
+        "source_approval_no": batch.get("source_approval_no") or trace.get("source_approval_no") or "",
+        "source_instance_id": batch.get("source_instance_id") or trace.get("source_instance_id") or "",
+        "source_dingtalk_url": batch.get("source_dingtalk_url") or trace.get("source_dingtalk_url") or "",
+        "transport_mode_raw": trace.get("transport_mode_raw") or batch.get("source_remark") or "",
+        "logistics_no": batch.get("batch_no") or "",
+        "form_fields": form_fields,
+    }
+    sync_result = _sync_oa_goods_items(
+        batch_name=batch.get("name"),
+        version_name=batch.get("current_version") or "",
+        approval_item=approval_item,
+        only_when_empty=True,
+    )
+    return {
+        "ok": not sync_result.get("skipped") or bool(sync_result.get("existing_count")),
+        "batch_name": batch.get("name"),
+        "batch_no": batch.get("batch_no"),
+        "item_sync": sync_result,
+    }
 
 
 def sync_existing_oa_form_attachments(limit: int | None = 200) -> dict:
@@ -2641,10 +3806,16 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
             version_name=saved.get("version_name") or "",
             approval_item=item,
         )
+        logistics_fee_sync = _sync_oa_logistics_allocation_rule(
+            batch_name=saved["batch_name"],
+            version_name=saved.get("version_name") or "",
+            approval_item=item,
+        )
         recalculate_sync = _recalculate_after_purchase_sync(
             batch_name=saved["batch_name"],
             version_name=saved.get("version_name") or "",
             purchase_sync=purchase_sync,
+            logistics_fee_sync=logistics_fee_sync,
         )
         saved.update(
             {
@@ -2655,6 +3826,7 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
                 "item_sync": item_sync,
                 "attachment_sync": attachment_sync,
                 "purchase_sync": purchase_sync,
+                "logistics_fee_sync": logistics_fee_sync,
                 "recalculate_sync": recalculate_sync,
             }
         )
@@ -2666,7 +3838,7 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
     return {
         "ok": True,
         "dry_run": False,
-        "message": "钉钉海运审批已保存到批次；已生成/保留物料行、登记发起附件，并按关联采购支出 OA 同步采购单价、币种和货值。",
+        "message": "钉钉海运审批已保存到批次；已生成/保留物料行、登记发起附件，并按关联采购支出 OA 同步采购单价、币种和货值，同时把明确的物流费用生成分摊规则。",
         "total": len(raw_items),
         "created_count": created_count,
         "updated_count": updated_count,
@@ -2963,6 +4135,7 @@ def sync_purchase_expenses_from_process(
             batch_name=row.get("name"),
             version_name=row.get("current_version") or "",
             purchase_summaries_json=purchase_summaries_json,
+            recalculate_after_writeback=False,
         )
         recalculate_sync = _recalculate_after_purchase_sync(
             batch_name=row.get("name"),

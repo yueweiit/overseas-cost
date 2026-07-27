@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import json
+
 try:
     import frappe
 except Exception:  # pragma: no cover - 本地无 Frappe 环境时保持可导入
@@ -503,6 +505,32 @@ def _is_parsed_attachment(row: dict) -> bool:
     return _source_status_key(row.get("parse_status")) == "parsed"
 
 
+def _get_oa_logistics_trace(extra_json) -> dict:
+    if isinstance(extra_json, dict):
+        payload = dict(extra_json)
+    else:
+        try:
+            payload = json.loads(extra_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+    if not isinstance(payload, dict):
+        return {}
+    trace = payload.get("oa_logistics_trace")
+    return trace if isinstance(trace, dict) else payload
+
+
+def _quote_candidate_summary(candidate: dict) -> dict:
+    return {
+        "carrier": str(candidate.get("carrier") or "").strip(),
+        "amount": candidate.get("amount"),
+        "currency": str(candidate.get("currency") or "").strip(),
+        "volume_m3": candidate.get("volume_m3"),
+        "evidence_line": str(candidate.get("evidence_line") or "").strip(),
+        "source_field": str(candidate.get("source_field") or "").strip(),
+        "status": str(candidate.get("status") or "待确认").strip(),
+    }
+
+
 def _build_batch_source_status(batch: dict, attachments: list[dict] | None = None) -> dict:
     """按业务资料链路汇总批次来源状态，供前端数据检查展示。"""
 
@@ -530,6 +558,20 @@ def _build_batch_source_status(batch: dict, attachments: list[dict] | None = Non
     ]
     batch_source_attachment_count = int(batch.get("source_attachment_count") or 0)
     oa_attachment_count = max(batch_source_attachment_count, len(oa_attachment_rows))
+    trace = _get_oa_logistics_trace(batch.get("extra_json"))
+    quote_candidates = trace.get("logistics_quote_candidates") or []
+    if not isinstance(quote_candidates, list):
+        quote_candidates = []
+    if not quote_candidates and isinstance(trace.get("form_fields"), dict):
+        try:
+            from overseas_costing.scripts.import_oa_logistics import extract_logistics_quote_candidates_from_approval
+
+            quote_candidates = extract_logistics_quote_candidates_from_approval({"form_fields": trace["form_fields"]})
+        except Exception:
+            quote_candidates = []
+    quote_candidates = [_quote_candidate_summary(row) for row in quote_candidates if isinstance(row, dict)]
+    confirmed_quote = trace.get("confirmed_logistics_quote")
+    confirmed_quote = _quote_candidate_summary(confirmed_quote) if isinstance(confirmed_quote, dict) else {}
 
     return {
         "source_no": source_no,
@@ -544,6 +586,10 @@ def _build_batch_source_status(batch: dict, attachments: list[dict] | None = Non
         "has_form_attachments": oa_attachment_count > 0,
         "has_packing_list": bool(packing_list_rows),
         "has_tax_certificate": bool(tax_certificate_rows),
+        "logistics_quote_candidate_count": len(quote_candidates),
+        "logistics_quote_candidates": quote_candidates,
+        "confirmed_logistics_quote": confirmed_quote,
+        "has_confirmed_logistics_quote": bool(confirmed_quote.get("amount")),
     }
 
 
@@ -622,6 +668,7 @@ def get_batch_list(filters: dict) -> dict:
             "total_gross_weight_kg",
             "estimated_total_cost_rmb",
             "actual_total_cost_rmb",
+            "extra_json",
             "modified",
         ],
         "order_by": "modified desc",
@@ -642,6 +689,8 @@ def get_batch_list(filters: dict) -> dict:
         if not is_hidden_approval_status(item.get("source_approval_status"))
     ]
     items = _attach_batch_source_status(items)
+    for item in items:
+        item.pop("extra_json", None)
     return {
         "ok": True,
         "message": "批次列表已返回。",

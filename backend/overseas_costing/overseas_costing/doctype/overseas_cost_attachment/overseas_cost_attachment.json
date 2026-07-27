@@ -46,7 +46,7 @@
       "fieldname": "attachment_type",
       "fieldtype": "Select",
       "label": "附件类型",
-      "options": "Excel Main Table\nLogistics Bill\nCommercial Invoice\nPacking List\nTax Certificate\nOther",
+      "options": "Excel Main Table\nLogistics Bill\nCommercial Invoice\nPurchase Order\nPacking List\nTax Certificate\nCustoms Declaration\nOther",
       "in_list_view": 1
     },
     {

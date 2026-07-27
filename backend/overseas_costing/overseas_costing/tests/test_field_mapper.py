@@ -61,6 +61,8 @@ def test_map_packing_list_row_to_item() -> None:
         "体积m3": 0.21,
         "体积重KG": 35.0,
         "计费重KG": 35.0,
+        "单价": 1.2,
+        "总价（RMB)": 480,
         "海关分类编码": "3926909090",
     }
     mapped = map_packing_list_row_to_item(row)
@@ -69,6 +71,9 @@ def test_map_packing_list_row_to_item() -> None:
     assert mapped["gross_weight_kg"] == 32.5
     assert mapped["volume_m3"] == 0.21
     assert mapped["chargeable_weight_kg"] == 35.0
+    assert mapped["unit_price"] == 1.2
+    assert mapped["goods_value"] == 480
+    assert mapped["purchase_currency"] == "人民币RMB"
     assert mapped["hs_code"] == "3926909090"
 
 

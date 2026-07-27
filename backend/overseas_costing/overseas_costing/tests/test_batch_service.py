@@ -137,3 +137,48 @@ def test_build_batch_source_status_summarizes_oa_and_voucher_records() -> None:
     assert status["parsed_packing_list_count"] == 0
     assert status["tax_certificate_count"] == 1
     assert status["parsed_tax_certificate_count"] == 1
+
+
+def test_build_batch_source_status_exposes_quote_candidates_without_raw_oa_text() -> None:
+    status = _build_batch_source_status(
+        {
+            "name": "BATCH-QUOTE-001",
+            "extra_json": json.dumps(
+                {
+                    "source": "dingtalk_oa_logistics",
+                    "logistics_quote_candidates": [
+                        {
+                            "carrier": "SISA",
+                            "amount": 5730,
+                            "currency": "RMB",
+                            "volume_m3": 1.5,
+                            "evidence_line": "合计价格：5730元",
+                            "source_field": "物流报价",
+                            "source_value": "不应暴露给前端的完整原文",
+                        }
+                    ],
+                    "confirmed_logistics_quote": {
+                        "carrier": "SISA",
+                        "amount": 5730,
+                        "currency": "RMB",
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        }
+    )
+
+    assert status["logistics_quote_candidate_count"] == 1
+    assert status["logistics_quote_candidates"] == [
+        {
+            "carrier": "SISA",
+            "amount": 5730,
+            "currency": "RMB",
+            "volume_m3": 1.5,
+            "evidence_line": "合计价格：5730元",
+            "source_field": "物流报价",
+            "status": "待确认",
+        }
+    ]
+    assert status["has_confirmed_logistics_quote"] is True
+    assert "source_value" not in status["logistics_quote_candidates"][0]

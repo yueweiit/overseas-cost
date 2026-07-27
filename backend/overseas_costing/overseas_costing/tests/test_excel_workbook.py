@@ -261,6 +261,100 @@ def test_parse_oa_attachment_detail_sheet_auto_detects_non_yuewei_sheet() -> Non
     assert first_item[11]["sourceRemark"] == "买单；申报名称：钢化膜"
 
 
+def test_parse_oa_attachment_detail_sheet_splits_group_total_price() -> None:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "5月指环扣双清"
+    sheet.append(
+        [
+            "品目编码Item code",
+            "中文品名 Chinese Name",
+            "规格，型号，品牌 Specification, model, brand",
+            "总个数 The total number of",
+            "总毛重Gross weight",
+            "总体积total capacity",
+            "单价 unit price",
+            "总价（RMB)",
+            "出口方式",
+        ]
+    )
+    sheet.append(["FL000429", "指环扣", "超队指环扣", 86400, 349.2, 0.36018, 0.619, 55710, "海运双清"])
+    sheet.append(["FL000429", "指环扣", "超队指环扣", 3600, 14.5, 0.00864, None, None, "海运双清"])
+    file_path = Path("tmp_group_price_attachment_test.xlsx")
+    try:
+        workbook.save(file_path)
+        workbook.close()
+
+        meta, blocks = parse_yuewei_excel_workbook(file_path)
+    finally:
+        workbook.close()
+        if file_path.exists():
+            file_path.unlink()
+
+    assert meta["parser"] == "oa_attachment_detail"
+    assert summarize_excel_blocks(blocks) == {
+        "block_count": 1,
+        "item_count": 2,
+        "batch_ids": ["5月指环扣双清-未关联采购单"],
+    }
+    first_item = blocks[0]["items"][0]
+    second_item = blocks[0]["items"][1]
+    assert first_item[2] == 0.619
+    assert first_item[4] == pytest.approx(0.619 * 86400)
+    assert second_item[2] == 0.619
+    assert second_item[4] == pytest.approx(0.619 * 3600)
+    assert second_item[11]["purchaseCurrency"] == "人民币RMB"
+
+
+def test_parse_oa_attachment_detail_sheet_expands_merged_unit_price() -> None:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "5月指环扣双清"
+    sheet.append(
+        [
+            "品目编码Item code",
+            "中文品名 Chinese Name",
+            "规格，型号，品牌 Specification, model, brand",
+            "总个数 The total number of",
+            "总毛重Gross weight",
+            "总体积total capacity",
+            "单价 unit price",
+            "总价（RMB)",
+            "出口方式",
+        ]
+    )
+    sheet.append(["FL000429", "指环扣", "超队指环扣", 86400, 349.2, 0.36018, 0.619, 55710, "海运双清"])
+    sheet.append(["FL000427", "指环扣", "亚克力指环扣", 3600, 14.5, 0.00864, None, None, "海运双清"])
+    sheet.append(["FL000428", "指环扣", "透明指环扣", 72000, 291, 0.30015, None, None, "海运双清"])
+    sheet.merge_cells("G2:G4")
+    sheet.merge_cells("H2:H4")
+    file_path = Path("tmp_merged_price_attachment_test.xlsx")
+    try:
+        workbook.save(file_path)
+        workbook.close()
+
+        meta, blocks = parse_yuewei_excel_workbook(file_path)
+    finally:
+        workbook.close()
+        if file_path.exists():
+            file_path.unlink()
+
+    assert meta["parser"] == "oa_attachment_detail"
+    assert summarize_excel_blocks(blocks) == {
+        "block_count": 1,
+        "item_count": 3,
+        "batch_ids": ["5月指环扣双清-未关联采购单"],
+    }
+    first_item, second_item, third_item = blocks[0]["items"]
+    assert first_item[2] == 0.619
+    assert first_item[4] == pytest.approx(0.619 * 86400)
+    assert second_item[2] == 0.619
+    assert second_item[4] == pytest.approx(0.619 * 3600)
+    assert third_item[2] == 0.619
+    assert third_item[4] == pytest.approx(0.619 * 72000)
+    assert "合并单价按本行数量重算" in second_item[11]["sourceRemark"]
+
+
 def test_parse_oa_attachment_detail_sheet_ignores_cost_calculation_rows() -> None:
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -349,6 +443,121 @@ def test_parse_packing_list_without_price_headers_auto_detects_physical_fields()
     assert first_item[11]["volumeM3"] == 19.0969
     assert first_item[11]["volumeWeightKg"] == 3182.82
     assert first_item[11]["chargeableWeightKg"] == 3182.82
+    assert "purchaseCurrency" not in first_item[11]
+
+
+def test_parse_sisa_warehouse_receipt_skips_image_column_and_allocates_box_totals() -> None:
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "产品清单+派件信息"
+    sheet.append(["SiSA墨西哥专线 海运进仓单"])
+    sheet.append(["派件信息"])
+    sheet.append(["客户", "西文名", "客户号", "货件号", "总箱数"])
+    sheet.append(["凌翔电子", "LXDZ", "C0144", None, 10])
+    sheet.append([])
+    sheet.append(["产品清单"])
+    sheet.append(
+        [
+            "产品图片",
+            "箱号",
+            "箱数",
+            "型号",
+            "品名",
+            "报关单价\n（美元）",
+            "单箱产品数",
+            "总产品数",
+            "长\n(cm)",
+            "宽\n(cm)",
+            "高\n(cm)",
+            "体积/箱\n(cmb)",
+            "总体积\n(cmb)",
+            "毛重/箱\n(kg)",
+            "总毛重\n(kg)",
+            "备注",
+        ]
+    )
+    sheet.append(
+        [
+            '=_xlfn.DISPIMG("ID_4BC568ED6C274B99BBC98F1EF3C7EB93",1)',
+            "1号箱",
+            1,
+            "GJ003786",
+            "灯管",
+            7.7247191011236,
+            8,
+            8,
+            130,
+            36,
+            68,
+            None,
+            0.31824,
+            21,
+            21,
+            None,
+        ]
+    )
+    sheet.append(
+        [
+            '=_xlfn.DISPIMG("ID_24CCFBB7860E47588117A94152CFFA90",1)',
+            None,
+            None,
+            "FL002598",
+            "灯管+连接线",
+            6.53089887640449,
+            30,
+            30,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ]
+    )
+    long_model_name = "大面料（蓝色压花款 Apple iPad Air 13款的）"
+    sheet.append([None, "2号箱", 1, long_model_name, "平板保护套配件", 10, 30, None, 35, 35, 35, None, None, 10, None, None])
+    sheet.append(["Total", None, 2, None, None, None, None, 68, None, None, None, None, 0.361115, None, 31, None])
+    file_path = Path("tmp_sisa_warehouse_receipt_test.xlsx")
+    try:
+        workbook.save(file_path)
+        workbook.close()
+
+        meta, blocks = parse_yuewei_excel_workbook(file_path, sheet_name="2026年YUEWEI")
+    finally:
+        workbook.close()
+        if file_path.exists():
+            file_path.unlink()
+
+    assert meta["sourceSheet"] == "产品清单+派件信息"
+    assert meta["parser"] == "sisa_warehouse_receipt"
+    assert "已自动识别" in meta["warning"]
+    assert summarize_excel_blocks(blocks) == {
+        "block_count": 1,
+        "item_count": 3,
+        "batch_ids": ["C0144"],
+    }
+    first_item, second_item, third_item = blocks[0]["items"]
+    assert first_item[0] == "GJ003786"
+    assert first_item[1] == "灯管"
+    assert first_item[2] is None
+    assert first_item[3] == 8
+    assert first_item[4] is None
+    assert first_item[11]["actualShippedQty"] == 8
+    assert first_item[11]["grossWeightKg"] == pytest.approx(21 * 8 / 38)
+    assert first_item[11]["volumeM3"] == pytest.approx(0.31824 * 8 / 38)
+    assert "报关单价USD：7.724719" in first_item[11]["sourceRemark"]
+    assert second_item[0] == "FL002598"
+    assert second_item[1] == "灯管+连接线"
+    assert second_item[11]["grossWeightKg"] == pytest.approx(21 * 30 / 38)
+    assert second_item[11]["volumeM3"] == pytest.approx(0.31824 * 30 / 38)
+    assert third_item[0] is None
+    assert third_item[1] == "平板保护套配件"
+    assert third_item[3] == 30
+    assert third_item[11]["grossWeightKg"] == 10
+    assert third_item[11]["volumeM3"] == pytest.approx(35 * 35 * 35 / 1_000_000)
+    assert third_item[11]["specModel"] == long_model_name
 
 
 def test_parse_ci_pl_workbook_merges_invoice_quantity_and_packing_weight() -> None:

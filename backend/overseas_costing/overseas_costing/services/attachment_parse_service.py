@@ -12,7 +12,11 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import tempfile
+import zipfile
 from pathlib import Path
+from xml.etree import ElementTree
 
 try:
     import frappe
@@ -39,6 +43,355 @@ TAX_CERTIFICATE_PARSE_TARGETS = [
     "line_items",
 ]
 DEFAULT_FX_RMB_TO_MXN = 2.6
+OCR_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+WORD_DOCUMENT_SUFFIXES = {".doc", ".docx"}
+TEXT_DOCUMENT_SUFFIXES = {".txt"}
+DOCX_WORD_NAMESPACE = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def preview_source_document(
+    *,
+    source_name: str | None = None,
+    file_path: str | None = None,
+    file_url: str | None = None,
+) -> dict:
+    """预览识别 OA 附件内容，只判断资料类型和字段候选，不写入成本字段。"""
+
+    path = _resolve_source_file_path(file_path=file_path, file_url=file_url)
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        native_text, native_method = extract_pdf_text_with_method(file_path=str(path))
+        if _has_meaningful_document_text(native_text):
+            text = native_text
+            extraction_method = native_method
+        else:
+            text = _ocr_pdf_file(path)
+            extraction_method = "ocr_pdf"
+    elif suffix in OCR_IMAGE_SUFFIXES:
+        text = _ocr_image_file(path)
+        extraction_method = "ocr_image"
+    elif suffix == ".docx":
+        text = _extract_docx_text(path)
+        extraction_method = "word_docx"
+    elif suffix == ".doc":
+        text = _extract_legacy_word_text(path)
+        extraction_method = "word_doc"
+    elif suffix in TEXT_DOCUMENT_SUFFIXES:
+        text = _extract_plain_text_file(path)
+        extraction_method = "txt_text"
+    else:
+        raise ValueError(f"暂不支持识别 {suffix or '未知'} 格式附件。")
+
+    classification = classify_source_document_text(text, source_name=source_name or path.name)
+    fields = extract_source_document_field_candidates(text, classification_code=classification["code"])
+    purchase_order = (
+        parse_purchase_order_text(text, source_name=source_name or path.name)
+        if classification["code"] == "purchase_order"
+        else {}
+    )
+    return {
+        "ok": True,
+        "source_name": source_name or path.name,
+        "file_path": str(path),
+        "file_url": file_url or "",
+        "file_ext": suffix.lstrip("."),
+        "extraction_method": extraction_method,
+        "classification": classification,
+        "field_candidates": fields,
+        "purchase_order": purchase_order,
+        "text_excerpt": _document_text_excerpt(text),
+        "text_length": len(text),
+        "can_write_purchase_price": classification["code"] == "purchase_order" and bool(purchase_order.get("line_items")),
+        "message": "附件内容识别预览已生成，当前不会写入物料单价或货值。",
+    }
+
+
+def classify_source_document_text(text: str | None, *, source_name: str | None = None) -> dict:
+    """按内容而非文件名区分采购价格、报关和物流报价资料。"""
+
+    normalized = _normalize_text(text).upper()
+    if (
+        "PEDIMENTO" in normalized
+        and any(marker in normalized for marker in ("NUM. PEDIMENTO", "IMPORTE PAGADO", "ADUANA E/S"))
+    ):
+        return {
+            "code": "tax_certificate",
+            "label": "完税凭证",
+            "reason": "识别到墨西哥 PEDIMENTO 完税凭证结构，将提取报关单号和税费候选用于最终核对。",
+        }
+    if any(marker in normalized for marker in ("海关出口货物报关单", "海关进口货物报关单", "CUSTOMS DECLARATION")):
+        return {
+            "code": "customs_declaration",
+            "label": "报关资料",
+            "reason": "识别到海关报关单标题，申报价格仅作为关务资料，不自动写入采购单价。",
+        }
+    if any(marker in normalized for marker in ("物流报价", "运费报价", "FREIGHT QUOTE", "COTIZACI")):
+        return {
+            "code": "logistics_quote",
+            "label": "物流报价",
+            "reason": "识别到物流/运费报价，作为费用候选，需人工确认后才能参与分摊。",
+        }
+    if any(marker in normalized for marker in ("PURCHASE ORDER", "采购订单")):
+        return {
+            "code": "purchase_order",
+            "label": "采购订单",
+            "reason": "识别到采购订单标题，将提取订单明细并按物料编码、规格生成匹配预览。",
+        }
+    has_price = any(marker in normalized for marker in ("单价", "UNIT PRICE", "PRECIO", "金额", "AMOUNT", "TOTAL"))
+    has_goods = any(marker in normalized for marker in ("物料编码", "物品编码", "货号", "SKU", "MATERIAL CODE", "PRODUCT CODE"))
+    if has_price and has_goods:
+        return {
+            "code": "purchase_price_document",
+            "label": "采购价格资料",
+            "reason": "同时识别到物料标识和价格字段，可进入物料编码匹配预览。",
+        }
+    return {
+        "code": "unclassified",
+        "label": "待人工识别",
+        "reason": f"未识别出稳定的采购价格、报关或物流报价结构（文件：{source_name or '--'}）。",
+    }
+
+
+def extract_source_document_field_candidates(text: str | None, *, classification_code: str = "") -> dict:
+    """提取仅供预览核对的附件字段候选，不承担自动写入职责。"""
+
+    normalized = _normalize_text(text)
+    compact_numbers = re.sub(r"(\d)\.\s+(\d)", r"\1.\2", normalized)
+    material_codes = list(dict.fromkeys(re.findall(r"\b[A-Z]{1,5}\d{3,}\b", compact_numbers.upper())))[:30]
+    hs_codes = list(dict.fromkeys(re.findall(r"\b\d{8,10}\b", compact_numbers)))[:30]
+    currencies = []
+    for code, markers in (("USD", ("美元", "USD", "US$")), ("RMB", ("人民币", "RMB", "CNY", "¥")), ("MXN", ("比索", "MXN", "PESO"))):
+        if any(marker in compact_numbers.upper() for marker in markers):
+            currencies.append(code)
+
+    result = {
+        "material_codes": material_codes,
+        "hs_codes": hs_codes,
+        "currencies": currencies,
+        "purchase_order_no": "",
+        "unit_price_candidate": None,
+        "goods_value_candidate": None,
+        "pedimento_no_candidate": "",
+        "paid_total_mxn_candidate": None,
+        "tax_total_mxn_candidate": None,
+    }
+    if classification_code == "purchase_order":
+        result["purchase_order_no"] = parse_purchase_order_text(normalized).get("purchase_order_no") or ""
+    if classification_code == "customs_declaration":
+        unit_price = re.search(r"\b(\d+\.\d{2,4})\s+(?:中国|CHIN)", compact_numbers, flags=re.IGNORECASE)
+        goods_value = re.search(r"\b(\d+\.\d{2})\s*(?:美元|USD)\b", compact_numbers, flags=re.IGNORECASE)
+        result["unit_price_candidate"] = _to_number(unit_price.group(1)) if unit_price else None
+        result["goods_value_candidate"] = _to_number(goods_value.group(1)) if goods_value else None
+    if classification_code == "tax_certificate":
+        certificate = parse_tax_certificate_text(normalized)
+        header = certificate.get("header") or {}
+        summary = certificate.get("summary") or {}
+        result["pedimento_no_candidate"] = header.get("pedimento_no") or ""
+        result["paid_total_mxn_candidate"] = header.get("paid_total_mxn")
+        result["tax_total_mxn_candidate"] = summary.get("tax_total_sum_mxn")
+    return result
+
+
+def parse_purchase_order_text(text: str | None, *, source_name: str | None = None) -> dict:
+    """从采购订单文本中提取财务核对所需的订单头和完整价格行。"""
+
+    normalized = _normalize_text(text)
+    compact = re.sub(r"(\d)\.\s+(\d)", r"\1.\2", normalized)
+    purchase_order_no = _find_purchase_order_no(compact, source_name=source_name)
+    currency = _find_purchase_order_currency(compact)
+    line_items = _parse_purchase_order_line_items(compact, currency=currency)
+    return {
+        "purchase_order_no": purchase_order_no,
+        "supplier": _find_purchase_order_party(compact, "SUPPLIER|供应商"),
+        "buyer": _find_purchase_order_party(compact, "BUYER|采购方|买方"),
+        "currency": currency,
+        "line_items": line_items,
+        "recognized_line_count": len(line_items),
+        "message": (
+            f"已识别采购订单 {purchase_order_no or '--'}，可匹配 {len(line_items)} 条完整价格明细。"
+            if line_items
+            else f"已识别采购订单 {purchase_order_no or '--'}，但未识别出可安全写入的完整价格明细。"
+        ),
+    }
+
+
+def _find_purchase_order_no(text: str, *, source_name: str | None = None) -> str:
+    patterns = (
+        r"(?:PURCHASE\s+ORDER|P\.?O\.?|采购订单)\s*(?:NO\.?|NUMBER|#|编号)?\s*[:：#-]?\s*([A-Z]{1,5}\d{6,}(?:[-_/][A-Z0-9]+)*)",
+        r"\b(PO\d{6,}(?:[-_/][A-Z0-9]+)*)\b",
+    )
+    for candidate in (text, str(source_name or "")):
+        upper = candidate.upper()
+        for pattern in patterns:
+            match = re.search(pattern, upper, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+    return ""
+
+
+def _find_purchase_order_currency(text: str) -> str:
+    upper = text.upper()
+    for code, markers in (("USD", ("USD", "US$", "美元")), ("RMB", ("RMB", "CNY", "人民币", "¥")), ("MXN", ("MXN", "PESO", "比索"))):
+        if any(marker in upper for marker in markers):
+            return code
+    return ""
+
+
+def _find_purchase_order_party(text: str, label_pattern: str) -> str:
+    match = re.search(
+        rf"(?:{label_pattern})(?:\s*\([^)]*\))?\s*[:：]\s*(?:\n\s*)?(?:COMPANY\s+FULL\s+NAME\s*\+?\s*)?([^\n]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return _clean_spaces(match.group(1)) if match else ""
+
+
+def _parse_purchase_order_line_items(text: str, *, currency: str) -> list[dict]:
+    items: list[dict] = []
+    seen_codes: set[str] = set()
+    code_pattern = re.compile(r"\b([A-Z]{1,5}\d{3,}[A-Z0-9-]*)\b", flags=re.IGNORECASE)
+    number_pattern = re.compile(r"(?<![A-Z0-9])[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
+
+    for raw_line in text.splitlines():
+        line = _clean_spaces(raw_line)
+        code_match = code_pattern.search(line)
+        if not code_match:
+            continue
+        material_code = code_match.group(1).upper()
+        if material_code in seen_codes:
+            continue
+
+        remainder = f"{line[:code_match.start()]} {line[code_match.end():]}".strip()
+        number_matches = list(number_pattern.finditer(remainder))
+        if len(number_matches) < 3:
+            continue
+        numeric_values = [_to_number(match.group(0)) for match in number_matches]
+        if any(value is None for value in numeric_values):
+            continue
+        quantity, unit_price, goods_value = numeric_values[-3:]
+        if not quantity or unit_price is None or goods_value is None or quantity <= 0 or unit_price <= 0 or goods_value <= 0:
+            continue
+
+        expected_total = float(quantity) * float(unit_price)
+        tolerance = max(1, abs(float(goods_value)) * 0.03)
+        if abs(expected_total - float(goods_value)) > tolerance:
+            continue
+
+        first_number_start = number_matches[0].start()
+        product_name = _clean_spaces(remainder[:first_number_start].strip(" |-"))
+        items.append(
+            {
+                "material_code": material_code,
+                "product_name": product_name,
+                "spec_model": "",
+                "quantity": quantity,
+                "unit_price": unit_price,
+                "purchase_currency": currency,
+                "goods_value": goods_value,
+                "source_type": "PURCHASE_ORDER_ATTACHMENT",
+            }
+        )
+        seen_codes.add(material_code)
+    return items
+
+
+def _has_meaningful_document_text(text: str | None) -> bool:
+    without_page_markers = re.sub(r"---\s*Page\s*\d+\s*---", "", str(text or ""), flags=re.IGNORECASE)
+    return len(re.sub(r"\s+", "", without_page_markers)) >= 40
+
+
+def _ocr_pdf_file(path: Path) -> str:
+    with tempfile.TemporaryDirectory(prefix="ocw-ocr-pdf-") as temp_dir:
+        output_prefix = Path(temp_dir) / "page"
+        _run_document_command(["pdftoppm", "-r", "250", "-png", str(path), str(output_prefix)])
+        page_paths = sorted(Path(temp_dir).glob("page-*.png"))
+        if not page_paths:
+            raise RuntimeError("PDF 转图片失败，未生成可供 OCR 的页面。")
+        return "\n".join(
+            f"--- Page {index} ---\n{_ocr_image_file(page_path)}"
+            for index, page_path in enumerate(page_paths[:20], start=1)
+        ).strip()
+
+
+def _ocr_image_file(path: Path) -> str:
+    return _run_document_command(
+        ["tesseract", str(path), "stdout", "-l", "chi_sim+eng", "--psm", "3"],
+        timeout=120,
+    ).strip()
+
+
+def _extract_docx_text(path: Path) -> str:
+    """抽取 DOCX 的段落和表格文字，统一交给现有资料分类与字段候选逻辑。"""
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            document_xml = archive.read("word/document.xml")
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError("Word 文件格式不正确，无法读取 DOCX 内容。") from exc
+    except KeyError as exc:
+        raise RuntimeError("该 Word 文件缺少正文内容，无法读取 DOCX 内容。") from exc
+
+    try:
+        root = ElementTree.fromstring(document_xml)
+    except ElementTree.ParseError as exc:
+        raise RuntimeError("Word 文件正文格式不正确，无法读取 DOCX 内容。") from exc
+
+    paragraphs = []
+    for paragraph in root.iter(f"{DOCX_WORD_NAMESPACE}p"):
+        text = "".join(node.text or "" for node in paragraph.iter(f"{DOCX_WORD_NAMESPACE}t")).strip()
+        if text:
+            paragraphs.append(text)
+    return "\n".join(paragraphs)
+
+
+def _extract_legacy_word_text(path: Path) -> str:
+    """读取旧版 DOC；部署环境未安装 antiword 时给出可执行的处理建议。"""
+
+    try:
+        return _run_document_command(["antiword", "-w", "0", str(path)], timeout=120).strip()
+    except RuntimeError as exc:
+        if "缺少 antiword" in str(exc):
+            raise RuntimeError("当前环境无法读取旧版 .doc 文件，请先转换为 .docx 后再识别。") from exc
+        raise
+
+
+def _extract_plain_text_file(path: Path) -> str:
+    """兼容 UTF-8 和常见中文编码的 TXT 附件。"""
+
+    payload = path.read_bytes()
+    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return payload.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return payload.decode("latin-1")
+
+
+def _run_document_command(command: list[str], *, timeout: int = 60) -> str:
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            check=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        tool = command[0] if command else "解析工具"
+        raise RuntimeError(f"当前环境缺少 {tool}，无法识别扫描附件。") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        raise RuntimeError(f"附件 OCR 处理失败：{detail or command[0]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("附件 OCR 超时，请拆分文件或人工核对。") from exc
+    return result.stdout or ""
+
+
+def _document_text_excerpt(text: str | None, limit: int = 1800) -> str:
+    normalized = _normalize_text(text).strip()
+    return normalized if len(normalized) <= limit else f"{normalized[:limit]}\n...（识别文本已截断）"
 
 
 def enqueue_parse_task(attachment_name: str) -> dict:
@@ -73,6 +426,9 @@ def build_packing_list_parse_task(
             "volume_m3",
             "volume_weight_kg",
             "chargeable_weight_kg",
+            "unit_price",
+            "purchase_currency",
+            "goods_value",
         ],
         "parser_strategy": strategy,
         "parser_strategy_desc": PACKING_LIST_TEMPLATE_STRATEGIES.get(strategy, "待补充的模板策略。"),
@@ -137,12 +493,18 @@ def save_tax_certificate_parse_result(
             "message": "未匹配到系统批次，暂不保存解析结果。请先确认报关单号或柜号。",
         }
 
+    identity_sync = _sync_tax_certificate_identity(
+        parsed=parsed,
+        batch=matched_batch,
+        source_name=source_name or parsed.get("file_name") or "",
+    )
     fx_sync = _sync_tax_certificate_exchange_rate_to_version(
         parsed=parsed,
         batch=matched_batch,
         source_name=source_name or parsed.get("file_name") or "",
     )
     cost_refresh = _refresh_costing_after_fx_sync(fx_sync=fx_sync, batch=matched_batch)
+    parsed["identity_sync"] = identity_sync
     parsed["fx_sync"] = fx_sync
     parsed["cost_refresh"] = cost_refresh
     values = _build_tax_certificate_attachment_values(
@@ -172,6 +534,7 @@ def save_tax_certificate_parse_result(
         "attachment_name": doc.name,
         "batch_name": matched_batch.get("name") or "",
         "source_doc_no": values.get("source_doc_no") or "",
+        "identity_sync": identity_sync,
         "fx_sync": fx_sync,
         "cost_refresh": cost_refresh,
         "preview": parsed,
@@ -212,6 +575,60 @@ def list_tax_certificate_parse_records(batch_name: str | None = None, limit: int
         "items": items,
         "total": len(items),
         "message": "完税凭证解析记录已返回。",
+    }
+
+
+def sync_saved_tax_certificate_identity(limit: int | None = 200) -> dict:
+    """回填历史已解析完税凭证的报关单号，仅补空值且不覆盖冲突。"""
+
+    if not _has_frappe_db_context():
+        return {"ok": False, "dry_run": True, "message": "当前未连接 Frappe，无法回填历史完税凭证。"}
+
+    rows = _query_tax_certificate_attachment_records(limit=max(1, min(int(limit or 200), 1000)))
+    synced_items = []
+    total_updated = 0
+    total_conflict = 0
+    total_skipped = 0
+    for row in rows:
+        batch_name = str(row.get("batch") or "").strip()
+        snapshot = _json_loads(row.get("parse_result_json"))
+        header = snapshot.get("header") if isinstance(snapshot.get("header"), dict) else {}
+        if not batch_name or not header.get("pedimento_no"):
+            total_skipped += 1
+            continue
+        batch = frappe.db.get_value(
+            "Overseas Cost Batch",
+            batch_name,
+            ["name", "current_version", "customs_no"],
+            as_dict=True,
+        ) or {}
+        if not batch.get("name"):
+            total_skipped += 1
+            continue
+        sync_result = _sync_tax_certificate_identity(
+            parsed={"header": header},
+            batch=batch,
+            source_name=str(row.get("file_name") or ""),
+        )
+        action = sync_result.get("action")
+        if action == "updated":
+            total_updated += 1
+        elif action == "conflict":
+            total_conflict += 1
+        else:
+            total_skipped += 1
+        synced_items.append({"attachment_name": row.get("name"), "batch_name": batch_name, "result": sync_result})
+
+    if total_updated:
+        frappe.db.commit()
+    return {
+        "ok": True,
+        "scanned_count": len(rows),
+        "updated_count": total_updated,
+        "conflict_count": total_conflict,
+        "skipped_count": total_skipped,
+        "items": synced_items,
+        "message": "已回填历史完税凭证的报关单号；已有不同值的批次未覆盖。",
     }
 
 
@@ -352,9 +769,19 @@ def resolve_tax_certificate_reconciliation(
 
 
 def extract_pdf_text(*, file_path: str | None = None, file_url: str | None = None) -> str:
-    """从 PDF 中抽取文本；运行环境没有 PDF 库时给出明确提示。"""
+    """从 PDF 中抽取文本，优先保留版面布局。"""
+
+    text, _method = extract_pdf_text_with_method(file_path=file_path, file_url=file_url)
+    return text
+
+
+def extract_pdf_text_with_method(*, file_path: str | None = None, file_url: str | None = None) -> tuple[str, str]:
+    """轻量版 PDF 文本抽取：优先 Poppler 版面文本，缺失时回退 pypdf。"""
 
     path = _resolve_pdf_file_path(file_path=file_path, file_url=file_url)
+    layout_text = _extract_pdf_layout_text(path)
+    if _has_meaningful_document_text(layout_text):
+        return layout_text, "pdf_layout_text"
     try:
         from pypdf import PdfReader
     except Exception as exc:  # pragma: no cover - 取决于部署环境依赖
@@ -365,7 +792,18 @@ def extract_pdf_text(*, file_path: str | None = None, file_url: str | None = Non
     for index, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
         pages.append(f"\n--- Page {index} ---\n{text}")
-    return "\n".join(pages).strip()
+    return "\n".join(pages).strip(), "pdf_text"
+
+
+def _extract_pdf_layout_text(path: Path) -> str:
+    """使用已安装的 Poppler 保留空格和列结构，适合后续表格行匹配。"""
+
+    try:
+        raw_text = _run_document_command(["pdftotext", "-layout", str(path), "-"], timeout=120)
+    except RuntimeError:
+        return ""
+    pages = [page.strip() for page in raw_text.split("\f") if page.strip()]
+    return "\n".join(f"--- Page {index} ---\n{page}" for index, page in enumerate(pages, start=1)).strip()
 
 
 def parse_tax_certificate_text(text: str, source_name: str | None = None) -> dict:
@@ -804,6 +1242,62 @@ def _build_tax_certificate_attachment_values(
     }
 
 
+def _sync_tax_certificate_identity(*, parsed: dict, batch: dict, source_name: str = "") -> dict:
+    """把已匹配凭证的报关单号补入批次与物料行，供主查询追溯。"""
+
+    header = parsed.get("header") or {}
+    customs_no = str(header.get("pedimento_no") or "").strip()
+    batch_name = str(batch.get("name") or "").strip()
+    version_name = str(batch.get("current_version") or "").strip()
+    current_customs_no = str(batch.get("customs_no") or "").strip()
+    if not customs_no or not batch_name:
+        return {"action": "skipped", "reason": "完税凭证或匹配批次缺少报关单号。"}
+    if current_customs_no and _compact_match_value(current_customs_no) != _compact_match_value(customs_no):
+        return {
+            "action": "conflict",
+            "reason": "当前批次已有不同报关单号，未用凭证覆盖。",
+            "existing_customs_no": current_customs_no,
+            "voucher_customs_no": customs_no,
+        }
+
+    batch_updated = False
+    if not current_customs_no:
+        frappe.db.set_value("Overseas Cost Batch", batch_name, "customs_no", customs_no, update_modified=True)
+        batch_updated = True
+
+    item_updated_count = 0
+    if version_name:
+        items = frappe.get_all(
+            "Overseas Cost Item",
+            filters={"batch": batch_name, "version": version_name},
+            fields=["name", "customs_no"],
+            limit_page_length=10000,
+        )
+        for item in items:
+            if str(item.get("customs_no") or "").strip():
+                continue
+            frappe.db.set_value("Overseas Cost Item", item.get("name"), "customs_no", customs_no, update_modified=False)
+            item_updated_count += 1
+
+    if batch_updated or item_updated_count:
+        source_label = source_name or customs_no
+        _insert_fx_sync_audit_log(
+            batch_name=batch_name,
+            version_name=version_name,
+            field_name="customs_no",
+            old_value=current_customs_no,
+            new_value={"customs_no": customs_no, "item_updated_count": item_updated_count},
+            remark=f"完税凭证追溯字段同步：来源 {source_label}，仅补空的报关单号。",
+        )
+        return {
+            "action": "updated",
+            "customs_no": customs_no,
+            "batch_updated": batch_updated,
+            "item_updated_count": item_updated_count,
+        }
+    return {"action": "unchanged", "customs_no": customs_no, "item_updated_count": 0}
+
+
 def _numbers_close(left, right, tolerance: float = 0.000001) -> bool:
     left_number = _to_number(left)
     right_number = _to_number(right)
@@ -938,6 +1432,7 @@ def _refresh_costing_after_fx_sync(*, fx_sync: dict | None, batch: dict) -> dict
         purchase_sync = import_service.apply_linked_purchase_expense_fillable_fields(
             batch_name=batch_name,
             version_name=version_name,
+            recalculate_after_writeback=False,
         )
     except Exception as exc:
         return {
@@ -1437,11 +1932,15 @@ def _is_noise_line(line: str) -> bool:
 
 
 def _resolve_pdf_file_path(*, file_path: str | None = None, file_url: str | None = None) -> Path:
+    return _ensure_pdf_path(_resolve_source_file_path(file_path=file_path, file_url=file_url))
+
+
+def _resolve_source_file_path(*, file_path: str | None = None, file_url: str | None = None) -> Path:
     if file_path:
         path = Path(file_path).expanduser()
         if path.exists():
-            return _ensure_pdf_path(path)
-        raise FileNotFoundError(f"未找到 PDF 文件：{file_path}")
+            return path
+        raise FileNotFoundError(f"未找到附件文件：{file_path}")
 
     if not file_url:
         raise ValueError("请传入 file_path 或 file_url。")
@@ -1454,15 +1953,19 @@ def _resolve_pdf_file_path(*, file_path: str | None = None, file_url: str | None
                 resolved_file_url = file_row["file_url"]
         if resolved_file_url.startswith("/private/files/"):
             relative_name = resolved_file_url.split("/private/files/", 1)[1]
-            return _ensure_pdf_path(Path(frappe.get_site_path("private", "files", relative_name)))
+            path = Path(frappe.get_site_path("private", "files", relative_name))
+            if path.exists():
+                return path
         if resolved_file_url.startswith("/files/"):
             relative_name = resolved_file_url.split("/files/", 1)[1]
-            return _ensure_pdf_path(Path(frappe.get_site_path("public", "files", relative_name)))
+            path = Path(frappe.get_site_path("public", "files", relative_name))
+            if path.exists():
+                return path
 
     path = Path(file_url).expanduser()
     if path.exists():
-        return _ensure_pdf_path(path)
-    raise FileNotFoundError(f"无法解析 PDF 文件路径：{file_url}")
+        return path
+    raise FileNotFoundError(f"无法解析附件文件路径：{file_url}")
 
 
 def _ensure_pdf_path(path: Path) -> Path:

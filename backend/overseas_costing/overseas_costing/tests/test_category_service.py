@@ -5,7 +5,7 @@ import json
 from overseas_costing.services.category_service import preview_batch_categories
 
 
-def test_preview_batch_categories_classifies_sunglasses_aliases() -> None:
+def test_preview_batch_categories_suggests_explicit_sunglasses_name_normalization() -> None:
     result = preview_batch_categories(
         rows_json=json.dumps(
             [
@@ -24,36 +24,18 @@ def test_preview_batch_categories_classifies_sunglasses_aliases() -> None:
     item = result["items"][0]
     assert result["ok"] is True
     assert item["suggested_category"] == "太阳眼镜"
-    assert item["confidence"] >= 0.78
-    assert item["needs_review"] is False
+    assert item["suggested_name"] == "太阳眼镜"
+    assert item["match_type"] == "explicit_name_alias"
+    assert item["needs_review"] is True
 
 
-def test_preview_batch_categories_classifies_chinese_sunglasses_alias() -> None:
+def test_preview_batch_categories_keeps_canonical_name_without_a_suggestion() -> None:
     result = preview_batch_categories(
         rows_json=json.dumps(
             [
                 {
                     "material_code": "FL004112",
-                    "product_name": "墨镜",
-                }
-            ],
-            ensure_ascii=False,
-        )
-    )
-
-    item = result["items"][0]
-    assert item["suggested_category"] == "太阳眼镜"
-    assert item["needs_review"] is False
-
-
-def test_preview_batch_categories_marks_unknown_rows_ai_ready() -> None:
-    result = preview_batch_categories(
-        rows_json=json.dumps(
-            [
-                {
-                    "material_code": "AB123",
-                    "product_name": "新奇特商品",
-                    "spec_model": "未知规格",
+                    "product_name": "太阳眼镜",
                 }
             ],
             ensure_ascii=False,
@@ -62,12 +44,32 @@ def test_preview_batch_categories_marks_unknown_rows_ai_ready() -> None:
 
     item = result["items"][0]
     assert item["suggested_category"] == ""
-    assert item["match_type"] == "ai_pending"
-    assert item["ai_ready"] is True
-    assert result["summary"]["ai_ready_count"] == 1
+    assert item["match_type"] == "no_action"
+    assert item["no_action"] is True
 
 
-def test_preview_batch_categories_uses_hs_code_for_tpu_material() -> None:
+def test_preview_batch_categories_keeps_ordinary_products_out_of_name_normalization() -> None:
+    result = preview_batch_categories(
+        rows_json=json.dumps(
+            [
+                {
+                    "material_code": "AB123",
+                    "product_name": "宠物拾便袋",
+                    "product_name_es": "Bolsas para Desechos de Mascotas",
+                }
+            ],
+            ensure_ascii=False,
+        )
+    )
+
+    item = result["items"][0]
+    assert item["suggested_category"] == ""
+    assert item["match_type"] == "no_action"
+    assert item["no_action"] is True
+    assert result["summary"]["normalization_candidate_count"] == 0
+
+
+def test_preview_batch_categories_does_not_classify_by_hs_code_only() -> None:
     result = preview_batch_categories(
         rows_json=json.dumps(
             [
@@ -82,5 +84,5 @@ def test_preview_batch_categories_uses_hs_code_for_tpu_material() -> None:
     )
 
     item = result["items"][0]
-    assert item["suggested_category"] == "TPU原材料"
-    assert "3909500000" in item["reason"]
+    assert item["suggested_category"] == ""
+    assert item["match_type"] == "no_action"

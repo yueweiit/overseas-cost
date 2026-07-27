@@ -15,7 +15,11 @@ from overseas_costing.services.attachment_parse_service import (
     build_packing_list_parse_task,
 )
 from overseas_costing.services.import_service import (
+    _build_attachment_price_provenance,
+    _build_source_document_manual_review,
     apply_linked_purchase_expense_fillable_fields,
+    confirm_oa_source_attachment_type,
+    confirm_logistics_quote_candidate,
     _coerce_item_numeric_defaults,
     _ensure_supported_excel_path,
     _get_linked_purchase_approvals_from_extra,
@@ -30,6 +34,7 @@ from overseas_costing.services.import_service import (
     parse_packing_list_attachment,
     parse_oa_packing_list_attachments,
     preview_packing_list_attachment,
+    preview_oa_source_attachment,
     preview_linked_purchase_expense_oa,
     preview_tax_certificate_pdf,
     preview_yuewei_excel_file,
@@ -56,6 +61,323 @@ def test_import_purchase_expense_oa_returns_preview_and_dingtalk_payload() -> No
     assert result["mapped_preview_items"][0]["material_code"] == "FL004104"
     assert result["dingtalk_payload"]["instance_id"] == "PROC-001"
     assert "purchase_currency" in result["writeback_targets"]
+
+
+def test_resolve_attachment_user_id_prefers_configured_active_user(monkeypatch) -> None:
+    from overseas_costing.services.import_service import _resolve_attachment_user_id
+
+    class Attachment:
+        batch = "BATCH-001"
+
+    monkeypatch.setenv("DINGTALK_ATTACHMENT_USER_ID", "ACTIVE-USER-001")
+
+    assert _resolve_attachment_user_id(Attachment(), {"originator_userid": "FORM-CREATOR-001"}) == "ACTIVE-USER-001"
+
+
+def test_confirm_logistics_quote_candidate_requires_frappe_environment() -> None:
+    result = confirm_logistics_quote_candidate(batch_name="BATCH-001", candidate_index=0)
+
+    assert result["ok"] is False
+    assert result["dry_run"] is True
+
+
+def test_preview_oa_source_attachment_requires_frappe_environment() -> None:
+    result = preview_oa_source_attachment("ATTACHMENT-001")
+
+    assert result["ok"] is False
+    assert result["dry_run"] is True
+
+
+def test_preview_oa_source_attachment_caches_recognition_snapshot(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class FakeAttachmentDoc:
+        file_name = "PO2026072401.docx"
+        file_url = "/private/files/PO2026072401.docx"
+        batch = "BATCH-001"
+        version = "VER-001"
+        attachment_type = "Other"
+        parse_status = "Queued"
+        mapped_result_json = '{"parse_targets":["goods_value"]}'
+        save_count = 0
+
+        def save(self, **_kwargs):
+            self.save_count += 1
+
+    attachment_doc = FakeAttachmentDoc()
+    preview_calls = {"value": 0}
+
+    class FakeDB:
+        @staticmethod
+        def commit():
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_doc(*args):
+            assert args == ("Overseas Cost Attachment", "ATTACH-001")
+            return attachment_doc
+
+    def fake_preview(**_kwargs):
+        preview_calls["value"] += 1
+        return {
+            "ok": True,
+            "source_name": "PO2026072401.docx",
+            "file_ext": "docx",
+            "extraction_method": "word_docx",
+            "classification": {"code": "purchase_order", "label": "采购订单"},
+            "field_candidates": {"material_codes": ["AB123"]},
+            "purchase_order": {"purchase_order_no": "PO2026072401", "line_items": []},
+            "text_excerpt": "PURCHASE ORDER NO: PO2026072401",
+            "text_length": 30,
+            "can_write_purchase_price": False,
+        }
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(attachment_parse_service, "preview_source_document", fake_preview)
+
+    first = preview_oa_source_attachment("ATTACH-001")
+    second = preview_oa_source_attachment("ATTACH-001")
+
+    assert first["cache_hit"] is False
+    assert second["cache_hit"] is True
+    assert second["classification"]["code"] == "purchase_order"
+    assert preview_calls["value"] == 1
+    assert attachment_doc.parse_status == "Parsed"
+    assert attachment_doc.save_count == 1
+
+
+def test_confirm_oa_source_attachment_type_requires_frappe_environment() -> None:
+    result = confirm_oa_source_attachment_type(
+        attachment_name="ATTACHMENT-001",
+        confirmed_type="purchase_price_document",
+    )
+
+    assert result["ok"] is False
+    assert result["dry_run"] is True
+
+
+def test_build_source_document_manual_review_keeps_automatic_result_for_traceability() -> None:
+    review = _build_source_document_manual_review(
+        confirmed_type="customs_declaration",
+        remark="核对后确认是报关单",
+        automatic_classification={"code": "unclassified", "label": "待人工识别"},
+    )
+
+    assert review["confirmed_type_label"] == "报关资料"
+    assert review["attachment_type"] == "Customs Declaration"
+    assert review["parse_targets"] == ["pedimento_no", "line_items"]
+    assert review["automatic_classification"]["code"] == "unclassified"
+
+
+def test_build_attachment_price_provenance_uses_attachment_metadata(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
+            assert doctype == "Overseas Cost Attachment"
+            assert name_or_filters == "ATT-PRICE-001"
+            assert fields == ["name", "file_name", "file_url", "source_doc_no"]
+            assert as_dict is True
+            return {
+                "name": "ATT-PRICE-001",
+                "file_name": "5月指环扣双清-未关联采购单.xlsx",
+                "file_url": "/private/files/5月指环扣双清-未关联采购单.xlsx",
+                "source_doc_no": "202605270001",
+            }
+
+    class FakeFrappe:
+        db = FakeDB()
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+
+    provenance = _build_attachment_price_provenance(
+        attachment_name="ATT-PRICE-001",
+        file_url="/private/files/fallback.xlsx",
+    )
+
+    assert provenance == {
+        "source_type": "ATTACHMENT_PRICE",
+        "source_file_name": "5月指环扣双清-未关联采购单.xlsx",
+        "source_attachment_id": "ATT-PRICE-001",
+        "source_doc_no": "202605270001",
+        "parse_status": "SUCCESS",
+    }
+
+
+def test_preview_purchase_order_match_builds_price_rows_without_writing(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    captured = {}
+
+    def fake_source_preview(_attachment_name):
+        return {
+            "ok": True,
+            "attachment_name": "ATT-PO-001",
+            "batch_name": "BATCH-PO",
+            "version_name": "VER-PO",
+            "source_name": "PO2026050901.pdf",
+            "classification": {"code": "purchase_order", "label": "采购订单"},
+            "purchase_order": {
+                "purchase_order_no": "PO2026050901",
+                "supplier": "HUAFON",
+                "buyer": "YUEWEISA",
+                "currency": "USD",
+                "line_items": [
+                    {
+                        "material_code": "S890",
+                        "product_name": "TPU",
+                        "quantity": 1200,
+                        "unit_price": 0.619,
+                        "purchase_currency": "USD",
+                        "goods_value": 742.8,
+                    }
+                ],
+            },
+        }
+
+    def fake_writeback_preview(**kwargs):
+        captured.update(kwargs)
+        updates = kwargs["update_builder"](kwargs["mapped_rows"][0], {})
+        assert updates == {"unit_price": 0.619, "purchase_currency": "USD", "goods_value": 742.8}
+        return {"version_name": "VER-PO", "matched_count": 1, "fillable_row_count": 1, "message": "预览完成"}
+
+    monkeypatch.setattr(import_service, "preview_oa_source_attachment", fake_source_preview)
+    monkeypatch.setattr(import_service, "_preview_item_writeback", fake_writeback_preview)
+
+    result = import_service.preview_oa_purchase_order_match("ATT-PO-001")
+
+    assert result["ok"] is True
+    assert result["purchase_order"]["purchase_order_no"] == "PO2026050901"
+    assert result["purchase_order"]["recognized_line_count"] == 1
+    assert result["source_rows"][0]["material_code"] == "S890"
+    assert captured["batch_name"] == "BATCH-PO"
+    assert captured["trust_unique_material_code"] is True
+
+
+def test_resolve_packing_list_conflict_adopts_attachment_for_current_item_only(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    audit_payloads = []
+    updates = {}
+
+    class FakeItemDoc:
+        def __init__(self):
+            self.name = "ITEM-001"
+            self.actual_shipped_qty = 500
+            self.source_type = "OA_LOGISTICS"
+            self.source_file_name = ""
+            self.source_attachment_id = ""
+            self.source_doc_no = ""
+            self.parse_status = "PENDING"
+
+        def save(self, **_kwargs):
+            return self
+
+    class FakeAttachmentDoc:
+        def __init__(self):
+            self.name = "ATT-PACKING"
+            self.mapped_result_json = "{}"
+
+        def save(self, **_kwargs):
+            return self
+
+    class FakeAuditDoc:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def insert(self, **_kwargs):
+            audit_payloads.append(self.payload)
+            return self
+
+    item_doc = FakeItemDoc()
+    attachment_doc = FakeAttachmentDoc()
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
+            if doctype == "Overseas Cost Attachment" and name_or_filters == "ATT-PACKING":
+                return {
+                    "name": "ATT-PACKING",
+                    "file_name": "装箱单.xlsx",
+                    "file_url": "/private/files/装箱单.xlsx",
+                    "source_doc_no": "OA-001",
+                }
+            return None
+
+        @staticmethod
+        def set_value(doctype, name, fieldname, value, **_kwargs):
+            updates[(doctype, name, fieldname)] = value
+
+        @staticmethod
+        def commit():
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        class session:
+            user = "tester@example.com"
+
+        @staticmethod
+        def get_doc(*args):
+            if args == ("Overseas Cost Item", "ITEM-001"):
+                return item_doc
+            if args == ("Overseas Cost Attachment", "ATT-PACKING"):
+                return attachment_doc
+            if len(args) == 1 and isinstance(args[0], dict):
+                return FakeAuditDoc(args[0])
+            raise AssertionError(args)
+
+    def fake_preview(**_kwargs):
+        return {
+            "ok": True,
+            "batch_doc_name": "BATCH-DOC",
+            "version_name": "VER-DOC",
+            "writeback_preview": {
+                "batch_doc_name": "BATCH-DOC",
+                "version_name": "VER-DOC",
+                "matched_rows": [
+                    {
+                        "target_item_name": "ITEM-001",
+                        "target_row_no": 1,
+                        "business_changes": [
+                            {
+                                "field_name": "actual_shipped_qty",
+                                "field_label": "实际发货数量",
+                                "old_value": 500,
+                                "new_value": 600,
+                                "status": "conflict",
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_service, "preview_packing_list_attachment", fake_preview)
+
+    result = import_service.resolve_packing_list_conflict_row(
+        batch_name="BATCH-001",
+        attachment_name="ATT-PACKING",
+        target_item_name="ITEM-001",
+        resolution_action="use_attachment",
+        recalculate_after_writeback=False,
+    )
+
+    assert result["ok"] is True
+    assert result["resolution"]["action_label"] == "采用附件值"
+    assert item_doc.actual_shipped_qty == 600
+    assert item_doc.source_type == "PACKING_LIST"
+    assert item_doc.source_file_name == "装箱单.xlsx"
+    assert item_doc.source_attachment_id == "ATT-PACKING"
+    assert updates[("Overseas Cost Batch", "BATCH-DOC", "status")] == "Dirty"
+    assert "packing_conflict_resolutions" in attachment_doc.mapped_result_json
+    assert any(row["field_name"] == "actual_shipped_qty" for row in audit_payloads)
 
 
 def test_get_linked_purchase_approvals_from_oa_trace_extra_json() -> None:
@@ -244,6 +566,15 @@ def test_apply_linked_purchase_expense_fillable_fields_writes_matched_conflicts(
     batch_updates = {}
     audit_payloads = []
     commit_count = {"value": 0}
+    recalculate_calls = []
+
+    def fake_recalculate_batch(**kwargs):
+        recalculate_calls.append(kwargs)
+        return {
+            "ok": True,
+            "summary_snapshot": {"total_amount_rmb": 40750},
+            "message": "重算完成",
+        }
 
     class FakeDB:
         @staticmethod
@@ -305,6 +636,10 @@ def test_apply_linked_purchase_expense_fillable_fields_writes_matched_conflicts(
             raise AssertionError(args)
 
     monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        "overseas_costing.services.calculate_service.recalculate_batch",
+        fake_recalculate_batch,
+    )
 
     result = apply_linked_purchase_expense_fillable_fields(
         batch_name="FSCU8486789",
@@ -330,6 +665,10 @@ def test_apply_linked_purchase_expense_fillable_fields_writes_matched_conflicts(
     assert batch_updates[("Overseas Cost Batch", "BATCH-DOC", "status")] == "Dirty"
     assert commit_count["value"] == 1
     assert len(audit_payloads) == 5
+    assert recalculate_calls == [{"batch_name": "BATCH-DOC", "version_name": "VER-DOC"}]
+    assert result["recalculate_result"]["action"] == "recalculated"
+    assert result["recalculate_result"]["summary_snapshot"] == {"total_amount_rmb": 40750}
+    assert "已自动重算" in result["message"]
 
 
 def test_apply_linked_purchase_expense_aggregates_duplicate_target_rows(monkeypatch) -> None:
@@ -487,6 +826,10 @@ def test_list_oa_form_attachments_returns_structured_records(monkeypatch) -> Non
                             "space_id": "SPACE-001",
                             "file_ext": "xlsx",
                             "comment_attachments_included": False,
+                            "last_download_error": {
+                                "error_type": "dingtalk_attachment_file_access",
+                                "message": "当前账号无附件访问权",
+                            },
                         }
                     ),
                     "mapped_result_json": attachment_parse_service._json_dumps(
@@ -507,6 +850,7 @@ def test_list_oa_form_attachments_returns_structured_records(monkeypatch) -> Non
     assert result["items"][0]["file_id"] == "FILE-001"
     assert result["items"][0]["can_download"] is True
     assert result["items"][0]["parse_targets"] == ["actual_shipped_qty", "gross_weight_kg", "volume_m3"]
+    assert result["items"][0]["last_download_error"]["error_type"] == "dingtalk_attachment_file_access"
 
 
 def test_download_oa_form_attachment_saves_file_url_and_keeps_trace(monkeypatch) -> None:
@@ -588,6 +932,116 @@ def test_download_oa_form_attachment_saves_file_url_and_keeps_trace(monkeypatch)
     assert attachment_doc.file_url == "/private/files/packing.xlsx"
     assert attachment_doc.parse_status == "Queued"
     assert updated_snapshot["download"]["file_id"] == "FILE-001"
+    assert commit_count["value"] == 1
+
+
+def test_fetch_dingtalk_attachment_content_passes_signed_headers(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    captured = {}
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/vnd.ms-excel", "Content-Length": "4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def read():
+            return b"data"
+
+    def fake_urlopen(request, timeout):
+        captured["headers"] = {key.lower(): value for key, value in request.header_items()}
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(import_service, "urlopen", fake_urlopen)
+
+    content, meta = import_service._fetch_dingtalk_attachment_content(
+        "https://download.example.com/file.xlsx",
+        headers={"x-acs-signature": "SIG-001"},
+    )
+
+    assert content == b"data"
+    assert meta["content_length"] == 4
+    assert captured["timeout"] == 60
+    assert captured["headers"]["x-acs-signature"] == "SIG-001"
+    assert captured["headers"]["user-agent"] == "overseas-costing/1.0"
+
+
+def test_download_oa_form_attachment_reports_file_access_error(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    save_count = {"value": 0}
+    commit_count = {"value": 0}
+
+    class FakeAttachmentDoc:
+        name = "ATTACH-001"
+        source_type = "OA"
+        attachment_type = "Packing List"
+        file_name = "packing.xlsx"
+        file_url = ""
+        parse_status = "Queued"
+        remark = ""
+        parse_result_json = json.dumps(
+            {
+                "source": "dingtalk_oa_form_attachment",
+                "instance_id": "PROC-SEA-001",
+                "file_id": "FILE-001",
+                "raw_attachment": {"fileName": "packing.xlsx", "fileId": "FILE-001"},
+            },
+            ensure_ascii=False,
+        )
+
+        def save(self, **_kwargs):
+            save_count["value"] += 1
+            return self
+
+    attachment_doc = FakeAttachmentDoc()
+
+    class FakeFrappe:
+        class db:
+            @staticmethod
+            def get_value(*_args, **_kwargs):
+                return None
+
+            @staticmethod
+            def commit():
+                commit_count["value"] += 1
+
+        @staticmethod
+        def get_doc(*args):
+            if args == ("Overseas Cost Attachment", "ATTACH-001"):
+                return attachment_doc
+            raise AssertionError(args)
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_service, "_resolve_dingtalk_env_file", lambda env_file=None: "")
+    monkeypatch.setattr(import_oa_logistics, "load_env_file", lambda _path: _path)
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "TOKEN-001")
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "get_process_attachment_download_url",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError('HTTP 403：{"code":"permissionDenied","message":"dentryId"}')),
+    )
+
+    result = download_oa_form_attachment("ATTACH-001")
+
+    assert result["ok"] is False
+    assert result["error_type"] == "dingtalk_attachment_file_access"
+    assert result["needs_manual_upload"] is True
+    assert "文件级访问权限" in result["message"]
+    assert "能在钉钉原单里打开该附件的在职账号" in result["message"]
+    updated_snapshot = json.loads(attachment_doc.parse_result_json)
+    assert attachment_doc.parse_status == "Failed"
+    assert attachment_doc.remark.startswith("钉钉已找到这份审批附件")
+    assert updated_snapshot["last_download_error"]["error_type"] == "dingtalk_attachment_file_access"
+    assert updated_snapshot["last_download_error"]["file_id"] == "FILE-001"
+    assert save_count["value"] == 1
     assert commit_count["value"] == 1
 
 
@@ -709,6 +1163,7 @@ def test_parse_oa_packing_list_attachments_only_handles_excel_packing_lists(monk
             "batch_doc_name": kwargs["batch_name"],
             "version_name": kwargs["version_name"],
             "updated_count": 2,
+            "created_count": 1,
             "changed_field_count": 4,
             "skipped_count": 0,
             "conflict_row_count": 0,
@@ -729,10 +1184,12 @@ def test_parse_oa_packing_list_attachments_only_handles_excel_packing_lists(monk
     assert result["downloaded_count"] == 1
     assert result["parsed_count"] == 1
     assert result["updated_count"] == 2
+    assert result["created_count"] == 1
     assert result["changed_field_count"] == 4
     assert result["skipped_count"] == 2
     assert download_calls == ["ATTACH-XLSX"]
     assert parse_calls[0]["attachment_name"] == "ATTACH-XLSX"
+    assert parse_calls[0]["auto_create_unmatched_items"] is True
     assert any(item["attachment_name"] == "ATTACH-PDF" and item["action"] == "skipped" for item in result["items"])
 
 
@@ -778,6 +1235,50 @@ def test_parse_oa_packing_list_attachments_summarizes_dingtalk_permission_error(
     assert result["permission_scopes"] == ["Workflow.Instance.Write"]
     assert result["items"][0]["error_type"] == "dingtalk_permission"
     assert "缺少 Workflow.Instance.Write 权限" in result["message"]
+
+
+def test_parse_oa_packing_list_attachments_summarizes_file_access_error(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    rows = [
+        {
+            "name": "ATTACH-XLSX",
+            "batch": "BATCH-DOC",
+            "version": "VER-DOC",
+            "source_type": "OA",
+            "attachment_type": "Packing List",
+            "source_doc_no": "OA-001::FILE-XLSX",
+            "file_name": "CI&PL.xlsx",
+            "file_url": "",
+            "parse_status": "Queued",
+            "parse_result_json": json.dumps({"file_id": "FILE-XLSX", "file_ext": "xlsx"}, ensure_ascii=False),
+            "mapped_result_json": json.dumps({"parse_targets": ["actual_shipped_qty"]}, ensure_ascii=False),
+        }
+    ]
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            assert doctype == "Overseas Cost Attachment"
+            return rows
+
+    def fake_download(_attachment_name, **_kwargs):
+        return {
+            "ok": False,
+            "error_type": "dingtalk_attachment_file_access",
+            "message": "钉钉已找到这份审批附件，但当前配置的下载账号没有该附件的文件级访问权限。",
+        }
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_service, "download_oa_form_attachment", fake_download)
+
+    result = parse_oa_packing_list_attachments(recalculate=False)
+
+    assert result["ok"] is False
+    assert result["failed_count"] == 1
+    assert result["file_access_blocked_count"] == 1
+    assert result["items"][0]["error_type"] == "dingtalk_attachment_file_access"
+    assert "当前下载账号没有文件级访问权限" in result["message"]
 
 
 def test_parse_oa_packing_list_attachments_stops_repeated_downloads_after_permission_error(monkeypatch) -> None:
@@ -950,6 +1451,15 @@ def test_apply_packing_list_fillable_fields_skips_conflicts(monkeypatch) -> None
     batch_updates = {}
     audit_payloads = []
     commit_count = {"value": 0}
+    recalculate_calls = []
+
+    def fake_recalculate_batch(**kwargs):
+        recalculate_calls.append(kwargs)
+        return {
+            "ok": True,
+            "summary_snapshot": {"total_gross_weight_kg": 32.5},
+            "message": "重算完成",
+        }
 
     class FakeDB:
         @staticmethod
@@ -1003,6 +1513,10 @@ def test_apply_packing_list_fillable_fields_skips_conflicts(monkeypatch) -> None
             raise AssertionError(args)
 
     monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        "overseas_costing.services.calculate_service.recalculate_batch",
+        fake_recalculate_batch,
+    )
     rows_json = (
         '[{"物料编码":"CW000175","物料名称":"钢化膜","规格型号":"透明","实际发货数量":400,"毛重KG":32.5,"体积m3":0.21},'
         '{"物料编码":"CW000176","物料名称":"钢化膜","规格型号":"磨砂","实际发货数量":220,"毛重KG":12,"体积m3":0.22}]'
@@ -1033,6 +1547,10 @@ def test_apply_packing_list_fillable_fields_skips_conflicts(monkeypatch) -> None
     assert result["attachment_marked_parsed"] is True
     assert commit_count["value"] == 1
     assert len(audit_payloads) == 3
+    assert recalculate_calls == [{"batch_name": "BATCH-PACKING", "version_name": "VER-PACKING"}]
+    assert result["recalculate_result"]["action"] == "recalculated"
+    assert result["recalculate_result"]["summary_snapshot"] == {"total_gross_weight_kg": 32.5}
+    assert "已自动重算" in result["message"]
 
 
 def test_apply_packing_list_duplicate_rows_matches_by_quantity(monkeypatch) -> None:
@@ -1066,6 +1584,9 @@ def test_apply_packing_list_duplicate_rows_matches_by_quantity(monkeypatch) -> N
             volume_m3=0,
             volume_weight_kg=0,
             chargeable_weight_kg=0,
+            unit_price=0,
+            purchase_currency="",
+            goods_value=0,
         ),
         "ITEM-ROW-3": FakeItemDoc(
             name="ITEM-ROW-3",
@@ -1079,6 +1600,9 @@ def test_apply_packing_list_duplicate_rows_matches_by_quantity(monkeypatch) -> N
             volume_m3=0,
             volume_weight_kg=0,
             chargeable_weight_kg=0,
+            unit_price=0,
+            purchase_currency="",
+            goods_value=0,
         ),
     }
     batch_updates = {}
@@ -1127,6 +1651,9 @@ def test_apply_packing_list_duplicate_rows_matches_by_quantity(monkeypatch) -> N
                     "volume_m3": item.volume_m3,
                     "volume_weight_kg": item.volume_weight_kg,
                     "chargeable_weight_kg": item.chargeable_weight_kg,
+                    "unit_price": item.unit_price,
+                    "purchase_currency": item.purchase_currency,
+                    "goods_value": item.goods_value,
                 }
                 for item in items.values()
             ]
@@ -1141,8 +1668,8 @@ def test_apply_packing_list_duplicate_rows_matches_by_quantity(monkeypatch) -> N
 
     monkeypatch.setattr(import_service, "frappe", FakeFrappe)
     rows_json = (
-        '[{"物料名称":"超队指环扣","数量":86400,"毛重KG":19.4,"体积m3":0.02001},'
-        '{"物料名称":"超队指环扣","数量":3600,"毛重KG":14.5,"体积m3":0.00864}]'
+        '[{"物料名称":"超队指环扣","数量":86400,"毛重KG":19.4,"体积m3":0.02001,"单价":0.619,"总价（RMB)":53481.6},'
+        '{"物料名称":"超队指环扣","数量":3600,"毛重KG":14.5,"体积m3":0.00864,"单价":0.619,"总价（RMB)":2228.4}]'
     )
 
     preview = preview_packing_list_attachment(
@@ -1163,11 +1690,176 @@ def test_apply_packing_list_duplicate_rows_matches_by_quantity(monkeypatch) -> N
     assert result["updated_count"] == 2
     assert items["ITEM-ROW-2"].actual_shipped_qty == 86400
     assert items["ITEM-ROW-2"].gross_weight_kg == 19.4
+    assert items["ITEM-ROW-2"].unit_price == 0.619
+    assert items["ITEM-ROW-2"].purchase_currency == "人民币RMB"
+    assert items["ITEM-ROW-2"].goods_value == 53481.6
+    assert items["ITEM-ROW-2"].source_type == "ATTACHMENT_PRICE"
+    assert items["ITEM-ROW-2"].source_file_name == "ATT-PACKING"
+    assert items["ITEM-ROW-2"].source_attachment_id == "ATT-PACKING"
+    assert items["ITEM-ROW-2"].source_doc_no == "ATT-PACKING"
+    assert items["ITEM-ROW-2"].parse_status == "SUCCESS"
     assert items["ITEM-ROW-3"].actual_shipped_qty == 3600
     assert items["ITEM-ROW-3"].gross_weight_kg == 14.5
+    assert items["ITEM-ROW-3"].unit_price == 0.619
+    assert items["ITEM-ROW-3"].purchase_currency == "人民币RMB"
+    assert items["ITEM-ROW-3"].goods_value == 2228.4
+    assert items["ITEM-ROW-3"].source_type == "ATTACHMENT_PRICE"
+    assert result["price_source_row_count"] == 2
     assert batch_updates[("Overseas Cost Attachment", "ATT-PACKING", "mapped_result_json")]
     assert commit_count["value"] == 1
-    assert len(audit_payloads) == 6
+    assert len(audit_payloads) == 22
+
+
+def test_apply_packing_list_auto_creates_unmatched_items_once(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class FakeMeta:
+        @staticmethod
+        def has_field(_fieldname):
+            return True
+
+    class FakeItemDoc:
+        def __init__(self, values):
+            self.__dict__.update(values)
+
+        def insert(self, **_kwargs):
+            self.name = f"ITEM-AUTO-{len(items) + 1:03d}"
+            items[self.name] = self
+            return self
+
+        def save(self, **_kwargs):
+            return self
+
+    class FakeAuditDoc:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def insert(self, **_kwargs):
+            audit_payloads.append(self.payload)
+            return self
+
+    items = {}
+    audit_payloads = []
+    batch_updates = {}
+    commit_count = {"value": 0}
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
+            if doctype == "Overseas Cost Batch" and name_or_filters == "BATCH-PACKING":
+                if fields == ["current_version"]:
+                    return {"current_version": "VER-PACKING"}
+                return {"name": "BATCH-PACKING"} if as_dict else "BATCH-PACKING"
+            if doctype == "Overseas Cost Attachment" and name_or_filters == "ATT-PACKING":
+                return {
+                    "name": "ATT-PACKING",
+                    "file_name": "CI&PL.xlsx",
+                    "source_doc_no": "ATT-PACKING",
+                }
+            return None
+
+        @staticmethod
+        def set_value(doctype, name, fieldname, value, **_kwargs):
+            batch_updates[(doctype, name, fieldname)] = value
+
+        @staticmethod
+        def exists(doctype, name):
+            return doctype == "Overseas Cost Attachment" and name == "ATT-PACKING"
+
+        @staticmethod
+        def commit():
+            commit_count["value"] += 1
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        class session:
+            user = "tester@example.com"
+
+        @staticmethod
+        def get_meta(_doctype):
+            return FakeMeta()
+
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            if doctype == "Overseas Cost Version":
+                return []
+            if doctype != "Overseas Cost Item":
+                return []
+            return [
+                {
+                    "name": item.name,
+                    "row_no": item.row_no,
+                    "material_code": item.material_code,
+                    "product_name": item.product_name,
+                    "spec_model": item.spec_model,
+                    "quantity": item.quantity,
+                    "unit_price": item.unit_price,
+                    "purchase_currency": item.purchase_currency,
+                    "goods_value": item.goods_value,
+                    "excel_row_no": item.excel_row_no,
+                    "actual_shipped_qty": item.actual_shipped_qty,
+                    "gross_weight_kg": item.gross_weight_kg,
+                    "volume_m3": item.volume_m3,
+                    "volume_weight_kg": item.volume_weight_kg,
+                    "chargeable_weight_kg": item.chargeable_weight_kg,
+                    "source_type": item.source_type,
+                    "source_doc_no": item.source_doc_no,
+                    "source_file_name": item.source_file_name,
+                    "source_attachment_id": item.source_attachment_id,
+                    "parse_status": item.parse_status,
+                }
+                for item in items.values()
+            ]
+
+        @staticmethod
+        def get_doc(*args):
+            if len(args) == 1 and isinstance(args[0], dict):
+                if args[0].get("doctype") == "Overseas Cost Item":
+                    return FakeItemDoc(args[0])
+                return FakeAuditDoc(args[0])
+            if len(args) == 2 and args[0] == "Overseas Cost Item":
+                return items[args[1]]
+            raise AssertionError(args)
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    rows_json = (
+        '[{"物料编码":"物料编码","物料名称":"物料名称","规格型号":"规格型号","数量":"数量"},'
+        '{"sourceRow":3,"物料编码":"GJ003786","物料名称":"太阳眼镜","规格型号":"黑色","数量":10,"毛重KG":2.2,"体积m3":0.03}]'
+    )
+
+    first_result = apply_packing_list_fillable_fields(
+        batch_name="BATCH-PACKING",
+        attachment_name="ATT-PACKING",
+        sheet_rows_json=rows_json,
+        recalculate_after_writeback=False,
+        auto_create_unmatched_items=True,
+    )
+    second_result = apply_packing_list_fillable_fields(
+        batch_name="BATCH-PACKING",
+        attachment_name="ATT-PACKING",
+        sheet_rows_json=rows_json,
+        recalculate_after_writeback=False,
+        auto_create_unmatched_items=True,
+    )
+
+    assert first_result["created_count"] == 1
+    assert first_result["skipped_count"] == 1
+    assert second_result["created_count"] == 0
+    assert len(items) == 1
+    item = next(iter(items.values()))
+    assert item.material_code == "GJ003786"
+    assert item.product_name == "太阳眼镜"
+    assert item.spec_model == "黑色"
+    assert item.quantity == 10
+    assert item.actual_shipped_qty == 10
+    assert item.gross_weight_kg == 2.2
+    assert item.volume_m3 == 0.03
+    assert item.source_type == "PACKING_LIST"
+    assert item.source_attachment_id == "ATT-PACKING"
+    assert batch_updates[("Overseas Cost Batch", "BATCH-PACKING", "status")] == "Dirty"
+    assert commit_count["value"] == 1
+    assert len(audit_payloads) == 1
 
 
 def test_preview_tax_certificate_pdf_extracts_pedimento_tax_summary_and_items() -> None:
@@ -1591,6 +2283,9 @@ def test_build_packing_list_parse_task_defaults_to_multi_template_router() -> No
 
     assert task["parser_strategy"] == "mixed_workbook_router"
     assert "volume_m3" in task["parse_targets"]
+    assert "unit_price" in task["parse_targets"]
+    assert "purchase_currency" in task["parse_targets"]
+    assert "goods_value" in task["parse_targets"]
 
 
 def test_import_main_excel_returns_yuewei_block_preview_without_frappe() -> None:

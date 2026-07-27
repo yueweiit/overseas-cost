@@ -24,6 +24,7 @@ class OverseasCostWorkbench {
     this.batchColumns = [];
     this.expandedBatchNames = new Set();
     this.activeBatchName = "";
+    this.dataCheckBatchName = "";
     this.filters = {
       customs_no: "",
       waybill_no: "",
@@ -123,7 +124,7 @@ class OverseasCostWorkbench {
                 <div class="ocw-head-actions">
                   <span class="ocw-summary-pill" data-area="hierarchy-summary">加载批次中</span>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="file-parse">文件解析</button>
-                  <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-categories">品类归类</button>
+                <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-categories">名称归并</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="open-import">Excel 导入</button>
                   <button class="ocw-primary-btn ocw-mini-btn" data-action="recalculate">重新试算</button>
                   <button class="ocw-primary-btn ocw-mini-btn" data-action="add-batch">+ 添加报关运单</button>
@@ -185,10 +186,13 @@ class OverseasCostWorkbench {
                 <h2>修改记录</h2>
                 <ul class="ocw-audit-list" data-area="audit-list"></ul>
               </article>
-              <article class="ocw-bottom-panel">
+            <article class="ocw-bottom-panel">
+              <div class="ocw-bottom-panel-head">
                 <h2>当前批次数据检查</h2>
-                <div class="ocw-diff-wrap" data-area="diff-panel"></div>
-              </article>
+                <select class="form-control ocw-batch-select" data-role="data-check-batch-select" aria-label="选择数据检查批次"></select>
+              </div>
+              <div class="ocw-diff-wrap" data-area="diff-panel"></div>
+            </article>
             </section>
           </main>
         </div>
@@ -218,6 +222,15 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='clear-filters']", () => this.clearFilters());
     this.$root.on("click", "[data-action='recalculate']", () => this.recalculate());
     this.$root.on("click", "[data-action='open-import']", () => this.openImportDialog());
+    this.$root.on("change", "[data-role='data-check-batch-select']", (event) => {
+      const batchName = String($(event.currentTarget).val() || "");
+      const batch = this.findBatch(batchName);
+      if (!batch) return;
+      this.dataCheckBatchName = batch.name;
+      this.loadBatchItems(batch.name, batch.current_version)
+        .then(() => this.renderDiffPanel())
+        .catch((error) => this.showError(error));
+    });
     this.$root.on("click", "[data-action='preview-categories']", () => this.openCategoryPreviewDialog());
     this.$root.on("click", "[data-action='file-parse']", () => this.openFileParseDialog());
     this.$root.on("click", "[data-action='show-scope']", () => this.showPendingFeature("当前先支持成本总表和国际物流审批附件 Excel 的数据摘取；费用口径不完整时先落基础明细，后续由钉钉/凭证继续补数。"));
@@ -290,6 +303,9 @@ class OverseasCostWorkbench {
         if (!this.findBatch(this.activeBatchName)) {
           this.activeBatchName = this.batches[0].name;
         }
+        if (!this.findBatch(this.dataCheckBatchName)) {
+          this.dataCheckBatchName = this.activeBatchName;
+        }
         const activeBatch = this.getActiveBatch();
         await this.loadAuditLogs(activeBatch.name, activeBatch.current_version);
         this.renderTable();
@@ -316,8 +332,10 @@ class OverseasCostWorkbench {
     const result = await this.call("overseas_costing.api.batch.get_batch_items", {
       batch_name: batchName,
       version_name: versionName,
-      customs_no: this.filters.customs_no,
-      waybill_no: this.filters.waybill_no,
+      // 报关单号和运单号属于整票筛选条件。命中批次后仍加载完整物料，
+      // 避免单号只在批次头时出现父级命中、明细为空。
+      customs_no: "",
+      waybill_no: "",
       material_code: this.filters.material_code,
       product_name: this.filters.product_name,
       import_name: this.filters.import_name,
@@ -433,8 +451,8 @@ class OverseasCostWorkbench {
   openFileParseDialog() {
     const batch = this.getVisibleActiveBatch() || this.getActiveBatch();
     const batchName = batch ? batch.name : "";
-    const batchLabel = batch ? batch.customs_no || batch.waybill_no || batch.batch_no || batch.name : "未选择批次";
-    const batchHint = batch ? "解析后优先按凭证报关单号/柜号自动匹配，当前页面批次仅作为兜底。" : "解析后会按凭证报关单号/柜号自动尝试匹配批次。";
+    const batchHint = this.voucherBatchHint(batch);
+    const batchOptions = this.renderBatchOptions(batchName);
     const dialog = new frappe.ui.Dialog({
       title: "文件解析预览",
       fields: [
@@ -444,9 +462,11 @@ class OverseasCostWorkbench {
           options: `
             <div class="ocw-file-parse-box">
               <div class="ocw-voucher-target">
-                <span>当前对比批次</span>
-                <strong>${this.escape(batchLabel)}</strong>
-                <em>${this.escape(batchHint)}</em>
+                <label class="ocw-voucher-batch-picker">
+                  <span>解析对比批次</span>
+                  <select class="form-control ocw-batch-select" data-role="voucher-batch-select" aria-label="选择文件解析批次">${batchOptions}</select>
+                </label>
+                <em data-area="voucher-batch-hint">${this.escape(batchHint)}</em>
               </div>
               <label class="ocw-import-file-label">上传完税凭证 PDF</label>
               <div class="ocw-import-dropzone" data-voucher-dropzone="1" tabindex="0">
@@ -523,6 +543,15 @@ class OverseasCostWorkbench {
     });
     $dropzone.on("drop", (event) => {
       setFile(event.originalEvent?.dataTransfer?.files?.[0]);
+    });
+    dialog.$wrapper.on("change", "[data-role='voucher-batch-select']", (event) => {
+      const batch = this.findBatch(String($(event.currentTarget).val() || ""));
+      dialog.$wrapper.data("ocw-voucher-batch-name", batch ? batch.name : "");
+      dialog.$wrapper.removeData("ocw-voucher-preview");
+      this.renderVoucherPreview(dialog, null, "empty");
+      this.updateVoucherPrimarySaveAction(dialog, false);
+      dialog.$wrapper.find("[data-area='voucher-batch-hint']").text(this.voucherBatchHint(batch));
+      this.loadTaxCertificateRecords(dialog).catch((error) => this.showError(error));
     });
     dialog.$wrapper.on("click", "[data-action='preview-voucher']", (event) => {
       event.preventDefault();
@@ -1568,20 +1597,20 @@ class OverseasCostWorkbench {
   async openCategoryPreviewDialog(batchName = "") {
     const batch = batchName ? this.findBatch(batchName) : this.getVisibleActiveBatch();
     if (!batch) {
-      this.showPendingFeature("当前没有可归类的批次，请先导入或查询一条数据。");
+      this.showPendingFeature("当前没有可归类的批次，请先拉取或查询一条数据。");
       return;
     }
     this.activeBatchName = batch.name;
 
     const dialog = new frappe.ui.Dialog({
-      title: "商品品类归类预览",
+      title: "商品名称归并预览",
       fields: [
         {
           fieldtype: "HTML",
           fieldname: "category_preview",
           options: `
             <div class="ocw-category-preview" data-area="category-preview">
-              <div class="ocw-category-loading">正在分析当前批次物料...</div>
+              <div class="ocw-category-loading">正在检查当前批次是否存在需要统一名称的商品...</div>
             </div>
           `,
         },
@@ -1614,7 +1643,7 @@ class OverseasCostWorkbench {
     if (!result || !result.ok) {
       $target.html(`
         <div class="ocw-category-empty">
-          <strong>暂时无法生成归类预览</strong>
+          <strong>暂时无法生成名称归并预览</strong>
           <span>${this.escape((result && result.message) || "请确认当前批次已有物料明细。")}</span>
         </div>
       `);
@@ -1625,7 +1654,7 @@ class OverseasCostWorkbench {
     const summary = result.summary || {};
     const categoryCounts = summary.category_counts || {};
     const countChips = Object.keys(categoryCounts)
-      .map((category) => `<span>${this.escape(category)} ${this.escape(String(categoryCounts[category]))}</span>`)
+      .map((name) => `<span>${this.escape(name)} ${this.escape(String(categoryCounts[name]))}</span>`)
       .join("");
     const rows = items.map((row) => this.renderCategoryPreviewRow(row)).join("");
     const batchLabel = batch.waybill_no || batch.batch_no || batch.name;
@@ -1634,13 +1663,13 @@ class OverseasCostWorkbench {
       <div class="ocw-category-summary">
         <div><span>当前批次</span><strong>${this.escape(batchLabel || "--")}</strong></div>
         <div><span>物料行数</span><strong>${this.escape(String(summary.item_count || items.length || 0))}</strong></div>
-        <div><span>需复核</span><strong>${this.escape(String(summary.needs_review_count || 0))}</strong></div>
-        <div><span>待 AI 判断</span><strong>${this.escape(String(summary.ai_ready_count || 0))}</strong></div>
+        <div><span>归并候选</span><strong>${this.escape(String(summary.normalization_candidate_count || 0))}</strong></div>
+        <div><span>无需处理</span><strong>${this.escape(String(summary.no_action_count || 0))}</strong></div>
       </div>
       <div class="ocw-category-note">
-        当前仅生成建议，不自动写入“大类分类”，后续接入 AI 后仍保留人工复核。
+        仅提示名称不同但实际可能是同一商品的少量候选，例如“墨镜”统一为“太阳眼镜”。普通商品不归类；不会因“袋 / bolsa”等泛词归为包装材料，也不会自动写回。
       </div>
-      <div class="ocw-category-counts">${countChips || "<span>暂无建议品类</span>"}</div>
+      <div class="ocw-category-counts">${countChips || "<span>当前批次没有需要归并的名称</span>"}</div>
       <div class="ocw-category-table-wrap">
         <table class="ocw-category-table">
           <thead>
@@ -1648,15 +1677,13 @@ class OverseasCostWorkbench {
               <th>物料编码</th>
               <th>中文品名</th>
               <th>海关进口名称</th>
-              <th>海关分类编码</th>
-              <th>当前大类</th>
-              <th>建议品类</th>
-              <th>置信度</th>
+              <th>规格型号</th>
+              <th>建议统一名称</th>
               <th>状态</th>
               <th>原因</th>
             </tr>
           </thead>
-          <tbody>${rows || `<tr><td colspan="9">当前批次暂无物料明细</td></tr>`}</tbody>
+          <tbody>${rows || `<tr><td colspan="7">当前批次暂无物料明细</td></tr>`}</tbody>
         </table>
       </div>
     `);
@@ -1669,10 +1696,8 @@ class OverseasCostWorkbench {
         <td>${this.escape(row.material_code || "--")}</td>
         <td title="${this.escape(row.product_name || "")}">${this.escape(row.product_name || "--")}</td>
         <td title="${this.escape(row.import_name || "")}">${this.escape(row.import_name || "--")}</td>
-        <td>${this.escape(row.hs_code || "--")}</td>
-        <td>${this.escape(row.current_category || "--")}</td>
-        <td><strong>${this.escape(row.suggested_category || "--")}</strong></td>
-        <td>${this.escape(this.formatConfidence(row.confidence))}</td>
+        <td title="${this.escape(row.spec_model || "")}">${this.escape(row.spec_model || "--")}</td>
+        <td><strong>${this.escape(row.suggested_name || "--")}</strong></td>
         <td><span class="ocw-category-status ${this.escape(status.className)}">${this.escape(status.label)}</span></td>
         <td title="${this.escape(row.reason || "")}">${this.escape(row.reason || "--")}</td>
       </tr>
@@ -1680,13 +1705,10 @@ class OverseasCostWorkbench {
   }
 
   categoryStatusInfo(row) {
-    if (row.ai_ready) {
-      return { label: "待 AI 判断", className: "ai", rowClass: "needs-ai" };
-    }
     if (row.needs_review) {
-      return { label: "需复核", className: "review", rowClass: "needs-review" };
+      return { label: "待确认", className: "review", rowClass: "needs-review" };
     }
-    return { label: "可采用", className: "ok", rowClass: "" };
+    return { label: "无需归并", className: "noop", rowClass: "" };
   }
 
   formatConfidence(value) {
@@ -1704,6 +1726,20 @@ class OverseasCostWorkbench {
   isPdfFileRef(value) {
     const text = String(value || "").split("?")[0].toLowerCase();
     return text.endsWith(".pdf");
+  }
+
+  isImageFileRef(value) {
+    const text = String(value || "").split("?")[0].toLowerCase();
+    return [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"].some((suffix) => text.endsWith(suffix));
+  }
+
+  isWordFileRef(value) {
+    const text = String(value || "").split("?")[0].toLowerCase();
+    return text.endsWith(".doc") || text.endsWith(".docx");
+  }
+
+  isTextFileRef(value) {
+    return String(value || "").split("?")[0].toLowerCase().endsWith(".txt");
   }
 
   openPurchasePreviewDialog(batchName = "") {
@@ -1915,6 +1951,10 @@ class OverseasCostWorkbench {
                 <strong>发起附件</strong>
                 <span>查看发起表单上传的装箱单、提单、发票等附件</span>
               </button>
+              <button class="ocw-quick-card" data-action="source-logistics-quote">
+                <strong>物流报价</strong>
+                <span>查看 OA 填写的报价候选，确认后才计入物流成本</span>
+              </button>
             </div>
           `,
         },
@@ -1933,7 +1973,120 @@ class OverseasCostWorkbench {
       .on("click.ocwSourceCenter", "[data-action='source-attachments']", () => {
         dialog.hide();
         this.openOaAttachmentDialog(batch.name);
+      })
+      .on("click.ocwSourceCenter", "[data-action='source-logistics-quote']", () => {
+        dialog.hide();
+        this.openLogisticsQuoteDialog(batch.name);
       });
+  }
+
+  openLogisticsQuoteDialog(batchName = "") {
+    const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
+    if (!batch) {
+      this.showPendingFeature("当前没有可查看物流报价的批次。");
+      return;
+    }
+    this.activeBatchName = batch.name;
+    const sourceStatus = batch.source_status || {};
+    const candidates = Array.isArray(sourceStatus.logistics_quote_candidates) ? sourceStatus.logistics_quote_candidates : [];
+    const confirmed = sourceStatus.confirmed_logistics_quote || {};
+    const batchLabel = batch.waybill_no || batch.batch_no || batch.name;
+    const candidateRows = candidates.length
+      ? candidates
+          .map((candidate, index) => {
+            const isConfirmed = Number(confirmed.candidate_index) === index && this.isPositive(confirmed.amount);
+            const carrier = candidate.carrier || "未标注供应商";
+            const amount = `${this.formatNumber(candidate.amount)} ${candidate.currency || "RMB"}`;
+            const volume = this.isPositive(candidate.volume_m3) ? ` · ${this.formatNumber(candidate.volume_m3)} 方` : "";
+            return `
+              <div class="ocw-purchase-source-row">
+                <div>
+                  <strong>${this.escape(carrier)}</strong>
+                  <span>${this.escape(amount)}${this.escape(volume)}</span>
+                  <em>${this.escape(candidate.evidence_line || "来源于 OA 物流报价字段")}</em>
+                </div>
+                ${
+                  isConfirmed
+                    ? '<span class="ocw-purchase-source-disabled">已确认</span>'
+                    : `<button class="ocw-primary-btn ocw-mini-btn" data-action="confirm-logistics-quote" data-candidate-index="${index}">确认使用</button>`
+                }
+              </div>
+            `;
+          })
+          .join("")
+      : '<div class="ocw-purchase-empty-line">当前 OA 未识别到可确认的物流报价。请先确认审批单已填写“物流报价”文字或有明确物流费用字段。</div>';
+    const confirmedHtml = this.isPositive(confirmed.amount)
+      ? `<div class="ocw-purchase-apply"><div><strong>当前已确认</strong><span>${this.escape(confirmed.carrier || "未标注供应商")} ${this.escape(`${this.formatNumber(confirmed.amount)} ${confirmed.currency || "RMB"}`)}，已作为整票物流费用参与试算。</span></div></div>`
+      : '<div class="ocw-purchase-note">候选报价仅用于辅助确认；未确认前不会写入费用分摊或综合成本。</div>';
+    const dialog = new frappe.ui.Dialog({
+      title: "物流报价确认",
+      fields: [
+        {
+          fieldtype: "HTML",
+          fieldname: "logistics_quote",
+          options: `
+            <div class="ocw-purchase-preview">
+              <div class="ocw-purchase-target">
+                <span>当前批次</span>
+                <strong>${this.escape(batchLabel)}</strong>
+                <em>系统从国际物流 OA 的文字报价中提取候选；确认后会记录来源、操作人和时间。</em>
+              </div>
+              ${confirmedHtml}
+              <div class="ocw-purchase-source-list">${candidateRows}</div>
+            </div>
+          `,
+        },
+      ],
+      primary_action_label: "关闭",
+      primary_action: () => dialog.hide(),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-purchase-modal");
+    dialog.$wrapper.off("click.ocwLogisticsQuote").on("click.ocwLogisticsQuote", "[data-action='confirm-logistics-quote']", (event) => {
+      const index = Number($(event.currentTarget).attr("data-candidate-index"));
+      this.confirmLogisticsQuoteCandidate(batch, candidates[index], index, dialog).catch((error) => this.showError(error));
+    });
+  }
+
+  async confirmLogisticsQuoteCandidate(batch, candidate, candidateIndex, dialog) {
+    if (!batch || !candidate || this.isConfirmingLogisticsQuote) return;
+    const carrier = candidate.carrier || "未标注供应商";
+    const amount = `${this.formatNumber(candidate.amount)} ${candidate.currency || "RMB"}`;
+    const confirmed = await new Promise((resolve) => {
+      frappe.confirm(
+        `
+          <div class="ocw-confirm-copy">
+            <h4>确认使用该物流报价？</h4>
+            <p>将确认 ${this.escape(carrier)} 的 ${this.escape(amount)}，生成整票物流费用分摊规则并重新试算。</p>
+            <div class="ocw-confirm-note">确认后仍可改选其他候选，系统会保留每次确认记录。</div>
+          </div>
+        `,
+        () => resolve(true),
+        () => resolve(false)
+      );
+    });
+    if (!confirmed) return;
+
+    this.isConfirmingLogisticsQuote = true;
+    try {
+      const result = await this.call(
+        "overseas_costing.api.import_api.confirm_logistics_quote_candidate",
+        {
+          batch_name: batch.name,
+          version_name: batch.current_version || null,
+          candidate_index: candidateIndex,
+        },
+        true
+      );
+      if (!result || !result.ok) {
+        throw new Error((result && result.message) || "物流报价确认失败");
+      }
+      dialog.hide();
+      await this.loadBatches();
+      frappe.show_alert({ message: result.message || "物流报价已确认", indicator: "green" });
+    } finally {
+      this.isConfirmingLogisticsQuote = false;
+    }
   }
 
   openRowMoreDialog(batchName = "") {
@@ -2007,8 +2160,8 @@ class OverseasCostWorkbench {
               <em>只显示钉钉审批发起表单上传的附件；评论附件暂不纳入。</em>
             </div>
             <div class="ocw-import-preview-actions">
-              <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="parse-current-oa-attachments">解析当前批次可处理附件</button>
-              <span>自动下载并解析 Excel 装箱单；PDF、PO、合同等先保留原件。</span>
+                <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="parse-current-oa-attachments">自动解析附件</button>
+                <span>自动处理 Excel 装箱单/CI&PL；能匹配的补入，系统没有的物料会新增。</span>
             </div>
             <div class="ocw-purchase-loading" data-area="oa-attachment-list">正在读取发起附件</div>
           `,
@@ -2018,7 +2171,7 @@ class OverseasCostWorkbench {
       primary_action: () => dialog.hide(),
     });
     dialog.show();
-    dialog.$wrapper.addClass("ocw-purchase-modal");
+    dialog.$wrapper.addClass("ocw-purchase-modal ocw-oa-attachment-modal");
     dialog.$wrapper
       .off("click.ocwOaAttachments")
       .on("click.ocwOaAttachments", "[data-action='open-generic-link']", (event) => {
@@ -2042,6 +2195,13 @@ class OverseasCostWorkbench {
       })
       .on("click.ocwOaAttachments", "[data-action='parse-current-oa-attachments']", (event) => {
         this.parseCurrentOaAttachments(batch, dialog, $(event.currentTarget)).catch((error) => this.showError(error));
+      })
+      .on("click.ocwOaAttachments", "[data-action='preview-source-document']", (event) => {
+        this.openOaSourceAttachmentPreview(
+          $(event.currentTarget).attr("data-attachment-name"),
+          batch,
+          dialog
+        );
       });
     this.loadOaFormAttachments(batch, dialog).catch((error) => {
       dialog.$wrapper.find("[data-area='oa-attachment-list']").html(`
@@ -2092,9 +2252,12 @@ class OverseasCostWorkbench {
     );
     if (!result || !result.ok) {
       if ($button && $button.length) {
-        $button.prop("disabled", false).text("下载到本地");
+        $button.prop("disabled", false).text(result && result.error_type ? "重试下载" : "下载到本地");
       }
       this.showPendingFeature((result && result.message) || "钉钉附件下载失败。");
+      if (batch && dialog) {
+        await this.loadOaFormAttachments(batch, dialog);
+      }
       return;
     }
     if (result.file_url) {
@@ -2122,6 +2285,348 @@ class OverseasCostWorkbench {
     window.setTimeout(() => link.remove(), 0);
   }
 
+  openOaSourceAttachmentPreview(attachmentName = "", batch = null, parentDialog = null) {
+    if (!attachmentName) {
+      this.showPendingFeature("缺少附件记录，无法识别内容。");
+      return;
+    }
+    const dialog = new frappe.ui.Dialog({
+      title: "附件内容识别预览",
+      size: "large",
+      fields: [
+        {
+          fieldtype: "HTML",
+          fieldname: "source_attachment_preview",
+          options: '<div class="ocw-purchase-loading" data-area="source-attachment-preview">正在识别附件内容</div>',
+        },
+      ],
+      primary_action_label: "关闭",
+      primary_action: () => dialog.hide(),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-purchase-modal ocw-source-attachment-modal");
+    dialog.$wrapper
+      .off("click.ocwSourceAttachmentReview")
+      .on("click.ocwSourceAttachmentReview", "[data-action='confirm-source-attachment-type']", (event) => {
+        this.confirmOaSourceAttachmentType(
+          dialog,
+          attachmentName,
+          batch,
+          parentDialog,
+          $(event.currentTarget)
+        ).catch((error) => this.showError(error));
+      })
+      .on("click.ocwSourceAttachmentReview", "[data-action='preview-purchase-order-match']", () => {
+        this.openPurchaseOrderMatchDialog(attachmentName, batch, parentDialog, dialog);
+    });
+    this.call("overseas_costing.api.import_api.preview_oa_source_attachment", { attachment_name: attachmentName }, true)
+      .then(async (result) => {
+        this.renderOaSourceAttachmentPreview(dialog, result, batch, parentDialog);
+        if (result && result.ok && batch && parentDialog) {
+          await this.loadOaFormAttachments(batch, parentDialog);
+        }
+      })
+      .catch((error) => this.renderOaSourceAttachmentPreview(dialog, { ok: false, message: this.normalizeErrorMessage(error) }, batch, parentDialog));
+  }
+
+  renderOaSourceAttachmentPreview(dialog, result, batch = null, parentDialog = null) {
+    const $target = dialog.$wrapper.find("[data-area='source-attachment-preview']");
+    if (!result || !result.ok) {
+      $target.html(`
+        <div class="ocw-purchase-empty">
+          <strong>附件内容暂时无法识别</strong>
+          <span>${this.escape((result && result.message) || "请先确认附件已下载到系统。")}</span>
+        </div>
+      `);
+      return;
+    }
+    const classification = result.classification || {};
+    const fields = result.field_candidates || {};
+    const manualReview = result.manual_review || {};
+    const purchaseOrder = result.purchase_order || {};
+    const isPurchaseOrder = classification.code === "purchase_order" || manualReview.confirmed_type === "purchase_order";
+    const selectedType = manualReview.confirmed_type || this.sourceAttachmentTypeFromClassification(classification.code);
+    const typeOptions = [
+      ["purchase_order", "采购订单"],
+      ["purchase_price_document", "采购价格资料"],
+      ["customs_declaration", "报关资料"],
+      ["tax_certificate", "完税凭证"],
+      ["logistics_quote", "物流报价"],
+      ["other", "其他资料"],
+    ]
+      .map(([value, label]) => `<option value="${value}" ${value === selectedType ? "selected" : ""}>${label}</option>`)
+      .join("");
+    const candidateRows = [
+      ["物料编码候选", (fields.material_codes || []).join("、") || "--"],
+      ["海关编码候选", (fields.hs_codes || []).join("、") || "--"],
+      ["币种候选", (fields.currencies || []).join("、") || "--"],
+      ["单价候选", this.isPositive(fields.unit_price_candidate) ? this.formatNumber(fields.unit_price_candidate) : "--"],
+      ["金额候选", this.isPositive(fields.goods_value_candidate) ? this.formatNumber(fields.goods_value_candidate) : "--"],
+      ["报关单号候选", fields.pedimento_no_candidate || "--"],
+      ["实缴税费候选 MXN", this.isPositive(fields.paid_total_mxn_candidate) ? this.formatNumber(fields.paid_total_mxn_candidate) : "--"],
+      ["税费合计候选 MXN", this.isPositive(fields.tax_total_mxn_candidate) ? this.formatNumber(fields.tax_total_mxn_candidate) : "--"],
+    ]
+      .map(([label, value]) => `<tr><th>${this.escape(label)}</th><td>${this.escape(String(value))}</td></tr>`)
+      .join("");
+    const methodLabels = {
+      pdf_layout_text: "PDF 版面文本",
+      pdf_text: "PDF 文字层",
+      ocr_pdf: "扫描 PDF OCR",
+      ocr_image: "图片 OCR",
+      word_docx: "Word 文本",
+      word_doc: "Word 文本",
+      txt_text: "TXT 文本",
+    };
+    const methodLabel = methodLabels[result.extraction_method] || "文档文本";
+    $target.html(`
+      <div class="ocw-purchase-target ocw-source-document-target">
+        <span>附件</span>
+        <strong>${this.escape(result.source_name || "--")}</strong>
+        <em>${this.escape(methodLabel)}；识别结果仅用于资料分类和人工核对，当前不会写入单价、货值。</em>
+      </div>
+      <div class="ocw-purchase-apply ocw-source-document-classification">
+        <div>
+          <strong>${this.escape(classification.label || "待人工识别")}</strong>
+          <span>${this.escape(classification.reason || "")}</span>
+        </div>
+      </div>
+      ${isPurchaseOrder ? `
+        <section class="ocw-purchase-section ocw-purchase-order-entry ocw-source-purchase-order-entry">
+          <div class="ocw-purchase-order-summary">
+            <span>订单号</span><strong>${this.escape(purchaseOrder.purchase_order_no || "--")}</strong>
+            <span>供应商</span><strong>${this.escape(purchaseOrder.supplier || "--")}</strong>
+            <span>币种</span><strong>${this.escape(purchaseOrder.currency || "--")}</strong>
+          </div>
+          <button class="btn btn-primary btn-sm" type="button" data-action="preview-purchase-order-match">查看物料匹配</button>
+        </section>
+      ` : ""}
+      <section class="ocw-purchase-section ocw-source-document-review">
+        <h4>人工确认</h4>
+        <div class="ocw-source-document-review-controls">
+          <select class="form-control" data-field="source-attachment-type">${typeOptions}</select>
+          <input class="form-control" data-field="source-attachment-remark" type="text" maxlength="240" placeholder="备注（可选）" value="${this.escape(manualReview.remark || "")}">
+          <button class="btn btn-primary btn-sm" type="button" data-action="confirm-source-attachment-type">确认资料类型</button>
+        </div>
+        ${manualReview.status === "confirmed" ? `<div class="ocw-confirm-note">已确认：${this.escape(manualReview.confirmed_type_label || "--")}${manualReview.confirmed_by ? `，${this.escape(manualReview.confirmed_by)}` : ""}${manualReview.confirmed_at ? `，${this.escape(manualReview.confirmed_at)}` : ""}</div>` : ""}
+      </section>
+      <section class="ocw-purchase-section">
+        <h4>字段候选</h4>
+        <div class="ocw-purchase-table-wrap ocw-field-candidate-wrap">
+          <table class="ocw-purchase-table ocw-field-candidate-table"><tbody>${candidateRows}</tbody></table>
+        </div>
+      </section>
+      <section class="ocw-purchase-section">
+        <h4>识别文本</h4>
+        <pre class="ocw-attachment-ocr-text">${this.escape(result.text_excerpt || "未识别到可用文字")}</pre>
+      </section>
+    `);
+  }
+
+  sourceAttachmentTypeFromClassification(code = "") {
+    const supported = ["purchase_order", "purchase_price_document", "customs_declaration", "tax_certificate", "logistics_quote"];
+    return supported.includes(code) ? code : "other";
+  }
+
+  async confirmOaSourceAttachmentType(dialog, attachmentName = "", batch = null, parentDialog = null, $button = null) {
+    if (!attachmentName) {
+      this.showPendingFeature("缺少附件记录，无法保存确认结果。");
+      return;
+    }
+    const confirmedType = dialog.$wrapper.find("[data-field='source-attachment-type']").val();
+    const remark = dialog.$wrapper.find("[data-field='source-attachment-remark']").val();
+    if ($button && $button.length) {
+      $button.prop("disabled", true).text("保存中");
+    }
+    try {
+      const result = await this.call(
+        "overseas_costing.api.import_api.confirm_oa_source_attachment_type",
+        {
+          attachment_name: attachmentName,
+          confirmed_type: confirmedType,
+          remark: remark || "",
+        },
+        true
+      );
+      if (!result || !result.ok) {
+        this.showPendingFeature((result && result.message) || "附件类型确认失败。");
+        return;
+      }
+      frappe.show_alert({ message: result.message || "附件资料类型已确认", indicator: "green" });
+      if (batch && parentDialog) {
+        await this.loadOaFormAttachments(batch, parentDialog);
+        await this.refreshBatch(batch.name);
+      }
+      dialog.hide();
+    } finally {
+      if ($button && $button.length && dialog.$wrapper.is(":visible")) {
+        $button.prop("disabled", false).text("确认资料类型");
+      }
+    }
+  }
+
+  openPurchaseOrderMatchDialog(attachmentName = "", batch = null, attachmentListDialog = null, sourcePreviewDialog = null) {
+    if (!attachmentName) {
+      this.showPendingFeature("缺少采购订单附件，无法生成物料匹配预览。");
+      return;
+    }
+    const dialog = new frappe.ui.Dialog({
+      title: "采购订单匹配预览",
+      size: "large",
+      fields: [
+        {
+          fieldtype: "HTML",
+          fieldname: "purchase_order_match_preview",
+          options: '<div class="ocw-purchase-loading" data-area="purchase-order-match-preview">正在生成采购订单匹配预览</div>',
+        },
+      ],
+      primary_action_label: "关闭",
+      primary_action: () => dialog.hide(),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-purchase-modal");
+    dialog.$wrapper
+      .off("click.ocwPurchaseOrderMatch")
+      .on("click.ocwPurchaseOrderMatch", "[data-action='apply-purchase-order-match']", (event) => {
+        this.applyPurchaseOrderMatch(
+          dialog,
+          attachmentName,
+          batch,
+          attachmentListDialog,
+          sourcePreviewDialog,
+          $(event.currentTarget)
+        ).catch((error) => this.showError(error));
+      });
+    this.call(
+      "overseas_costing.api.import_api.preview_oa_purchase_order_match",
+      { attachment_name: attachmentName },
+      true
+    )
+      .then((result) => this.renderPurchaseOrderMatchPreview(dialog, result))
+      .catch((error) => this.renderPurchaseOrderMatchPreview(dialog, { ok: false, message: this.normalizeErrorMessage(error) }));
+  }
+
+  renderPurchaseOrderMatchPreview(dialog, result) {
+    const $target = dialog.$wrapper.find("[data-area='purchase-order-match-preview']");
+    if (!result || !result.ok) {
+      $target.html(`
+        <div class="ocw-purchase-empty">
+          <strong>暂时无法生成采购订单匹配</strong>
+          <span>${this.escape((result && result.message) || "请确认附件已下载且识别出完整价格明细。")}</span>
+        </div>
+      `);
+      return;
+    }
+    const purchaseOrder = result.purchase_order || {};
+    const writeback = result.writeback_preview || {};
+    const rows = this.renderPurchaseOrderMatchRows(result.source_rows || [], writeback);
+    const hasFillable = Number(writeback.fillable_row_count || 0) > 0;
+    $target.html(`
+      <div class="ocw-purchase-target">
+        <span>采购订单</span>
+        <strong>${this.escape(purchaseOrder.purchase_order_no || "--")}</strong>
+        <em>${this.escape(purchaseOrder.supplier || "--")} / ${this.escape(purchaseOrder.currency || "--")}</em>
+      </div>
+      <div class="ocw-purchase-order-stats">
+        <span>识别 ${this.escape(String(purchaseOrder.recognized_line_count || 0))} 条</span>
+        <span>匹配 ${this.escape(String(writeback.matched_count || 0))} 条</span>
+        <span>可补 ${this.escape(String(writeback.fillable_row_count || 0))} 条</span>
+        <span>冲突 ${this.escape(String(writeback.conflict_row_count || 0))} 条</span>
+        <span>未匹配 ${this.escape(String(writeback.unmatched_count || 0))} 条</span>
+      </div>
+      <section class="ocw-purchase-section">
+        <div class="ocw-purchase-table-wrap">
+          <table class="ocw-purchase-table ocw-purchase-order-table">
+            <thead><tr><th>物料编码</th><th>物料名称</th><th>数量</th><th>采购单价</th><th>币种</th><th>采购货值</th><th>匹配结果</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </section>
+      <div class="ocw-purchase-order-footer">
+        <span>${this.escape(writeback.message || result.message || "")}</span>
+        ${hasFillable ? '<button class="btn btn-primary btn-sm" type="button" data-action="apply-purchase-order-match">确认补入空值</button>' : ""}
+      </div>
+    `);
+  }
+
+  renderPurchaseOrderMatchRows(sourceRows, writeback) {
+    if (!sourceRows.length) {
+      return '<tr><td colspan="7" class="ocw-purchase-empty-line">未识别到包含物料编码、数量、单价和货值的完整明细</td></tr>';
+    }
+    const matchedRows = writeback.matched_rows || [];
+    const unmatchedRows = writeback.unmatched_rows || [];
+    return sourceRows
+      .map((source) => {
+        const materialCode = String(source.material_code || "");
+        const matched = matchedRows.find((row) => String((row.mapped_row || {}).material_code || "") === materialCode);
+        const unmatched = unmatchedRows.some((row) => String(row.material_code || "") === materialCode);
+        let status = "未匹配";
+        let statusClass = "ocw-match-missing";
+        if (matched && matched.has_conflict) {
+          status = "已有不同采购值";
+          statusClass = "ocw-match-conflict";
+        } else if (matched && matched.has_fillable) {
+          status = "可补入空值";
+          statusClass = "ocw-match-ready";
+        } else if (matched && matched.all_business_same) {
+          status = "系统已有一致数据";
+          statusClass = "ocw-match-same";
+        } else if (matched) {
+          status = "无需补入";
+          statusClass = "ocw-match-same";
+        } else if (!unmatched) {
+          status = "待核对";
+        }
+        return `
+          <tr>
+            <td>${this.escape(materialCode || "--")}</td>
+            <td>${this.escape(source.product_name || "--")}</td>
+            <td>${this.escape(this.formatNumber(source.quantity))}</td>
+            <td>${this.escape(this.formatNumber(source.unit_price))}</td>
+            <td>${this.escape(source.purchase_currency || "--")}</td>
+            <td>${this.escape(this.formatNumber(source.goods_value))}</td>
+            <td><span class="ocw-match-status ${statusClass}">${this.escape(status)}</span></td>
+          </tr>
+        `;
+      })
+      .join("");
+  }
+
+  async applyPurchaseOrderMatch(dialog, attachmentName, batch = null, attachmentListDialog = null, sourcePreviewDialog = null, $button = null) {
+    if ($button && $button.length) {
+      $button.prop("disabled", true).text("提交中");
+    }
+    try {
+      const confirmed = await new Promise((resolve) => {
+        frappe.confirm(
+          "将只补入总表中为空的采购单价、币种和货值；系统已有不同值不会覆盖。",
+          () => resolve(true),
+          () => resolve(false)
+        );
+      });
+      if (!confirmed) return;
+      const result = await this.call(
+        "overseas_costing.api.import_api.apply_oa_purchase_order_fillable_fields",
+        { attachment_name: attachmentName, recalculate_after_writeback: 1 },
+        true
+      );
+      if (!result || !result.ok) {
+        this.showPendingFeature((result && result.message) || "采购订单字段写入失败。");
+        return;
+      }
+      frappe.show_alert({ message: result.message || "采购订单空值已补入", indicator: "green" });
+      if (batch && attachmentListDialog) {
+        await this.loadOaFormAttachments(batch, attachmentListDialog);
+        await this.refreshBatch(batch.name);
+      }
+      if (sourcePreviewDialog) sourcePreviewDialog.hide();
+      dialog.hide();
+    } finally {
+      if ($button && $button.length && dialog.$wrapper.is(":visible")) {
+        $button.prop("disabled", false).text("确认补入空值");
+      }
+    }
+  }
+
   async parseCurrentOaAttachments(batch, dialog, $button = null) {
     if (!batch || this.isParsingOaAttachments) return;
     this.isParsingOaAttachments = true;
@@ -2140,8 +2645,7 @@ class OverseasCostWorkbench {
         true
       );
       if (!result || !result.ok) {
-        const message = (result && result.message) || "当前批次附件解析失败。";
-        frappe.show_alert({ message, indicator: result && result.failed_count ? "red" : "orange" });
+        this.showOaAttachmentParseResult(result || { ok: false, message: "当前批次附件解析失败。" });
       } else {
         frappe.show_alert({ message: result.message || "当前批次可处理附件已解析", indicator: "green" });
       }
@@ -2150,9 +2654,98 @@ class OverseasCostWorkbench {
     } finally {
       this.isParsingOaAttachments = false;
       if ($button && $button.length) {
-        $button.prop("disabled", false).text("解析当前批次可处理附件");
+        $button.prop("disabled", false).text("自动解析附件");
       }
     }
+  }
+
+  showOaAttachmentParseResult(result = {}) {
+    const items = Array.isArray(result.items) ? result.items : [];
+    const failedItems = items.filter((item) => item.action === "failed" || item.action === "blocked");
+    const skippedItems = items.filter((item) => item.action === "skipped");
+    const summaryCards = [
+      ["扫描附件", result.scanned_count || 0],
+      ["已下载", result.downloaded_count || 0],
+      ["已解析", result.parsed_count || 0],
+      ["新增物料", result.created_count || 0],
+      ["写入字段", result.changed_field_count || 0],
+      ["失败", result.failed_count || 0],
+      ["跳过", result.skipped_count || 0],
+    ]
+      .map(
+        ([label, value]) => `
+          <div>
+            <span>${this.escape(label)}</span>
+            <strong>${this.escape(String(value))}</strong>
+          </div>
+        `
+      )
+      .join("");
+    const failedRows = failedItems.length
+      ? failedItems
+          .map(
+            (item) => `
+              <tr>
+                <td>${this.escape(item.file_name || item.attachment_name || "--")}</td>
+                <td>${this.escape(this.attachmentTypeLabel(item.attachment_type))}</td>
+                <td>${this.escape(this.oaAttachmentParseActionLabel(item))}</td>
+                <td>${this.escape(item.reason || (item.download && item.download.message) || "--")}</td>
+              </tr>
+            `
+          )
+          .join("")
+      : `<tr><td colspan="4" class="ocw-parse-result-empty">暂无失败附件</td></tr>`;
+    const skippedText = skippedItems.length
+      ? `另有 ${skippedItems.length} 个附件暂未处理，通常是 PNG、PDF 或其他非 Excel 装箱单资料。`
+      : "";
+    const fileAccessNote = result.file_access_blocked_count
+      ? "当前账号没有部分钉钉附件的文件级访问权限。请换成能在钉钉原单打开附件的账号，或手动下载后拖放上传。"
+      : "";
+    const dialog = new frappe.ui.Dialog({
+      title: "附件解析结果",
+      size: "large",
+      fields: [
+        {
+          fieldtype: "HTML",
+          fieldname: "parse_result",
+          options: `
+            <div class="ocw-parse-result">
+              <div class="ocw-purchase-summary">${summaryCards}</div>
+              <div class="ocw-purchase-note">${this.escape(result.message || "当前批次附件解析未完成。")}</div>
+              ${fileAccessNote ? `<div class="ocw-confirm-note">${this.escape(fileAccessNote)}</div>` : ""}
+              ${skippedText ? `<div class="ocw-parse-result-muted">${this.escape(skippedText)}</div>` : ""}
+              <div class="ocw-purchase-table-wrap">
+                <table class="ocw-purchase-table ocw-parse-result-table">
+                  <thead>
+                    <tr>
+                      <th>附件</th>
+                      <th>类型</th>
+                      <th>状态</th>
+                      <th>原因</th>
+                    </tr>
+                  </thead>
+                  <tbody>${failedRows}</tbody>
+                </table>
+              </div>
+            </div>
+          `,
+        },
+      ],
+      primary_action_label: "我知道了",
+      primary_action: () => dialog.hide(),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-purchase-modal ocw-oa-parse-result-modal");
+  }
+
+  oaAttachmentParseActionLabel(item = {}) {
+    if (item.error_type === "dingtalk_attachment_file_access") return "无附件访问权";
+    if (item.error_type === "dingtalk_permission") return "缺少钉钉权限";
+    if (item.action === "blocked") return "已暂停";
+    if (item.action === "failed") return "失败";
+    if (item.action === "skipped") return "已跳过";
+    if (item.action === "parsed") return "已解析";
+    return item.action || "--";
   }
 
   renderOaAttachmentList(items) {
@@ -2164,16 +2757,29 @@ class OverseasCostWorkbench {
         </section>
       `;
     }
-    const downloadableCount = items.filter((row) => !row.file_url && (row.can_download || row.file_id)).length;
+    const downloadableCount = items.filter((row) => {
+      const error = row.last_download_error && row.last_download_error.error_type;
+      return !row.file_url && !error && (row.can_download || row.file_id);
+    }).length;
     const downloadedCount = items.filter((row) => row.file_url).length;
+    const downloadFailedCount = items.filter((row) => row.last_download_error && row.last_download_error.error_type).length;
     const rows = items
       .map((row, index) => {
-        const targets = (row.parse_targets || []).map((target) => this.attachmentParseTargetLabel(target)).join("、") || "待识别";
-        const fileRef = row.file_id || row.source_doc_no || (row.file_url ? "已保存附件" : "--");
-        const savedFileRef = row.file_url ? "已保存，可直接下载到本地" : "";
+        const typeLabel = row.confirmed_type_label || this.attachmentTypeLabel(row.attachment_type);
+        const downloadError = row.last_download_error && row.last_download_error.error_type ? row.last_download_error : null;
+        const savedFileRef = row.file_url
+          ? "已保存，可直接下载到本地"
+          : downloadError
+            ? this.attachmentDownloadErrorLabel(downloadError)
+            : "";
         const isPackingList =
           row.attachment_type === "Packing List" || (row.parse_targets || []).some((target) => target === "actual_shipped_qty");
         const canParsePackingList = isPackingList && this.isExcelFileRef(row.file_url || row.file_name);
+        const canPreviewContent =
+          this.isPdfFileRef(row.file_url || row.file_name) ||
+          this.isImageFileRef(row.file_url || row.file_name) ||
+          this.isWordFileRef(row.file_url || row.file_name) ||
+          this.isTextFileRef(row.file_url || row.file_name);
         const actions = [];
         if (row.file_url) {
           actions.push(`
@@ -2196,6 +2802,11 @@ class OverseasCostWorkbench {
           } else if (isPackingList) {
             actions.push(`<span class="ocw-purchase-source-disabled">PDF解析待接入</span>`);
           }
+          if (canPreviewContent) {
+            actions.push(`
+              <button class="ocw-link-btn" data-action="preview-source-document" data-attachment-name="${this.escape(row.name || "")}">识别内容</button>
+            `);
+          }
         } else if (row.can_download || row.file_id) {
           actions.push(`
             <button
@@ -2203,8 +2814,11 @@ class OverseasCostWorkbench {
               data-action="download-oa-attachment"
               data-attachment-name="${this.escape(row.name || "")}"
               data-open-parse-after-download="0"
-            >下载到本地</button>
+            >${downloadError ? "重试下载" : "下载到本地"}</button>
           `);
+          if (downloadError) {
+            actions.push(`<span class="ocw-purchase-source-disabled">${this.escape(this.attachmentDownloadActionHint(downloadError))}</span>`);
+          }
           if (canParsePackingList) {
             actions.push(`<span class="ocw-purchase-source-disabled">下载后可解析预览</span>`);
           } else if (isPackingList) {
@@ -2220,11 +2834,9 @@ class OverseasCostWorkbench {
               <div class="ocw-attachment-file-name">${this.escape(row.file_name || "--")}</div>
               ${savedFileRef ? `<div class="ocw-attachment-file-url">${this.escape(savedFileRef)}</div>` : ""}
             </td>
-            <td>${this.escape(this.attachmentTypeLabel(row.attachment_type))}</td>
+            <td>${this.escape(typeLabel)}</td>
             <td>${this.escape(this.attachmentStatusLabel(row.parse_status, row))}</td>
-            <td title="${this.escape(row.source_field || "")}">${this.escape(row.source_field || "--")}</td>
-            <td title="${this.escape(fileRef)}">${this.escape(fileRef)}</td>
-            <td title="${this.escape(targets)}">${this.escape(targets)}</td>
+            <td>${this.escape(this.attachmentPurposeLabel(row))}</td>
             <td><div class="ocw-attachment-actions">${actions.join("")}</div></td>
           </tr>
         `;
@@ -2233,18 +2845,16 @@ class OverseasCostWorkbench {
     return `
       <section class="ocw-purchase-section">
         <h4>发起附件清单</h4>
-        <div class="ocw-confirm-note">这些是钉钉审批发起人提交的附件原始记录，后续按文件类型进入装箱单、物流账单、发票或凭证解析；评论附件暂不处理。</div>
-        <div class="ocw-confirm-note">已登记 ${this.escape(String(items.length))} 个发起附件，${this.escape(String(downloadableCount))} 个可从钉钉下载，${this.escape(String(downloadedCount))} 个已保存到 Frappe 私有文件；评论附件暂不处理。</div>
+        <div class="ocw-confirm-note">这些是钉钉审批发起人提交的附件。请按资料类型查看和核对；评论附件暂不处理。</div>
+        <div class="ocw-confirm-note">已登记 ${this.escape(String(items.length))} 个发起附件，${this.escape(String(downloadableCount))} 个待从钉钉下载，${this.escape(String(downloadedCount))} 个已保存，${this.escape(String(downloadFailedCount))} 个下载受限。</div>
         <div class="ocw-purchase-table-wrap">
-          <table class="ocw-purchase-table">
+          <table class="ocw-purchase-table ocw-attachment-table">
             <colgroup>
               <col class="ocw-col-index">
               <col class="ocw-col-file">
               <col class="ocw-col-type">
               <col class="ocw-col-status">
-              <col class="ocw-col-source">
-              <col class="ocw-col-file-id">
-              <col class="ocw-col-target">
+              <col class="ocw-col-purpose">
               <col class="ocw-col-action">
             </colgroup>
             <thead>
@@ -2253,9 +2863,7 @@ class OverseasCostWorkbench {
                 <th>文件名</th>
                 <th>类型</th>
                 <th>状态</th>
-                <th>来源字段</th>
-                <th>钉钉文件标识</th>
-                <th>解析目标</th>
+                <th>用途</th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -2266,18 +2874,60 @@ class OverseasCostWorkbench {
     `;
   }
 
+  attachmentDownloadErrorLabel(error = {}) {
+    if (error.error_type === "dingtalk_attachment_file_access") return "下载失败：当前账号无附件访问权";
+    if (error.error_type === "dingtalk_attachment_permission") return "下载失败：应用权限不足";
+    if (error.error_type === "dingtalk_attachment_user") return "下载失败：下载账号不可用";
+    return "下载失败：请查看原因后重试";
+  }
+
+  attachmentDownloadActionHint(error = {}) {
+    if (error.error_type === "dingtalk_attachment_file_access") return "换可访问账号后重试";
+    if (error.error_type === "dingtalk_attachment_permission") return "开通权限后重试";
+    if (error.error_type === "dingtalk_attachment_user") return "配置账号后重试";
+    return "处理后重试";
+  }
+
   attachmentTypeLabel(type) {
     const labels = {
       "Packing List": "装箱单",
       "Tax Certificate": "完税凭证",
       "Logistics Bill": "物流账单",
       "Commercial Invoice": "商业发票",
+      "Purchase Order": "采购订单",
+      "Customs Declaration": "报关资料",
       Other: "待识别",
     };
     return labels[type] || type || "待识别";
   }
 
+  attachmentPurposeLabel(row = {}) {
+    const confirmedType = String((row.manual_review && row.manual_review.confirmed_type) || "").trim();
+    const type = confirmedType || String(row.attachment_type || "").trim();
+    const purposes = {
+      "Packing List": "核对实际数量、重量和体积",
+      "Purchase Order": "核对采购单价、币种和货值",
+      purchase_order: "核对采购单价、币种和货值",
+      purchase_price_document: "核对采购价格信息",
+      "Customs Declaration": "核对报关单号和海关信息",
+      customs_declaration: "核对报关单号和海关信息",
+      "Logistics Bill": "核对物流费用",
+      logistics_quote: "核对物流费用",
+      "Tax Certificate": "核对最终税费",
+      "Commercial Invoice": "核对发票号、货值和币种",
+      "Excel Main Table": "核对货物明细",
+      other: "保留原件备查",
+      Other: "保留原件备查",
+    };
+    return purposes[type] || "待人工判断用途";
+  }
+
   attachmentStatusLabel(status, row = {}) {
+    if (row.manual_review && row.manual_review.status === "confirmed") return "已人工确认";
+    if (row.last_download_error && row.last_download_error.error_type) {
+      if (row.last_download_error.error_type === "dingtalk_attachment_file_access") return "下载失败（无访问权）";
+      return "下载失败";
+    }
     const normalized = String(status || "").trim().toLowerCase();
     if (normalized === "parsed" || normalized === "success") return "已解析";
     if (normalized === "failed" || normalized === "error") return "解析失败";
@@ -2303,6 +2953,9 @@ class OverseasCostWorkbench {
       bill_total: "账单总额",
       invoice_no: "发票号",
       goods_value: "货值",
+      unit_price: "采购单价",
+      purchase_currency: "采购币种",
+      customs_declaration: "报关资料",
     };
     return labels[target] || target || "";
   }
@@ -2342,7 +2995,7 @@ class OverseasCostWorkbench {
       primary_action: () => dialog.hide(),
     });
     dialog.show();
-    dialog.$wrapper.addClass("ocw-purchase-modal");
+    dialog.$wrapper.addClass("ocw-purchase-modal ocw-packing-preview-modal");
     this.loadPackingListPreview(batch, dialog, attachmentName, fileUrl).catch((error) => {
       dialog.$wrapper.find("[data-area='packing-preview']").html(`
         <div class="ocw-purchase-empty">
@@ -2400,17 +3053,28 @@ class OverseasCostWorkbench {
         <div><span>未匹配</span><strong>${this.escape(String(preview.unmatched_count || 0))}</strong></div>
       </div>
       <div class="ocw-purchase-note">
-        解析来源：${this.escape(parser.source || "file_url")}；只写入当前为空或为 0 的实际发货数量、毛重、体积、计费重。
+        来源附件已与当前批次物料核对；只补当前为空或为 0 的实际发货数量、毛重、体积、计费重。
       </div>
       ${this.renderPackingApplyAction(preview)}
       ${this.renderPurchasePreviewSection("可写入装箱单字段", fillableRows, "fillable")}
-      ${this.renderPurchasePreviewSection("存在差异，未自动写入", conflictRows, "conflict")}
+      ${this.renderPackingConflictSection(conflictRows)}
       ${this.renderPackingUnmatchedSection(unmatchedRows, ambiguousRows)}
     `);
     dialog.$wrapper
       .off("click.ocwPackingPreview")
       .on("click.ocwPackingPreview", "[data-action='apply-packing-fillable']", () => {
         this.applyPackingListFillableFields(batch, dialog, result, attachmentName, fileUrl).catch((error) => this.showError(error));
+      })
+      .on("click.ocwPackingPreview", "[data-action='resolve-packing-conflict']", (event) => {
+        this.resolvePackingConflictRow(
+          batch,
+          dialog,
+          attachmentName,
+          fileUrl,
+          $(event.currentTarget).attr("data-target-item-name"),
+          $(event.currentTarget).attr("data-resolution-action"),
+          $(event.currentTarget)
+        ).catch((error) => this.showError(error));
       });
   }
 
@@ -2426,6 +3090,117 @@ class OverseasCostWorkbench {
         <button class="ocw-primary-btn ocw-mini-btn" data-action="apply-packing-fillable">写入可补字段</button>
       </div>
     `;
+  }
+
+  renderPackingConflictSection(conflictRows = []) {
+    if (!conflictRows.length) {
+      return `
+        <section class="ocw-purchase-section">
+          <h4>待处理差异</h4>
+          <div class="ocw-purchase-empty-line">暂无需要人工处理的差异</div>
+        </section>
+      `;
+    }
+    const body = conflictRows
+      .map((row) => {
+        const conflicts = (row.business_changes || []).filter((change) => change.status === "conflict");
+        const values = conflicts
+          .map(
+            (change) => `
+              <div class="ocw-packing-conflict-value">
+                <strong>${this.escape(change.field_label || change.field_name || "字段")}</strong>
+                <span>系统：${this.escape(this.formatValue(change.old_value) || "空")}</span>
+                <span>附件：${this.escape(this.formatValue(change.new_value) || "空")}</span>
+              </div>
+            `
+          )
+          .join("");
+        const resolution = row.conflict_resolution || {};
+        const resolutionText = resolution.action_label
+          ? `<div class="ocw-packing-resolution-status">当前处理：${this.escape(resolution.action_label)}</div>`
+          : "";
+        return `
+          <tr>
+            <td>${this.escape(String(row.target_row_no || "--"))}</td>
+            <td>${this.escape(row.target_material_code || "--")}</td>
+            <td title="${this.escape(row.target_product_name || "")}">${this.escape(row.target_product_name || "--")}</td>
+            <td>${values || "--"}${resolutionText}</td>
+            <td>
+              <div class="ocw-packing-conflict-actions">
+                <button class="ocw-link-btn" type="button" data-action="resolve-packing-conflict" data-target-item-name="${this.escape(row.target_item_name || "")}" data-resolution-action="use_attachment">采用附件值</button>
+                <button class="ocw-link-btn" type="button" data-action="resolve-packing-conflict" data-target-item-name="${this.escape(row.target_item_name || "")}" data-resolution-action="keep_system">保留系统值</button>
+                <button class="ocw-link-btn" type="button" data-action="resolve-packing-conflict" data-target-item-name="${this.escape(row.target_item_name || "")}" data-resolution-action="pending_review">待核对</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      })
+      .join("");
+    return `
+      <section class="ocw-purchase-section">
+        <h4>待处理差异</h4>
+        <div class="ocw-purchase-table-wrap">
+          <table class="ocw-purchase-table ocw-packing-conflict-table">
+            <thead><tr><th>行号</th><th>物料编码</th><th>系统品名</th><th>系统值与附件值</th><th>处理</th></tr></thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }
+
+  async resolvePackingConflictRow(batch, dialog, attachmentName, fileUrl, targetItemName, resolutionAction, $button = null) {
+    const actionLabels = {
+      use_attachment: "采用附件值",
+      keep_system: "保留系统值",
+      pending_review: "待核对",
+    };
+    if (!targetItemName || !actionLabels[resolutionAction]) {
+      this.showPendingFeature("缺少差异处理信息。");
+      return;
+    }
+    if (resolutionAction === "use_attachment") {
+      const confirmed = await new Promise((resolve) => {
+        frappe.confirm(
+          "采用附件值将覆盖当前物料行的系统值，并触发重新试算。",
+          () => resolve(true),
+          () => resolve(false)
+        );
+      });
+      if (!confirmed) return;
+    }
+    if ($button && $button.length) {
+      $button.prop("disabled", true).text("处理中");
+    }
+    try {
+      const result = await this.call(
+        "overseas_costing.api.import_api.resolve_packing_list_conflict_row",
+        {
+          batch_name: batch.name,
+          version_name: batch.current_version || null,
+          attachment_name: attachmentName || null,
+          file_url: fileUrl || null,
+          target_item_name: targetItemName,
+          resolution_action: resolutionAction,
+          recalculate_after_writeback: 1,
+        },
+        true
+      );
+      if (!result || !result.ok) {
+        throw new Error((result && result.message) || "保存差异处理结果失败");
+      }
+      await this.loadBatchItems(batch.name, batch.current_version, true);
+      await this.loadAuditLogs(batch.name, batch.current_version);
+      this.expandedBatchNames.add(batch.name);
+      this.renderTable();
+      this.renderDiffPanel();
+      frappe.show_alert({ message: result.message || `${actionLabels[resolutionAction]}已保存`, indicator: "green" });
+      await this.loadPackingListPreview(batch, dialog, attachmentName, fileUrl);
+    } finally {
+      if ($button && $button.length && dialog.$wrapper.is(":visible")) {
+        $button.prop("disabled", false).text(actionLabels[resolutionAction]);
+      }
+    }
   }
 
   renderPackingUnmatchedSection(unmatchedRows = [], ambiguousRows = []) {
@@ -3220,7 +3995,8 @@ class OverseasCostWorkbench {
   }
 
   renderDiffPanel() {
-    const batch = this.getVisibleActiveBatch();
+    const batch = this.getDataCheckBatch();
+    this.renderDataCheckBatchSelector(batch);
     if (!batch) {
       this.$root.find("[data-area='diff-panel']").html(`
         <div class="ocw-diff-table">
@@ -3318,6 +4094,8 @@ class OverseasCostWorkbench {
     const parsedPackingListCount = Number(sourceStatus.parsed_packing_list_count || 0);
     const taxCertificateCount = Number(sourceStatus.tax_certificate_count || 0);
     const parsedTaxCertificateCount = Number(sourceStatus.parsed_tax_certificate_count || 0);
+    const quoteCandidateCount = Number(sourceStatus.logistics_quote_candidate_count || 0);
+    const confirmedQuote = sourceStatus.confirmed_logistics_quote || {};
     const sourceStatusNo = sourceStatus.source_no || sourceNo;
 
     return [
@@ -3356,6 +4134,20 @@ class OverseasCostWorkbench {
           : badPrice || badCurrency || badGoods
           ? `单价缺 ${badPrice} 行，币种缺 ${badCurrency} 行，货值缺 ${badGoods} 行`
           : "已具备单价、币种和总货值",
+      },
+      {
+        label: "物流费用",
+        status: this.isPositive(confirmedQuote.amount)
+          ? `${this.formatNumber(confirmedQuote.amount)} ${confirmedQuote.currency || "RMB"}`
+          : quoteCandidateCount
+          ? `${quoteCandidateCount} 份待确认`
+          : "待费用",
+        statusClass: this.isPositive(confirmedQuote.amount) ? "ocw-check-ok" : "ocw-check-warn",
+        suggestion: this.isPositive(confirmedQuote.amount)
+          ? `${confirmedQuote.carrier || "已确认报价"}已参与整票物流费用分摊`
+          : quoteCandidateCount
+          ? "在相关资料中确认最终物流报价后再参与试算"
+          : "等待物流 OA 填写明确费用，或补充物流账单/报价资料",
       },
       {
         label: "发起附件",
@@ -3869,9 +4661,16 @@ class OverseasCostWorkbench {
     const waybill = this.lower(this.filters.waybill_no);
     const itemFilters = ["material_code", "product_name", "import_name", "hs_code", "category"];
     return this.batches.filter((batch) => {
-      if (customs && !this.lower(batch.customs_no).includes(customs)) return false;
-      if (waybill && !this.lower(batch.waybill_no).includes(waybill)) return false;
       const items = this.batchItems[batch.name] || [];
+      const customsMatched =
+        !customs ||
+        this.lower(batch.customs_no).includes(customs) ||
+        items.some((item) => this.lower(item.customs_no).includes(customs));
+      const waybillMatched =
+        !waybill ||
+        this.lower(batch.waybill_no).includes(waybill) ||
+        items.some((item) => this.lower(item.waybill_no).includes(waybill));
+      if (!customsMatched || !waybillMatched) return false;
       return itemFilters.every((fieldname) => {
         const needle = this.lower(this.filters[fieldname]);
         if (!needle) return true;
@@ -3891,6 +4690,38 @@ class OverseasCostWorkbench {
   currentBatchNo() {
     const row = this.getActiveBatch();
     return row ? row.batch_no || row.name : "";
+  }
+
+  batchReferenceLabel(batch) {
+    if (!batch) return "未选择批次";
+    return batch.customs_no || batch.waybill_no || batch.batch_no || batch.name || "未命名批次";
+  }
+
+  voucherBatchHint(batch) {
+    return batch
+      ? "文件会优先按报关单号或柜号自动匹配；所选批次用于当前对比和查看已保存记录。"
+      : "文件会按报关单号或柜号自动尝试匹配批次。";
+  }
+
+  renderBatchOptions(selectedBatchName = "") {
+    return this.batches
+      .map((batch) => {
+        const selected = batch.name === selectedBatchName ? " selected" : "";
+        return `<option value="${this.escape(batch.name)}"${selected}>${this.escape(this.batchReferenceLabel(batch))}</option>`;
+      })
+      .join("");
+  }
+
+  getDataCheckBatch() {
+    return this.findBatch(this.dataCheckBatchName) || this.getVisibleActiveBatch() || this.getActiveBatch();
+  }
+
+  renderDataCheckBatchSelector(batch) {
+    const $select = this.$root.find("[data-role='data-check-batch-select']");
+    if (!$select.length) return;
+    const selectedBatchName = batch ? batch.name : "";
+    $select.html(this.renderBatchOptions(selectedBatchName));
+    $select.prop("disabled", !this.batches.length);
   }
 
   getActiveBatch() {

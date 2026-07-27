@@ -14,6 +14,7 @@ import json
 import os
 import re
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
@@ -48,6 +49,23 @@ PURCHASE_WRITEBACK_FIELDS = (
     "purchase_currency",
     "goods_value",
 )
+PURCHASE_ORDER_FIELD_LABELS = {
+    "unit_price": "采购单价",
+    "purchase_currency": "采购币种",
+    "goods_value": "采购货值",
+    "source_type": "价格来源",
+    "source_file_name": "来源文件",
+    "source_attachment_id": "来源附件 ID",
+    "source_doc_no": "采购订单号",
+    "parse_status": "解析状态",
+}
+ATTACHMENT_PRICE_PROVENANCE_FIELDS = (
+    "source_type",
+    "source_file_name",
+    "source_attachment_id",
+    "source_doc_no",
+    "parse_status",
+)
 PURCHASE_FIELD_LABELS = {
     "unit_price": "单价Precio",
     "purchase_currency": "币种Moneda",
@@ -64,19 +82,74 @@ PACKING_WRITEBACK_FIELDS = (
     "volume_m3",
     "volume_weight_kg",
     "chargeable_weight_kg",
+    "unit_price",
+    "purchase_currency",
+    "goods_value",
 )
+PACKING_NUMERIC_ZERO_FILLABLE_FIELDS = {
+    "actual_shipped_qty",
+    "gross_weight_kg",
+    "volume_m3",
+    "volume_weight_kg",
+    "chargeable_weight_kg",
+    "unit_price",
+    "goods_value",
+}
 PACKING_FIELD_LABELS = {
     "actual_shipped_qty": "实际发货数量",
     "gross_weight_kg": "毛重 KG",
     "volume_m3": "体积 m3",
     "volume_weight_kg": "体积重 KG",
     "chargeable_weight_kg": "计费重 KG",
+    "unit_price": "单价",
+    "purchase_currency": "采购币种",
+    "goods_value": "总价 RMB",
     "hs_code": "海关编码",
     "source_type": "来源类型",
     "source_file_name": "来源文件",
+    "source_attachment_id": "来源附件 ID",
     "source_doc_no": "来源单号",
     "parse_status": "解析状态",
 }
+SOURCE_DOCUMENT_MANUAL_TYPES = {
+    "purchase_order": {
+        "label": "采购订单",
+        "attachment_type": "Purchase Order",
+        "parse_targets": ["unit_price", "purchase_currency", "goods_value"],
+        "next_step": "已登记为采购订单；可查看物料匹配预览，确认后仅补入系统空值。",
+    },
+    "purchase_price_document": {
+        "label": "采购价格资料",
+        "attachment_type": "Commercial Invoice",
+        "parse_targets": ["unit_price", "purchase_currency", "goods_value"],
+        "next_step": "已登记为价格资料来源；后续仅在物料编码、规格和价格明细可匹配时生成补价预览。",
+    },
+    "customs_declaration": {
+        "label": "报关资料",
+        "attachment_type": "Customs Declaration",
+        "parse_targets": ["pedimento_no", "line_items"],
+        "next_step": "用于核对报关单号、海关编码和申报信息，不会写入采购单价。",
+    },
+    "tax_certificate": {
+        "label": "完税凭证",
+        "attachment_type": "Tax Certificate",
+        "parse_targets": ["pedimento_no", "tax_totals", "paid_total_mxn", "line_items"],
+        "next_step": "用于核对最终税费；确认解析结果后，再与当前批次的预估税费进行对比。",
+    },
+    "logistics_quote": {
+        "label": "物流报价",
+        "attachment_type": "Logistics Bill",
+        "parse_targets": ["logistics_fee", "currency", "bill_total"],
+        "next_step": "作为物流费用候选，仍需确认最终报价后才参与成本分摊。",
+    },
+    "other": {
+        "label": "其他资料",
+        "attachment_type": "Other",
+        "parse_targets": [],
+        "next_step": "仅保留原附件与确认记录，当前不参与成本计算。",
+    },
+}
+SOURCE_DOCUMENT_PREVIEW_CACHE_KEY = "source_document_preview"
 DINGTALK_ENV_FILE_CANDIDATES = (
     "/mnt/e/Yuewei开发/预算管理系统/dingtalk-expense-sync-main/.env",
     "/mnt/e/Yuewei开发/预算管理系统/dingtalk-budget-main/server/.env",
@@ -475,6 +548,8 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
     for row in rows:
         parse_result = _json_loads_dict(row.get("parse_result_json"))
         mapped_result = _json_loads_dict(row.get("mapped_result_json"))
+        manual_review = _source_document_manual_review(mapped_result)
+        last_download_error = parse_result.get("last_download_error") if isinstance(parse_result.get("last_download_error"), dict) else {}
         items.append(
             {
                 "name": row.get("name"),
@@ -490,6 +565,9 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
                 "space_id": parse_result.get("space_id") or "",
                 "file_ext": parse_result.get("file_ext") or "",
                 "parse_targets": mapped_result.get("parse_targets") or [],
+                "manual_review": manual_review,
+                "confirmed_type_label": manual_review.get("confirmed_type_label") or "",
+                "last_download_error": last_download_error,
                 "can_download": bool(parse_result.get("file_id")) and not bool(row.get("file_url")),
                 "remark": row.get("remark") or "",
                 "creation": row.get("creation"),
@@ -569,6 +647,12 @@ def download_oa_form_attachment(
         or raw_attachment.get("id")
         or ""
     ).strip()
+    space_id = str(
+        parse_snapshot.get("space_id")
+        or raw_attachment.get("spaceId")
+        or raw_attachment.get("space_id")
+        or ""
+    ).strip()
 
     if not process_instance_id or not file_id:
         return {
@@ -592,9 +676,10 @@ def download_oa_form_attachment(
         resolved_env_file = _resolve_dingtalk_env_file(env_file)
         if resolved_env_file:
             load_env_file(resolved_env_file)
+        user_id = _resolve_attachment_user_id(attachment_doc, parse_snapshot)
         corp_id = _resolve_attachment_corp_id(attachment_doc, parse_snapshot)
         token = get_access_token(
-            api_style="new",
+            api_style="auto",
             access_token=str(access_token or "").strip(),
             corp_id=corp_id,
         )
@@ -602,27 +687,127 @@ def download_oa_form_attachment(
             token=token,
             process_instance_id=process_instance_id,
             file_id=file_id,
+            file_name=file_name,
+            space_id=space_id,
+            user_id=user_id,
+            corp_id=corp_id,
+            api_style="auto",
         )
-        content, response_meta = _fetch_dingtalk_attachment_content(download_info["download_uri"])
+        fetch_kwargs = {}
+        if download_info.get("download_headers"):
+            fetch_kwargs["headers"] = download_info.get("download_headers") or {}
+        content, response_meta = _fetch_dingtalk_attachment_content(download_info["download_uri"], **fetch_kwargs)
         file_doc = _save_content_as_frappe_file(
             file_name=file_name,
             content=content,
             attached_to_name=resolved_attachment_name,
         )
     except Exception as exc:
+        error_message = str(exc)
+        if _is_dingtalk_attachment_file_access_error(error_message):
+            message = (
+                "钉钉已找到这份审批附件，但当前配置的下载账号没有该附件的文件级访问权限。"
+                "系统已尝试旧版下载、旧版授权、新版授权和钉盘下载信息接口，仍被钉钉拒绝。"
+                "请改用一个能在钉钉原单里打开该附件的在职账号 userId，或从钉钉原单手动下载后拖放上传，系统仍会继续解析并回填数据。"
+            )
+            _record_oa_attachment_download_failure(
+                attachment_doc,
+                parse_snapshot,
+                error_type="dingtalk_attachment_file_access",
+                message=message,
+                file_name=file_name,
+                process_instance_id=process_instance_id,
+                file_id=file_id,
+                space_id=space_id,
+                user_id=user_id if "user_id" in locals() else "",
+            )
+            return {
+                "ok": False,
+                "attachment_name": resolved_attachment_name,
+                "file_name": file_name,
+                "error_type": "dingtalk_attachment_file_access",
+                "needs_manual_upload": True,
+                "message": message,
+            }
+        if _is_dingtalk_attachment_permission_error(error_message):
+            message = (
+                "钉钉已找到该附件，但当前应用还缺少附件下载所需权限。"
+                "请在钉钉开放平台为当前应用开通 qyapi_get_member、Storage.DownloadInfo.Read 和 Storage.File.Read 后重试；"
+                "如果暂时不开权限，也可以先在钉钉原单下载附件后拖放上传。"
+            )
+            _record_oa_attachment_download_failure(
+                attachment_doc,
+                parse_snapshot,
+                error_type="dingtalk_attachment_permission",
+                message=message,
+                file_name=file_name,
+                process_instance_id=process_instance_id,
+                file_id=file_id,
+                space_id=space_id,
+                user_id=user_id if "user_id" in locals() else "",
+            )
+            return {
+                "ok": False,
+                "attachment_name": resolved_attachment_name,
+                "file_name": file_name,
+                "error_type": "dingtalk_attachment_permission",
+                "needs_dingtalk_permission": True,
+                "message": message,
+            }
+        if _is_dingtalk_attachment_user_error(error_message):
+            message = (
+                "钉钉无法使用该历史审批单的发起人账号读取附件，可能是发起人账号已停用。"
+                "请在钉钉原单下载附件后拖放上传，或联系系统管理员配置有审批权限的在职账号。"
+            )
+            _record_oa_attachment_download_failure(
+                attachment_doc,
+                parse_snapshot,
+                error_type="dingtalk_attachment_user",
+                message=message,
+                file_name=file_name,
+                process_instance_id=process_instance_id,
+                file_id=file_id,
+                space_id=space_id,
+                user_id=user_id if "user_id" in locals() else "",
+            )
+            return {
+                "ok": False,
+                "attachment_name": resolved_attachment_name,
+                "file_name": file_name,
+                "error_type": "dingtalk_attachment_user",
+                "needs_attachment_user_id": True,
+                "message": message,
+            }
+        fallback_message = f"钉钉附件下载失败：{error_message}"
+        _record_oa_attachment_download_failure(
+            attachment_doc,
+            parse_snapshot,
+            error_type="dingtalk_attachment_download_failed",
+            message=fallback_message,
+            file_name=file_name,
+            process_instance_id=process_instance_id,
+            file_id=file_id,
+            space_id=space_id,
+            user_id=user_id if "user_id" in locals() else "",
+        )
         return {
             "ok": False,
             "attachment_name": resolved_attachment_name,
             "file_name": file_name,
-            "message": f"钉钉附件下载失败：{exc}",
+            "message": fallback_message,
         }
 
     file_url = _get_doc_value(file_doc, "file_url") or ""
+    parse_snapshot.pop("last_download_error", None)
     parse_snapshot["download"] = {
         "source": "dingtalk_oa_form_attachment",
         "process_instance_id": process_instance_id,
         "file_id": file_id,
+        "user_id": user_id,
+        "space_id": download_info.get("space_id") or "",
+        "fallback_api": download_info.get("fallback_api") or "",
         "download_uri_obtained": True,
+        "download_headers_obtained": bool(download_info.get("download_headers")),
         "content_type": response_meta.get("content_type") or "",
         "content_length": response_meta.get("content_length") or len(content),
     }
@@ -643,6 +828,494 @@ def download_oa_form_attachment(
         "content_type": response_meta.get("content_type") or "",
         "content_length": response_meta.get("content_length") or len(content),
         "message": "钉钉附件已保存，可点击下载到本地，也可以继续解析预览。",
+    }
+
+
+def _record_oa_attachment_download_failure(
+    attachment_doc,
+    parse_snapshot: dict,
+    *,
+    error_type: str,
+    message: str,
+    file_name: str,
+    process_instance_id: str,
+    file_id: str,
+    space_id: str,
+    user_id: str,
+) -> None:
+    parse_snapshot["last_download_error"] = {
+        "error_type": error_type,
+        "message": message,
+        "file_name": file_name,
+        "process_instance_id": process_instance_id,
+        "file_id": file_id,
+        "space_id": space_id,
+        "user_id_configured": bool(user_id),
+    }
+    try:
+        attachment_doc.parse_status = "Failed"
+        attachment_doc.parse_result_json = _json_dumps(parse_snapshot)
+        attachment_doc.remark = message[:500]
+        if hasattr(attachment_doc, "save"):
+            attachment_doc.save(ignore_permissions=True)
+        if frappe is not None and hasattr(frappe.db, "commit"):
+            frappe.db.commit()
+    except Exception:
+        return
+
+
+def diagnose_oa_form_attachment_download(
+    attachment_name: str,
+    env_file: str | None = None,
+    access_token: str | None = None,
+) -> dict:
+    """诊断钉钉审批发起附件自动下载链路，不保存文件。"""
+
+    resolved_attachment_name = str(attachment_name or "").strip()
+    if not resolved_attachment_name:
+        return {"ok": False, "message": "缺少附件记录名称。"}
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "attachment_name": resolved_attachment_name,
+            "message": "当前未连接 Frappe，不能诊断钉钉附件下载。",
+        }
+
+    try:
+        attachment_doc = frappe.get_doc("Overseas Cost Attachment", resolved_attachment_name)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "attachment_name": resolved_attachment_name,
+            "message": f"未找到附件记录：{exc}",
+        }
+
+    parse_snapshot = _json_loads_dict(getattr(attachment_doc, "parse_result_json", ""))
+    raw_attachment = parse_snapshot.get("raw_attachment") if isinstance(parse_snapshot.get("raw_attachment"), dict) else {}
+    process_instance_id = str(
+        parse_snapshot.get("instance_id")
+        or parse_snapshot.get("process_instance_id")
+        or parse_snapshot.get("proc_inst_id")
+        or ""
+    ).strip()
+    file_id = str(
+        parse_snapshot.get("file_id")
+        or raw_attachment.get("fileId")
+        or raw_attachment.get("file_id")
+        or raw_attachment.get("mediaId")
+        or raw_attachment.get("id")
+        or ""
+    ).strip()
+    space_id = str(
+        parse_snapshot.get("space_id")
+        or raw_attachment.get("spaceId")
+        or raw_attachment.get("space_id")
+        or ""
+    ).strip()
+    file_name = str(getattr(attachment_doc, "file_name", "") or raw_attachment.get("fileName") or file_id).strip()
+    if not process_instance_id or not file_id:
+        return {
+            "ok": False,
+            "attachment_name": resolved_attachment_name,
+            "file_name": file_name,
+            "message": "附件记录缺少钉钉审批实例 ID 或 file_id，请先重新拉取国际物流 OA。",
+        }
+
+    try:
+        from overseas_costing.scripts.import_oa_logistics import (
+            diagnose_process_attachment_download,
+            get_access_token,
+            load_env_file,
+        )
+
+        resolved_env_file = _resolve_dingtalk_env_file(env_file)
+        if resolved_env_file:
+            load_env_file(resolved_env_file)
+        user_id = _resolve_attachment_user_id(attachment_doc, parse_snapshot)
+        corp_id = _resolve_attachment_corp_id(attachment_doc, parse_snapshot)
+        token = get_access_token(
+            api_style="auto",
+            access_token=str(access_token or "").strip(),
+            corp_id=corp_id,
+        )
+        result = diagnose_process_attachment_download(
+            token=token,
+            process_instance_id=process_instance_id,
+            file_id=file_id,
+            file_name=file_name,
+            space_id=space_id,
+            user_id=user_id,
+            corp_id=corp_id,
+            api_style="auto",
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "attachment_name": resolved_attachment_name,
+            "file_name": file_name,
+            "message": f"钉钉附件下载诊断失败：{exc}",
+        }
+
+    result["attachment_name"] = resolved_attachment_name
+    result["file_name"] = file_name
+    return result
+
+
+def preview_oa_source_attachment(attachment_name: str) -> dict:
+    """识别已下载 OA 附件的内容类型和字段候选，不写回物料字段。"""
+
+    resolved_attachment_name = str(attachment_name or "").strip()
+    if not resolved_attachment_name:
+        return {"ok": False, "message": "缺少附件记录名称。"}
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "attachment_name": resolved_attachment_name,
+            "message": "当前未连接 Frappe，不能读取 OA 附件。",
+        }
+    try:
+        attachment_doc = frappe.get_doc("Overseas Cost Attachment", resolved_attachment_name)
+    except Exception as exc:
+        return {"ok": False, "attachment_name": resolved_attachment_name, "message": f"未找到附件记录：{exc}"}
+
+    file_url = str(getattr(attachment_doc, "file_url", "") or "").strip()
+    if not file_url:
+        return {
+            "ok": False,
+            "attachment_name": resolved_attachment_name,
+            "download_required": True,
+            "message": "附件尚未下载到系统，请先下载后再识别内容。",
+        }
+    mapped_result = _json_loads_dict(getattr(attachment_doc, "mapped_result_json", ""))
+    cached_preview = _source_document_preview_cache(mapped_result, file_url)
+    if cached_preview:
+        preview = {**cached_preview, "cache_hit": True}
+    else:
+        try:
+            preview = attachment_parse_service.preview_source_document(
+                source_name=str(getattr(attachment_doc, "file_name", "") or ""),
+                file_url=file_url,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "attachment_name": resolved_attachment_name,
+                "file_url": file_url,
+                "message": f"附件内容识别失败：{exc}",
+            }
+        preview = {**preview, "cache_hit": False}
+        try:
+            _save_source_document_preview(attachment_doc, mapped_result, preview, file_url)
+        except Exception:
+            # 缓存写入失败不影响本次财务核对。
+            pass
+    return {
+        **preview,
+        "attachment_name": resolved_attachment_name,
+        "batch_name": str(getattr(attachment_doc, "batch", "") or ""),
+        "version_name": str(getattr(attachment_doc, "version", "") or ""),
+        "attachment_type": str(getattr(attachment_doc, "attachment_type", "") or "Other"),
+        "manual_review": _source_document_manual_review(mapped_result),
+    }
+
+
+def confirm_oa_source_attachment_type(
+    attachment_name: str,
+    confirmed_type: str,
+    remark: str | None = None,
+) -> dict:
+    """人工确认 OA 发起附件类型，只保存分类与追溯信息，不写入成本明细。"""
+
+    resolved_attachment_name = str(attachment_name or "").strip()
+    if not resolved_attachment_name:
+        return {"ok": False, "message": "缺少附件记录名称。"}
+    review_config = SOURCE_DOCUMENT_MANUAL_TYPES.get(str(confirmed_type or "").strip())
+    if not review_config:
+        return {"ok": False, "message": "请选择有效的附件资料类型。"}
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "attachment_name": resolved_attachment_name,
+            "message": "当前未连接 Frappe，不能保存附件人工确认结果。",
+        }
+
+    try:
+        attachment_doc = frappe.get_doc("Overseas Cost Attachment", resolved_attachment_name)
+    except Exception as exc:
+        return {"ok": False, "attachment_name": resolved_attachment_name, "message": f"未找到附件记录：{exc}"}
+
+    mapped_result = _json_loads_dict(getattr(attachment_doc, "mapped_result_json", ""))
+    previous_review = _source_document_manual_review(mapped_result)
+    previous_attachment_type = str(getattr(attachment_doc, "attachment_type", "") or "Other")
+    automatic_classification, automatic_error = _preview_attachment_classification_for_review(attachment_doc, mapped_result)
+    review = _build_source_document_manual_review(
+        confirmed_type=confirmed_type,
+        remark=remark,
+        automatic_classification=automatic_classification,
+        automatic_error=automatic_error,
+    )
+    history = mapped_result.get("source_document_review_history")
+    if not isinstance(history, list):
+        history = []
+    if previous_review:
+        history.append(previous_review)
+    mapped_result["source_document_review"] = review
+    mapped_result["source_document_review_history"] = history[-20:]
+    mapped_result["parse_targets"] = _merge_parse_targets(
+        mapped_result.get("parse_targets"),
+        review.get("parse_targets"),
+    )
+
+    attachment_doc.attachment_type = review["attachment_type"]
+    attachment_doc.parse_status = "Parsed"
+    attachment_doc.mapped_result_json = _json_dumps(mapped_result)
+    attachment_doc.remark = _append_source_document_review_remark(
+        getattr(attachment_doc, "remark", ""),
+        review,
+    )
+    attachment_doc.save(ignore_permissions=True)
+    _create_audit_log(
+        batch_doc_name=str(getattr(attachment_doc, "batch", "") or ""),
+        version_name=str(getattr(attachment_doc, "version", "") or "") or None,
+        row_no=None,
+        field_name="attachment_type",
+        old_value=previous_review.get("confirmed_type_label") or previous_attachment_type,
+        new_value=review["confirmed_type_label"],
+        action_remark=_source_document_review_audit_remark(attachment_doc, review),
+    )
+    if hasattr(frappe.db, "commit"):
+        frappe.db.commit()
+    return {
+        "ok": True,
+        "attachment_name": resolved_attachment_name,
+        "batch_name": str(getattr(attachment_doc, "batch", "") or ""),
+        "attachment_type": review["attachment_type"],
+        "manual_review": review,
+        "message": f"已确认该附件为“{review['confirmed_type_label']}”。{review['next_step']}",
+    }
+
+
+def preview_oa_purchase_order_match(
+    attachment_name: str,
+    version_name: str | None = None,
+) -> dict:
+    """预览采购订单附件可补入哪些采购价格字段，不写入成本明细。"""
+
+    source_preview = preview_oa_source_attachment(attachment_name)
+    if not source_preview.get("ok"):
+        return {
+            "ok": False,
+            "attachment_name": attachment_name,
+            "source_preview": source_preview,
+            "message": source_preview.get("message") or "采购订单附件识别失败。",
+        }
+
+    classification = source_preview.get("classification") or {}
+    purchase_order = source_preview.get("purchase_order") or {}
+    if classification.get("code") != "purchase_order":
+        return {
+            "ok": False,
+            "attachment_name": attachment_name,
+            "source_preview": source_preview,
+            "message": "该附件未识别为采购订单，暂不能生成采购价格匹配预览。",
+        }
+
+    order_no = str(purchase_order.get("purchase_order_no") or "").strip()
+    source_rows = []
+    for row in purchase_order.get("line_items") or []:
+        if not isinstance(row, dict):
+            continue
+        source_rows.append(
+            {
+                **row,
+                "source_type": "PURCHASE_ORDER_ATTACHMENT",
+                "source_attachment_id": attachment_name,
+                "source_file_name": source_preview.get("source_name") or "",
+                "source_doc_no": order_no or attachment_name,
+            }
+        )
+
+    def build_purchase_order_updates(mapped_row: dict, _target: dict) -> dict:
+        return {
+            field_name: mapped_row.get(field_name)
+            for field_name in PURCHASE_WRITEBACK_FIELDS
+        }
+
+    writeback_preview = _preview_item_writeback(
+        batch_name=source_preview.get("batch_name") or "",
+        version_name=version_name or source_preview.get("version_name") or None,
+        mapped_rows=source_rows,
+        update_builder=build_purchase_order_updates,
+        field_labels=PURCHASE_ORDER_FIELD_LABELS,
+        business_fields=PURCHASE_WRITEBACK_FIELDS,
+        numeric_zero_fillable_fields={"unit_price", "goods_value"},
+        preview_message_prefix="采购订单附件",
+        fillable_message="可补入匹配物料行中为空的采购单价、币种和货值。",
+        trust_unique_material_code=True,
+    )
+    return {
+        "ok": True,
+        "attachment_name": attachment_name,
+        "batch_name": source_preview.get("batch_name") or "",
+        "version_name": writeback_preview.get("version_name") or source_preview.get("version_name") or version_name,
+        "purchase_order": {
+            "purchase_order_no": order_no,
+            "supplier": purchase_order.get("supplier") or "",
+            "buyer": purchase_order.get("buyer") or "",
+            "currency": purchase_order.get("currency") or "",
+            "recognized_line_count": len(source_rows),
+        },
+        "source_rows": [_compact_purchase_order_row(row) for row in source_rows[:100]],
+        "writeback_preview": writeback_preview,
+        "message": writeback_preview.get("message") or purchase_order.get("message") or "采购订单匹配预览已生成。",
+    }
+
+
+def apply_oa_purchase_order_fillable_fields(
+    attachment_name: str,
+    version_name: str | None = None,
+    recalculate_after_writeback: bool = True,
+) -> dict:
+    """确认将采购订单附件匹配到的空采购字段写入物料行。"""
+
+    preview_result = preview_oa_purchase_order_match(
+        attachment_name=attachment_name,
+        version_name=version_name,
+    )
+    if not preview_result.get("ok"):
+        return {
+            "ok": False,
+            "preview_result": preview_result,
+            "message": preview_result.get("message") or "采购订单匹配预览失败，未写入数据。",
+        }
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "preview_result": preview_result,
+            "message": "当前未连接 Frappe，不能保存采购订单价格字段。",
+        }
+
+    writeback_preview = preview_result.get("writeback_preview") or {}
+    batch_doc_name = writeback_preview.get("batch_doc_name")
+    resolved_version_name = writeback_preview.get("version_name") or version_name
+    if not batch_doc_name or not resolved_version_name:
+        return {
+            "ok": False,
+            "preview_result": preview_result,
+            "message": "当前批次或版本未匹配成功，未写入数据。",
+        }
+
+    purchase_order = preview_result.get("purchase_order") or {}
+    provenance = _build_attachment_price_provenance(attachment_name=attachment_name)
+    provenance["source_doc_no"] = purchase_order.get("purchase_order_no") or provenance.get("source_doc_no")
+    applied_rows: list[dict] = []
+    skipped_rows: list[dict] = []
+    changed_field_count = 0
+
+    for row in writeback_preview.get("matched_rows") or []:
+        target_item_name = row.get("target_item_name")
+        business_changes = row.get("business_changes") or []
+        if not target_item_name:
+            skipped_rows.append({"row": row, "reason": "缺少目标物料行"})
+            continue
+        if row.get("has_conflict"):
+            skipped_rows.append({"row": row, "reason": "系统已有不同采购值，未自动覆盖"})
+            continue
+        field_updates = {
+            change.get("field_name"): change.get("new_value")
+            for change in business_changes
+            if change.get("field_name") in PURCHASE_WRITEBACK_FIELDS and change.get("status") == "fillable"
+        }
+        field_updates = {field_name: value for field_name, value in field_updates.items() if field_name}
+        if not field_updates:
+            skipped_rows.append({"row": row, "reason": "没有可补的采购字段"})
+            continue
+
+        field_updates.update(provenance)
+        changed_fields = _update_item_fields(
+            item_name=target_item_name,
+            batch_doc_name=batch_doc_name,
+            version_name=resolved_version_name,
+            row_no=row.get("target_row_no"),
+            field_updates=field_updates,
+            action_remark=(
+                "采购订单附件确认补入空采购字段并登记附件来源；"
+                f"采购订单：{provenance.get('source_doc_no') or '--'}"
+            ),
+        )
+        if changed_fields:
+            applied_rows.append(
+                {
+                    "target_item_name": target_item_name,
+                    "target_row_no": row.get("target_row_no"),
+                    "changed_fields": changed_fields,
+                }
+            )
+            changed_field_count += len(changed_fields)
+
+    if applied_rows:
+        _mark_batch_dirty(batch_doc_name)
+        _mark_attachment_parsed(
+            attachment_name,
+            {
+                "purchase_order_no": purchase_order.get("purchase_order_no") or "",
+                "recognized_line_count": purchase_order.get("recognized_line_count") or 0,
+                "updated_count": len(applied_rows),
+                "changed_field_count": changed_field_count,
+                "skipped_count": len(skipped_rows),
+                "parse_targets": list(PURCHASE_WRITEBACK_FIELDS),
+            },
+        )
+        commit = getattr(getattr(frappe, "db", None), "commit", None)
+        if callable(commit):
+            commit()
+        recalculate_result = _recalculate_after_writeback(
+            batch_doc_name=batch_doc_name,
+            version_name=resolved_version_name,
+            enabled=recalculate_after_writeback,
+        )
+    else:
+        recalculate_result = {"action": "skipped", "reason": "没有可安全补入的采购订单字段。"}
+
+    base_message = (
+        f"已从采购订单补入 {len(applied_rows)} 行、{changed_field_count} 个字段；已有不同采购值的行未覆盖。"
+        if applied_rows
+        else "没有可安全补入的采购订单字段，未写入数据。"
+    )
+    return {
+        "ok": True,
+        "attachment_name": attachment_name,
+        "batch_name": preview_result.get("batch_name") or "",
+        "batch_doc_name": batch_doc_name,
+        "version_name": resolved_version_name,
+        "purchase_order": purchase_order,
+        "updated_count": len(applied_rows),
+        "changed_field_count": changed_field_count,
+        "skipped_count": len(skipped_rows),
+        "conflict_row_count": writeback_preview.get("conflict_row_count", 0),
+        "unmatched_count": writeback_preview.get("unmatched_count", 0),
+        "ambiguous_count": writeback_preview.get("ambiguous_count", 0),
+        "applied_rows": applied_rows,
+        "skipped_rows": skipped_rows,
+        "recalculate_result": recalculate_result,
+        "preview_result": preview_result,
+        "message": _message_with_recalculate_result(base_message, recalculate_result),
+    }
+
+
+def _compact_purchase_order_row(row: dict) -> dict:
+    return {
+        "material_code": row.get("material_code") or "",
+        "product_name": row.get("product_name") or "",
+        "spec_model": row.get("spec_model") or "",
+        "quantity": row.get("quantity"),
+        "unit_price": row.get("unit_price"),
+        "purchase_currency": row.get("purchase_currency") or "",
+        "goods_value": row.get("goods_value"),
     }
 
 
@@ -789,11 +1462,14 @@ def _ensure_supported_excel_path(path: Path) -> Path:
     return path
 
 
-def _fetch_dingtalk_attachment_content(download_uri: str) -> tuple[bytes, dict]:
+def _fetch_dingtalk_attachment_content(download_uri: str, headers: dict | None = None) -> tuple[bytes, dict]:
     url = str(download_uri or "").strip()
     if not url:
         raise ValueError("缺少钉钉附件下载地址。")
-    request = Request(url, headers={"User-Agent": "overseas-costing/1.0"})
+    request_headers = {"User-Agent": "overseas-costing/1.0"}
+    if isinstance(headers, dict):
+        request_headers.update({str(key): str(value) for key, value in headers.items() if value not in (None, "")})
+    request = Request(url, headers=request_headers)
     try:
         with urlopen(request, timeout=60) as response:
             content = response.read()
@@ -880,6 +1556,135 @@ def _get_doc_value(doc, fieldname: str, default: str = ""):
     return getattr(doc, fieldname, default)
 
 
+def _source_document_manual_review(mapped_result: dict | None) -> dict:
+    if not isinstance(mapped_result, dict):
+        return {}
+    review = mapped_result.get("source_document_review")
+    return dict(review) if isinstance(review, dict) else {}
+
+
+def _source_document_preview_cache(mapped_result: dict | None, file_url: str) -> dict:
+    if not isinstance(mapped_result, dict):
+        return {}
+    preview = mapped_result.get(SOURCE_DOCUMENT_PREVIEW_CACHE_KEY)
+    if not isinstance(preview, dict) or str(preview.get("file_url") or "") != str(file_url or ""):
+        return {}
+    if not isinstance(preview.get("classification"), dict):
+        return {}
+    return dict(preview)
+
+
+def _save_source_document_preview(
+    attachment_doc,
+    mapped_result: dict,
+    preview: dict,
+    file_url: str,
+) -> None:
+    """保存附件识别快照，供财务复看；不修改附件类型或核算字段。"""
+
+    snapshot = {
+        "ok": True,
+        "file_url": str(file_url or ""),
+        "source_name": str(preview.get("source_name") or getattr(attachment_doc, "file_name", "") or ""),
+        "file_ext": str(preview.get("file_ext") or ""),
+        "extraction_method": str(preview.get("extraction_method") or ""),
+        "classification": dict(preview.get("classification") or {}),
+        "field_candidates": dict(preview.get("field_candidates") or {}),
+        "purchase_order": dict(preview.get("purchase_order") or {}),
+        "text_excerpt": str(preview.get("text_excerpt") or ""),
+        "text_length": int(preview.get("text_length") or 0),
+        "can_write_purchase_price": bool(preview.get("can_write_purchase_price")),
+        "parsed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    mapped_result[SOURCE_DOCUMENT_PREVIEW_CACHE_KEY] = snapshot
+    attachment_doc.parse_status = "Parsed"
+    attachment_doc.mapped_result_json = _json_dumps(mapped_result)
+    attachment_doc.save(ignore_permissions=True)
+    if hasattr(frappe.db, "commit"):
+        frappe.db.commit()
+
+
+def _preview_attachment_classification_for_review(
+    attachment_doc,
+    mapped_result: dict | None = None,
+) -> tuple[dict, str]:
+    file_url = str(getattr(attachment_doc, "file_url", "") or "").strip()
+    if not file_url:
+        return {}, "附件尚未下载到系统，已仅保存人工确认类型。"
+    cached_preview = _source_document_preview_cache(mapped_result, file_url)
+    if cached_preview:
+        classification = cached_preview.get("classification")
+        return (dict(classification) if isinstance(classification, dict) else {}), ""
+    try:
+        preview = attachment_parse_service.preview_source_document(
+            source_name=str(getattr(attachment_doc, "file_name", "") or ""),
+            file_url=file_url,
+        )
+    except Exception as exc:
+        return {}, f"本次未能重新取得 OCR 结果：{exc}"
+    classification = preview.get("classification")
+    return (dict(classification) if isinstance(classification, dict) else {}), ""
+
+
+def _build_source_document_manual_review(
+    *,
+    confirmed_type: str,
+    remark: str | None = None,
+    automatic_classification: dict | None = None,
+    automatic_error: str = "",
+) -> dict:
+    config = SOURCE_DOCUMENT_MANUAL_TYPES[str(confirmed_type).strip()]
+    confirmed_by = ""
+    confirmed_at = ""
+    if frappe is not None:
+        session_user = getattr(getattr(frappe, "session", None), "user", None)
+        if session_user and session_user != "Guest":
+            confirmed_by = str(session_user)
+        try:
+            confirmed_at = str(frappe.utils.now())
+        except Exception:
+            confirmed_at = ""
+    return {
+        "status": "confirmed",
+        "confirmed_type": str(confirmed_type).strip(),
+        "confirmed_type_label": config["label"],
+        "attachment_type": config["attachment_type"],
+        "parse_targets": list(config["parse_targets"]),
+        "next_step": config["next_step"],
+        "remark": str(remark or "").strip(),
+        "confirmed_by": confirmed_by,
+        "confirmed_at": confirmed_at,
+        "automatic_classification": dict(automatic_classification or {}),
+        "automatic_error": automatic_error,
+    }
+
+
+def _merge_parse_targets(existing, additional) -> list[str]:
+    values = []
+    for source in (existing, additional):
+        for value in source if isinstance(source, list) else []:
+            text = str(value or "").strip()
+            if text and text not in values:
+                values.append(text)
+    return values
+
+
+def _append_source_document_review_remark(existing_remark: str | None, review: dict) -> str:
+    line = f"人工确认附件类型：{review.get('confirmed_type_label') or ''}"
+    if review.get("remark"):
+        line += f"；备注：{review['remark']}"
+    base = str(existing_remark or "").strip()
+    return f"{base}\n{line}".strip() if base else line
+
+
+def _source_document_review_audit_remark(attachment_doc, review: dict) -> str:
+    file_name = str(getattr(attachment_doc, "file_name", "") or "未命名附件")
+    detail = f"人工确认 OA 发起附件资料类型：{file_name} -> {review.get('confirmed_type_label') or ''}"
+    if review.get("remark"):
+        detail += f"；备注：{review['remark']}"
+    return detail
+
+
 def _json_dumps(value) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
@@ -936,6 +1741,31 @@ def _resolve_attachment_corp_id(attachment_doc, parse_snapshot: dict) -> str:
             if corp_id:
                 return corp_id
     return DEFAULT_DINGTALK_CORP_ID
+
+
+def _resolve_attachment_user_id(attachment_doc, parse_snapshot: dict) -> str:
+    """解析旧版钉钉附件下载必填的审批发起人 ID。"""
+
+    for key in ("DINGTALK_ATTACHMENT_USER_ID", "DINGTALK_DOWNLOAD_USER_ID"):
+        value = str(os.environ.get(key) or "").strip()
+        if value:
+            return value
+
+    for key in ("originator_userid", "originatorUserId", "user_id", "userId", "creator_id"):
+        value = str(parse_snapshot.get(key) or "").strip()
+        if value:
+            return value
+
+    batch_name = str(getattr(attachment_doc, "batch", "") or "").strip()
+    if frappe is not None and batch_name:
+        try:
+            value = frappe.db.get_value("Overseas Cost Batch", batch_name, "source_creator_name")
+        except Exception:
+            value = ""
+        value = str(value or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _to_float(value, default: float = 0.0) -> float:
@@ -1397,6 +2227,142 @@ def _get_linked_purchase_approvals_from_extra(extra_json: str | dict | None) -> 
     return linked
 
 
+def _get_oa_trace_storage(extra_json: str | dict | None) -> tuple[dict, dict, bool]:
+    payload = _json_loads_dict(extra_json)
+    trace = payload.get("oa_logistics_trace")
+    if isinstance(trace, dict):
+        return payload, dict(trace), False
+    return payload, dict(payload), True
+
+
+def _save_oa_trace_storage(payload: dict, trace: dict, is_root_trace: bool) -> str:
+    if is_root_trace:
+        return _json_dumps({**payload, **trace})
+    updated = dict(payload)
+    updated["oa_logistics_trace"] = trace
+    return _json_dumps(updated)
+
+
+def _logistics_quote_snapshot(candidate: dict) -> dict:
+    return {
+        "carrier": str(candidate.get("carrier") or "").strip(),
+        "amount": _to_float(candidate.get("amount")),
+        "currency": str(candidate.get("currency") or "RMB").strip() or "RMB",
+        "volume_m3": candidate.get("volume_m3"),
+        "evidence_line": str(candidate.get("evidence_line") or "").strip(),
+        "source_field": str(candidate.get("source_field") or "").strip(),
+    }
+
+
+def confirm_logistics_quote_candidate(
+    *,
+    batch_name: str,
+    candidate_index: int | str,
+    version_name: str | None = None,
+    confirmation_note: str | None = None,
+) -> dict:
+    """人工确认 OA 物流报价候选后才写入整票物流费用分摊规则。"""
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，不能确认物流报价。",
+        }
+
+    batch_doc_name = _resolve_batch_name(batch_name)
+    if not batch_doc_name:
+        return {"ok": False, "message": "未找到当前批次，无法确认物流报价。"}
+    resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
+    if not resolved_version_name:
+        return {"ok": False, "message": "当前批次没有可用成本版本，无法确认物流报价。"}
+    try:
+        index = int(candidate_index)
+    except (TypeError, ValueError):
+        return {"ok": False, "message": "报价候选序号无效。"}
+
+    batch_row = _get_batch_trace_row(batch_doc_name)
+    payload, trace, is_root_trace = _get_oa_trace_storage(batch_row.get("extra_json"))
+    explicit_fee = trace.get("logistics_fee") if isinstance(trace.get("logistics_fee"), dict) else {}
+    if _to_float(explicit_fee.get("amount")) > 0:
+        return {"ok": False, "message": "该审批单已填写明确物流费用，不能再用报价候选覆盖。"}
+
+    candidates = trace.get("logistics_quote_candidates")
+    if not isinstance(candidates, list) or not candidates:
+        from overseas_costing.scripts.import_oa_logistics import extract_logistics_quote_candidates_from_approval
+
+        candidates = extract_logistics_quote_candidates_from_approval({"form_fields": trace.get("form_fields") or {}})
+    if index < 0 or index >= len(candidates) or not isinstance(candidates[index], dict):
+        return {"ok": False, "message": "未找到所选物流报价候选。"}
+
+    selected = _logistics_quote_snapshot(candidates[index])
+    if selected["amount"] <= 0:
+        return {"ok": False, "message": "所选报价未包含有效金额，不能生成分摊规则。"}
+
+    from overseas_costing.scripts import import_oa_logistics
+
+    carrier_label = selected["carrier"] or "未标注供应商"
+    fee = {
+        **selected,
+        "source_label": "物流报价人工确认",
+        "source_value": selected["evidence_line"] or f"{carrier_label} {selected['amount']} {selected['currency']}",
+    }
+    rule_result = import_oa_logistics._sync_oa_logistics_allocation_rule(
+        batch_name=batch_doc_name,
+        version_name=resolved_version_name,
+        approval_item={"logistics_fee": fee},
+    )
+    if not rule_result.get("ok"):
+        return {"ok": False, "message": rule_result.get("message") or "物流费用分摊规则保存失败。"}
+
+    old_confirmed = trace.get("confirmed_logistics_quote") if isinstance(trace.get("confirmed_logistics_quote"), dict) else {}
+    operator = str(getattr(getattr(frappe, "session", None), "user", "") or "").strip()
+    confirmed = {
+        **selected,
+        "candidate_index": index,
+        "confirmation_note": str(confirmation_note or "").strip(),
+        "confirmed_by": operator,
+        "confirmed_at": str(frappe.utils.now_datetime()),
+    }
+    trace["logistics_quote_candidates"] = candidates
+    trace["confirmed_logistics_quote"] = confirmed
+    frappe.db.set_value(
+        "Overseas Cost Batch",
+        batch_doc_name,
+        "extra_json",
+        _save_oa_trace_storage(payload, trace, is_root_trace),
+        update_modified=True,
+    )
+    _create_audit_log(
+        batch_doc_name=batch_doc_name,
+        version_name=resolved_version_name,
+        row_no=None,
+        field_name="confirmed_logistics_quote",
+        old_value=old_confirmed,
+        new_value=confirmed,
+        action_remark="人工确认物流报价候选并生成国际物流费用分摊规则",
+    )
+    _mark_batch_dirty(batch_doc_name)
+    recalculate_result = _recalculate_after_writeback(
+        batch_doc_name=batch_doc_name,
+        version_name=resolved_version_name,
+        enabled=True,
+    )
+    if hasattr(frappe.db, "commit"):
+        frappe.db.commit()
+
+    message = f"已确认使用 {carrier_label} 报价 {selected['amount']:g} {selected['currency']}，并生成物流费用分摊规则。"
+    return {
+        "ok": True,
+        "batch_name": batch_doc_name,
+        "version_name": resolved_version_name,
+        "confirmed_quote": confirmed,
+        "rule_result": rule_result,
+        "recalculate_result": recalculate_result,
+        "message": _message_with_recalculate_result(message, recalculate_result),
+    }
+
+
 def _normalize_purchase_summary(summary: dict) -> dict:
     mapped_items = summary.get("mapped_preview_items")
     if not isinstance(mapped_items, list):
@@ -1486,6 +2452,7 @@ def _get_batch_items(batch_doc_name: str, version_name: str | None) -> list[dict
             "unit_price",
             "purchase_currency",
             "goods_value",
+            "excel_row_no",
             "actual_shipped_qty",
             "gross_weight_kg",
             "volume_m3",
@@ -1493,6 +2460,8 @@ def _get_batch_items(batch_doc_name: str, version_name: str | None) -> list[dict
             "chargeable_weight_kg",
             "source_type",
             "source_doc_no",
+            "source_file_name",
+            "source_attachment_id",
             "dingtalk_instance_id",
             "dingtalk_official_url",
             "parse_status",
@@ -1706,6 +2675,47 @@ def _mark_batch_dirty(batch_doc_name: str) -> None:
     frappe.db.set_value("Overseas Cost Batch", batch_doc_name, "status", "Dirty", update_modified=True)
 
 
+def _recalculate_after_writeback(
+    *,
+    batch_doc_name: str | None,
+    version_name: str | None,
+    enabled: bool = True,
+) -> dict:
+    if not enabled:
+        return {"action": "skipped", "reason": "调用方关闭自动重算。"}
+    if not batch_doc_name or not version_name:
+        return {"action": "skipped", "reason": "当前批次或版本为空。"}
+    try:
+        from overseas_costing.services.calculate_service import recalculate_batch
+
+        result = recalculate_batch(batch_name=batch_doc_name, version_name=version_name)
+        return {
+            "action": "recalculated" if result.get("ok", True) else "failed",
+            "ok": bool(result.get("ok", True)),
+            "batch_name": batch_doc_name,
+            "version_name": version_name,
+            "summary_snapshot": result.get("summary_snapshot"),
+            "message": result.get("message") or "",
+        }
+    except Exception as exc:
+        return {
+            "action": "failed",
+            "ok": False,
+            "batch_name": batch_doc_name,
+            "version_name": version_name,
+            "message": f"自动重算失败：{exc}",
+        }
+
+
+def _message_with_recalculate_result(message: str, recalculate_result: dict | None = None) -> str:
+    recalculate_result = recalculate_result or {}
+    if recalculate_result.get("action") == "recalculated" and recalculate_result.get("ok", True):
+        return f"{message} 已自动重算。"
+    if recalculate_result.get("action") == "failed":
+        return f"{message} {recalculate_result.get('message') or '自动重算失败。'}"
+    return message
+
+
 def _mark_attachment_parsed(attachment_name: str | None, summary: dict) -> bool:
     if frappe is None or not attachment_name:
         return False
@@ -1720,6 +2730,7 @@ def _mark_attachment_parsed(attachment_name: str | None, summary: dict) -> bool:
 
     snapshot = {
         "source": "packing_list_writeback",
+        "created_count": summary.get("created_count", 0),
         "updated_count": summary.get("updated_count", 0),
         "changed_field_count": summary.get("changed_field_count", 0),
         "skipped_count": summary.get("skipped_count", 0),
@@ -1893,16 +2904,24 @@ def _compact_purchase_row(mapped_row: dict) -> dict:
 
 def _compact_packing_row(mapped_row: dict) -> dict:
     return {
+        "excel_row_no": mapped_row.get("excel_row_no"),
         "material_code": mapped_row.get("material_code"),
         "product_name": mapped_row.get("product_name"),
         "spec_model": mapped_row.get("spec_model"),
+        "quantity": mapped_row.get("quantity"),
         "actual_shipped_qty": mapped_row.get("actual_shipped_qty"),
         "gross_weight_kg": mapped_row.get("gross_weight_kg"),
         "volume_m3": mapped_row.get("volume_m3"),
         "volume_weight_kg": mapped_row.get("volume_weight_kg"),
         "chargeable_weight_kg": mapped_row.get("chargeable_weight_kg"),
+        "unit_price": mapped_row.get("unit_price"),
+        "purchase_currency": mapped_row.get("purchase_currency"),
+        "goods_value": mapped_row.get("goods_value"),
+        "hs_code": mapped_row.get("hs_code"),
+        "source_remark": mapped_row.get("source_remark"),
         "source_doc_no": mapped_row.get("source_doc_no"),
         "source_file_name": mapped_row.get("source_file_name"),
+        "source_attachment_id": mapped_row.get("source_attachment_id"),
     }
 
 
@@ -2329,6 +3348,7 @@ def apply_linked_purchase_expense_fillable_fields(
     env_file: str | None = None,
     linked_purchase_json: str | None = None,
     purchase_summaries_json: str | None = None,
+    recalculate_after_writeback: bool = True,
 ) -> dict:
     """写入关联采购支出 OA 中已匹配物料行的采购字段。
 
@@ -2457,8 +3477,20 @@ def apply_linked_purchase_expense_fillable_fields(
         commit = getattr(getattr(frappe, "db", None), "commit", None)
         if callable(commit):
             commit()
+        recalculate_result = _recalculate_after_writeback(
+            batch_doc_name=batch_doc_name,
+            version_name=resolved_version_name,
+            enabled=recalculate_after_writeback,
+        )
+    else:
+        recalculate_result = {"action": "skipped", "reason": "没有采购字段变化。"}
 
     updated_count = len(applied_rows)
+    base_message = (
+        f"已同步 {updated_count} 行采购字段，共 {changed_field_count} 个字段；未匹配、多匹配或多币种保留的行未写入。"
+        if updated_count
+        else "没有可同步的采购字段，未写入数据。"
+    )
     return {
         "ok": True,
         "batch_name": batch_name,
@@ -2472,12 +3504,9 @@ def apply_linked_purchase_expense_fillable_fields(
         "ambiguous_count": writeback_preview.get("ambiguous_count", 0),
         "applied_rows": applied_rows,
         "skipped_rows": skipped_rows,
+        "recalculate_result": recalculate_result,
         "preview_result": preview_result,
-        "message": (
-            f"已同步 {updated_count} 行采购字段，共 {changed_field_count} 个字段；未匹配、多匹配或多币种保留的行未写入。"
-            if updated_count
-            else "没有可同步的采购字段，未写入数据。"
-        ),
+        "message": _message_with_recalculate_result(base_message, recalculate_result),
     }
 
 
@@ -2488,10 +3517,50 @@ def _build_packing_updates_for_preview(mapped_row: dict, _target: dict) -> dict:
         "volume_m3": mapped_row.get("volume_m3"),
         "volume_weight_kg": mapped_row.get("volume_weight_kg"),
         "chargeable_weight_kg": mapped_row.get("chargeable_weight_kg"),
+        "unit_price": mapped_row.get("unit_price"),
+        "purchase_currency": mapped_row.get("purchase_currency"),
+        "goods_value": mapped_row.get("goods_value"),
         "hs_code": mapped_row.get("hs_code"),
         "source_type": mapped_row.get("source_type") or "PACKING_LIST",
         "source_file_name": mapped_row.get("source_file_name") or "",
         "source_doc_no": mapped_row.get("source_doc_no") or mapped_row.get("purchase_order_no") or "",
+        "parse_status": "SUCCESS",
+    }
+
+
+def _build_attachment_price_provenance(
+    *,
+    attachment_name: str | None = None,
+    file_url: str | None = None,
+) -> dict:
+    """构造附件补价的行级来源字段，附件记录不存在时保留可追溯的入参。"""
+
+    resolved_attachment_name = str(attachment_name or "").strip()
+    attachment_row = {}
+    if frappe is not None and resolved_attachment_name:
+        try:
+            attachment_row = frappe.db.get_value(
+                "Overseas Cost Attachment",
+                resolved_attachment_name,
+                ["name", "file_name", "file_url", "source_doc_no"],
+                as_dict=True,
+            ) or {}
+        except Exception:
+            attachment_row = {}
+
+    resolved_file_url = str(attachment_row.get("file_url") or file_url or "").strip()
+    source_doc_no = str(attachment_row.get("source_doc_no") or resolved_file_url or resolved_attachment_name).strip()
+    file_name = str(attachment_row.get("file_name") or "").strip()
+    if not file_name and resolved_file_url:
+        file_name = Path(resolved_file_url.split("?", 1)[0]).name
+    if not file_name:
+        file_name = resolved_attachment_name
+
+    return {
+        "source_type": "ATTACHMENT_PRICE",
+        "source_file_name": file_name,
+        "source_attachment_id": str(attachment_row.get("name") or resolved_attachment_name),
+        "source_doc_no": source_doc_no,
         "parse_status": "SUCCESS",
     }
 
@@ -2503,10 +3572,21 @@ def _build_packing_preview_items(
     sheet_rows_json: str | None = None,
 ) -> tuple[list[dict], dict]:
     if sheet_rows_json:
-        rows = _build_preview_rows(_load_rows(sheet_rows_json), map_packing_list_row_to_item)
-        for row in rows:
+        raw_rows = _load_rows(sheet_rows_json)
+        rows = []
+        for raw_row in raw_rows:
+            row = map_packing_list_row_to_item(raw_row)
+            row["excel_row_no"] = _first_non_empty(
+                raw_row.get("sourceRow"),
+                raw_row.get("excel_row_no"),
+                raw_row.get("Excel行号"),
+                raw_row.get("行号"),
+            )
+            row["source_remark"] = _first_non_empty(raw_row.get("备注"), raw_row.get("source_remark"))
             row["source_file_name"] = attachment_name or row.get("source_file_name") or ""
             row["source_doc_no"] = file_url or row.get("source_doc_no") or attachment_name or ""
+            row["source_attachment_id"] = attachment_name or row.get("source_attachment_id") or ""
+            rows.append(row)
         return rows, {"parser": "json_rows", "source": "sheet_rows_json"}
 
     if not file_url:
@@ -2520,6 +3600,7 @@ def _build_packing_preview_items(
             mapped = map_yuewei_excel_block_item_to_item(block, item_row, row_index=index)
             mapped["source_type"] = "PACKING_LIST"
             mapped["source_file_name"] = attachment_name or path.name
+            mapped["source_attachment_id"] = attachment_name or ""
             mapped["source_doc_no"] = mapped.get("source_doc_no") or block.get("sourceDocNo") or block.get("id") or ""
             rows.append(mapped)
 
@@ -2562,11 +3643,19 @@ def preview_packing_list_attachment(
         field_labels=PACKING_FIELD_LABELS,
         business_fields=PACKING_WRITEBACK_FIELDS,
         compact_row=_compact_packing_row,
-        numeric_zero_fillable_fields=set(PACKING_WRITEBACK_FIELDS),
+        numeric_zero_fillable_fields=PACKING_NUMERIC_ZERO_FILLABLE_FIELDS,
         preview_message_prefix="装箱单/物流附件",
-        fillable_message="可用于补齐空的实际发货数量、毛重或体积。",
+        fillable_message="可用于补齐空的实际发货数量、毛重、体积、单价或总价。",
         resolve_ambiguous_by_sequence=True,
     )
+    conflict_resolutions = _get_packing_conflict_resolutions(attachment_name)
+    for matched_row in writeback_preview.get("matched_rows") or []:
+        resolution = _latest_packing_conflict_resolution(
+            conflict_resolutions,
+            target_item_name=matched_row.get("target_item_name"),
+        )
+        if resolution:
+            matched_row["conflict_resolution"] = resolution
 
     return {
         "ok": True,
@@ -2583,6 +3672,7 @@ def preview_packing_list_attachment(
         "mapped_preview_items": [_compact_packing_row(row) for row in preview_items[:20]],
         "writeback_targets": [PACKING_FIELD_LABELS[field] for field in PACKING_WRITEBACK_FIELDS],
         "writeback_preview": writeback_preview,
+        "conflict_resolutions": conflict_resolutions,
         "message": writeback_preview.get("message") or "装箱单/物流附件预览已生成，当前未写入任何字段。",
     }
 
@@ -2595,8 +3685,10 @@ def apply_packing_list_fillable_fields(
     version_name: str | None = None,
     template_hint: str | None = None,
     sheet_rows_json: str | None = None,
+    recalculate_after_writeback: bool = True,
+    auto_create_unmatched_items: bool = False,
 ) -> dict:
-    """确认补入装箱单/物流附件中可安全写入的实际发货、重量、体积字段。"""
+    """确认补入装箱单/物流附件中可安全写入的物理属性与价格字段。"""
 
     preview_result = preview_packing_list_attachment(
         batch_name=batch_name,
@@ -2632,7 +3724,14 @@ def apply_packing_list_fillable_fields(
 
     applied_rows: list[dict] = []
     skipped_rows: list[dict] = []
+    created_rows: list[dict] = []
+    create_skipped_rows: list[dict] = []
     changed_field_count = 0
+    price_source_row_count = 0
+    attachment_price_provenance = _build_attachment_price_provenance(
+        attachment_name=attachment_name,
+        file_url=file_url,
+    )
 
     for row in writeback_preview.get("matched_rows") or []:
         target_item_name = row.get("target_item_name")
@@ -2656,33 +3755,57 @@ def apply_packing_list_fillable_fields(
 
         mapped_row = row.get("mapped_row") or {}
         source_no = mapped_row.get("source_doc_no") or mapped_row.get("source_file_name") or attachment_name or "装箱单/物流附件"
+        price_fields = sorted(set(field_updates).intersection(PURCHASE_WRITEBACK_FIELDS))
+        if price_fields:
+            field_updates.update(attachment_price_provenance)
+            source_no = attachment_price_provenance.get("source_doc_no") or source_no
+            action_remark = f"装箱单/物流附件确认补入采购价格字段并登记附件来源；来源：{source_no}"
+        else:
+            action_remark = f"装箱单/物流附件确认补入可补字段；来源：{source_no}"
         changed_fields = _update_item_fields(
             item_name=target_item_name,
             batch_doc_name=batch_doc_name,
             version_name=resolved_version_name,
             row_no=row.get("target_row_no"),
             field_updates=field_updates,
-            action_remark=f"装箱单/物流附件确认补入可补字段；来源：{source_no}",
+            action_remark=action_remark,
         )
         if changed_fields:
+            if price_fields:
+                price_source_row_count += 1
             applied_rows.append(
                 {
                     "target_item_name": target_item_name,
                     "target_row_no": row.get("target_row_no"),
                     "source_doc_no": mapped_row.get("source_doc_no"),
+                    "price_fields": price_fields,
+                    "source_type": attachment_price_provenance["source_type"] if price_fields else "PACKING_LIST",
                     "changed_fields": changed_fields,
                 }
             )
             changed_field_count += len(changed_fields)
 
-    if applied_rows:
+    if auto_create_unmatched_items:
+        create_result = _create_packing_items_from_unmatched_preview(
+            batch_doc_name=batch_doc_name,
+            version_name=resolved_version_name,
+            writeback_preview=writeback_preview,
+            attachment_name=attachment_name,
+            file_url=file_url,
+        )
+        created_rows = create_result.get("created_rows") or []
+        create_skipped_rows = create_result.get("skipped_rows") or []
+
+    total_skipped_count = len(skipped_rows) + len(create_skipped_rows)
+    if applied_rows or created_rows:
         _mark_batch_dirty(batch_doc_name)
         attachment_marked = _mark_attachment_parsed(
             attachment_name,
             {
+                "created_count": len(created_rows),
                 "updated_count": len(applied_rows),
                 "changed_field_count": changed_field_count,
-                "skipped_count": len(skipped_rows),
+                "skipped_count": total_skipped_count,
                 "conflict_row_count": writeback_preview.get("conflict_row_count", 0),
                 "unmatched_count": writeback_preview.get("unmatched_count", 0),
                 "ambiguous_count": writeback_preview.get("ambiguous_count", 0),
@@ -2692,31 +3815,612 @@ def apply_packing_list_fillable_fields(
         commit = getattr(getattr(frappe, "db", None), "commit", None)
         if callable(commit):
             commit()
+        recalculate_result = _recalculate_after_writeback(
+            batch_doc_name=batch_doc_name,
+            version_name=resolved_version_name,
+            enabled=recalculate_after_writeback,
+        )
     else:
         attachment_marked = False
+        recalculate_result = {"action": "skipped", "reason": "没有装箱单字段变化。"}
 
     updated_count = len(applied_rows)
+    created_count = len(created_rows)
+    if updated_count or created_count:
+        base_message = f"已更新 {updated_count} 行装箱单字段，共 {changed_field_count} 个字段；自动新增 {created_count} 条物料。"
+        if writeback_preview.get("conflict_row_count") or writeback_preview.get("ambiguous_count"):
+            base_message += " 冲突和多匹配行已保留给数据检查/人工核对。"
+    else:
+        base_message = "没有可安全补入的装箱单字段，未写入数据。"
     return {
         "ok": True,
         "batch_name": batch_name,
         "batch_doc_name": batch_doc_name,
         "version_name": resolved_version_name,
         "updated_count": updated_count,
+        "created_count": created_count,
         "changed_field_count": changed_field_count,
-        "skipped_count": len(skipped_rows),
+        "price_source_row_count": price_source_row_count,
+        "skipped_count": total_skipped_count,
         "conflict_row_count": writeback_preview.get("conflict_row_count", 0),
         "unmatched_count": writeback_preview.get("unmatched_count", 0),
         "ambiguous_count": writeback_preview.get("ambiguous_count", 0),
         "applied_rows": applied_rows,
+        "created_rows": created_rows,
+        "skipped_rows": skipped_rows,
+        "create_skipped_rows": create_skipped_rows,
+        "attachment_marked_parsed": attachment_marked,
+        "recalculate_result": recalculate_result,
+        "preview_result": preview_result,
+        "message": _message_with_recalculate_result(base_message, recalculate_result),
+    }
+
+
+def create_items_from_packing_unmatched_rows(
+    *,
+    batch_name: str,
+    attachment_name: str | None = None,
+    file_url: str | None = None,
+    version_name: str | None = None,
+    template_hint: str | None = None,
+    sheet_rows_json: str | None = None,
+    recalculate_after_writeback: bool = True,
+) -> dict:
+    """将装箱单预览中的未匹配行，经用户确认后新增为当前批次物料行。"""
+
+    preview_result = preview_packing_list_attachment(
+        batch_name=batch_name,
+        attachment_name=attachment_name,
+        file_url=file_url,
+        version_name=version_name,
+        template_hint=template_hint,
+        sheet_rows_json=sheet_rows_json,
+    )
+    if not preview_result.get("ok"):
+        return {
+            "ok": False,
+            "preview_result": preview_result,
+            "message": preview_result.get("message") or "装箱单预览失败，未新增物料。",
+        }
+
+    writeback_preview = preview_result.get("writeback_preview") or {}
+    unmatched_rows = writeback_preview.get("unmatched_rows") or []
+    ambiguous_count = int(writeback_preview.get("ambiguous_count") or 0)
+    if frappe is None:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "batch_name": batch_name,
+            "version_name": version_name,
+            "created_count": len(unmatched_rows),
+            "skipped_count": 0,
+            "ambiguous_count": ambiguous_count,
+            "created_rows": unmatched_rows,
+            "message": f"当前未连接 Frappe，预计可从未匹配装箱单行新增 {len(unmatched_rows)} 条物料。",
+        }
+
+    batch_doc_name = preview_result.get("batch_doc_name") or _resolve_batch_name(batch_name)
+    resolved_version_name = preview_result.get("version_name")
+    if batch_doc_name and not resolved_version_name:
+        resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
+    if not batch_doc_name or not resolved_version_name:
+        return {
+            "ok": False,
+            "preview_result": preview_result,
+            "message": "当前批次或版本未匹配成功，未新增物料。",
+        }
+    if not unmatched_rows:
+        return {
+            "ok": True,
+            "batch_name": batch_doc_name,
+            "version_name": resolved_version_name,
+            "created_count": 0,
+            "skipped_count": 0,
+            "ambiguous_count": ambiguous_count,
+            "created_rows": [],
+            "skipped_rows": [],
+            "preview_result": preview_result,
+            "message": "当前没有未匹配装箱单行需要新增。",
+        }
+
+    create_result = _create_packing_items_from_unmatched_preview(
+        batch_doc_name=batch_doc_name,
+        version_name=resolved_version_name,
+        writeback_preview=writeback_preview,
+        attachment_name=attachment_name,
+        file_url=file_url,
+    )
+    created_rows = create_result.get("created_rows") or []
+    skipped_rows = create_result.get("skipped_rows") or []
+
+    if created_rows:
+        _mark_batch_dirty(batch_doc_name)
+        attachment_marked = _mark_attachment_parsed(
+            attachment_name,
+            {
+                "created_count": len(created_rows),
+                "updated_count": 0,
+                "changed_field_count": 0,
+                "skipped_count": len(skipped_rows),
+                "conflict_row_count": writeback_preview.get("conflict_row_count", 0),
+                "unmatched_count": writeback_preview.get("unmatched_count", 0),
+                "ambiguous_count": ambiguous_count,
+                "parse_targets": ["material_code", "product_name", "spec_model", *PACKING_WRITEBACK_FIELDS],
+            },
+        )
+        commit = getattr(getattr(frappe, "db", None), "commit", None)
+        if callable(commit):
+            commit()
+        recalculate_result = _recalculate_after_writeback(
+            batch_doc_name=batch_doc_name,
+            version_name=resolved_version_name,
+            enabled=recalculate_after_writeback,
+        )
+    else:
+        attachment_marked = False
+        recalculate_result = {"action": "skipped", "reason": "没有新增物料。"}
+
+    base_message = (
+        f"已从装箱单未匹配行新增 {len(created_rows)} 条物料；跳过 {len(skipped_rows)} 条。"
+        if created_rows
+        else f"没有新增物料；跳过 {len(skipped_rows)} 条。"
+    )
+    if ambiguous_count:
+        base_message += f" 另有 {ambiguous_count} 条多匹配行未新增，请先人工核对。"
+    return {
+        "ok": True,
+        "batch_name": batch_doc_name,
+        "version_name": resolved_version_name,
+        "created_count": len(created_rows),
+        "skipped_count": len(skipped_rows),
+        "ambiguous_count": ambiguous_count,
+        "created_rows": created_rows,
         "skipped_rows": skipped_rows,
         "attachment_marked_parsed": attachment_marked,
+        "recalculate_result": recalculate_result,
         "preview_result": preview_result,
-        "message": (
-            f"已补入 {updated_count} 行装箱单字段，共 {changed_field_count} 个字段；冲突、未匹配和多匹配行未写入。"
-            if updated_count
-            else "没有可安全补入的装箱单字段，未写入数据。"
+        "message": _message_with_recalculate_result(base_message, recalculate_result),
+    }
+
+
+def _create_packing_items_from_unmatched_preview(
+    *,
+    batch_doc_name: str,
+    version_name: str,
+    writeback_preview: dict,
+    attachment_name: str | None = None,
+    file_url: str | None = None,
+) -> dict:
+    unmatched_rows = writeback_preview.get("unmatched_rows") or []
+    if frappe is None or not unmatched_rows:
+        return {"created_rows": [], "skipped_rows": []}
+
+    attachment_provenance = _build_packing_attachment_provenance(
+        attachment_name=attachment_name,
+        file_url=file_url,
+    )
+    existing_items = _get_batch_items(batch_doc_name, version_name)
+    next_row_no = _next_item_row_no(existing_items)
+    created_rows: list[dict] = []
+    skipped_rows: list[dict] = []
+
+    for mapped_row in unmatched_rows:
+        if _is_probable_packing_header_row(mapped_row):
+            skipped_rows.append({"row": mapped_row, "reason": "疑似表头行，已跳过"})
+            continue
+        if not _packing_row_has_material_identity(mapped_row):
+            skipped_rows.append({"row": mapped_row, "reason": "缺少物料名称或规格信息"})
+            continue
+        duplicate_item = _find_duplicate_packing_item(mapped_row, existing_items)
+        if duplicate_item:
+            skipped_rows.append(
+                {
+                    "row": mapped_row,
+                    "reason": f"同一附件来源已存在第 {duplicate_item.get('row_no') or '--'} 行",
+                }
+            )
+            continue
+
+        values = _build_packing_unmatched_item_values(
+            batch_doc_name=batch_doc_name,
+            version_name=version_name,
+            row_no=next_row_no,
+            mapped_row=mapped_row,
+            attachment_provenance=attachment_provenance,
+        )
+        item_doc = frappe.get_doc(values).insert(ignore_permissions=True)
+        created_row = {
+            "item_name": item_doc.name,
+            "row_no": next_row_no,
+            "material_code": values.get("material_code"),
+            "product_name": values.get("product_name"),
+            "spec_model": values.get("spec_model"),
+            "actual_shipped_qty": values.get("actual_shipped_qty"),
+            "gross_weight_kg": values.get("gross_weight_kg"),
+            "volume_m3": values.get("volume_m3"),
+        }
+        created_rows.append(created_row)
+        existing_items.append(
+            {
+                "name": item_doc.name,
+                "row_no": next_row_no,
+                "material_code": values.get("material_code"),
+                "product_name": values.get("product_name"),
+                "spec_model": values.get("spec_model"),
+                "quantity": values.get("quantity"),
+                "actual_shipped_qty": values.get("actual_shipped_qty"),
+                "gross_weight_kg": values.get("gross_weight_kg"),
+                "volume_m3": values.get("volume_m3"),
+                "excel_row_no": values.get("excel_row_no"),
+                "source_doc_no": values.get("source_doc_no"),
+                "source_file_name": values.get("source_file_name"),
+                "source_attachment_id": values.get("source_attachment_id"),
+            }
+        )
+        _create_audit_log(
+            batch_doc_name=batch_doc_name,
+            version_name=version_name,
+            row_no=next_row_no,
+            field_name="item",
+            old_value=None,
+            new_value=_json_dumps({key: value for key, value in values.items() if key != "doctype"}),
+            action_remark="从装箱单未匹配行自动新增物料",
+        )
+        next_row_no += 1
+
+    return {"created_rows": created_rows, "skipped_rows": skipped_rows}
+
+
+def _packing_row_has_material_identity(mapped_row: dict) -> bool:
+    return any(str(mapped_row.get(field) or "").strip() for field in ("material_code", "product_name", "spec_model"))
+
+
+def _is_probable_packing_header_row(mapped_row: dict) -> bool:
+    header_tokens = {
+        "material_code": {"物料编码", "物品编码", "sku", "code", "material_code"},
+        "product_name": {"物料名称", "物品名称", "品名", "product_name", "material", "nombre del artículo"},
+        "spec_model": {"规格", "规格型号", "型号/规格", "spec_model", "model", "especificacion"},
+    }
+    hit_count = 0
+    for fieldname, tokens in header_tokens.items():
+        value = str(mapped_row.get(fieldname) or "").strip().lower()
+        if value and value in tokens:
+            hit_count += 1
+    return hit_count >= 2
+
+
+def _next_item_row_no(existing_items: list[dict]) -> int:
+    row_numbers = []
+    for item in existing_items:
+        try:
+            row_numbers.append(int(item.get("row_no") or 0))
+        except (TypeError, ValueError):
+            continue
+    return (max(row_numbers) if row_numbers else 0) + 1
+
+
+def _build_packing_attachment_provenance(
+    *,
+    attachment_name: str | None = None,
+    file_url: str | None = None,
+) -> dict:
+    provenance = _build_attachment_price_provenance(attachment_name=attachment_name, file_url=file_url)
+    provenance["source_type"] = "PACKING_LIST"
+    return provenance
+
+
+def _build_packing_unmatched_item_values(
+    *,
+    batch_doc_name: str,
+    version_name: str,
+    row_no: int,
+    mapped_row: dict,
+    attachment_provenance: dict,
+) -> dict:
+    actual_qty = _first_non_empty(mapped_row.get("actual_shipped_qty"), mapped_row.get("quantity"))
+    source_file_name = _first_non_empty(mapped_row.get("source_file_name"), attachment_provenance.get("source_file_name"))
+    source_attachment_id = _first_non_empty(
+        mapped_row.get("source_attachment_id"),
+        attachment_provenance.get("source_attachment_id"),
+    )
+    source_doc_no = _first_non_empty(mapped_row.get("source_doc_no"), attachment_provenance.get("source_doc_no"), source_file_name)
+    values = {
+        "doctype": "Overseas Cost Item",
+        "batch": batch_doc_name,
+        "version": version_name,
+        "row_no": row_no,
+        "excel_row_no": mapped_row.get("excel_row_no"),
+        "material_code": mapped_row.get("material_code") or "",
+        "product_name": mapped_row.get("product_name") or "",
+        "spec_model": mapped_row.get("spec_model") or "",
+        "quantity": _to_float(actual_qty),
+        "actual_shipped_qty": _to_float(actual_qty),
+        "gross_weight_kg": _to_float(mapped_row.get("gross_weight_kg")),
+        "volume_m3": _to_float(mapped_row.get("volume_m3")),
+        "volume_weight_kg": _to_float(mapped_row.get("volume_weight_kg")),
+        "chargeable_weight_kg": _to_float(mapped_row.get("chargeable_weight_kg")),
+        "unit_price": 0,
+        "purchase_currency": "",
+        "goods_value": 0,
+        "hs_code": mapped_row.get("hs_code") or "",
+        "source_type": "PACKING_LIST",
+        "source_doc_no": source_doc_no or "",
+        "source_file_name": source_file_name or "",
+        "source_attachment_id": source_attachment_id or "",
+        "source_remark": mapped_row.get("source_remark") or "",
+        "parse_status": "SUCCESS",
+        "raw_excel_json": _json_dumps(mapped_row),
+    }
+    return _filter_doctype_values("Overseas Cost Item", values, keep_doctype=True)
+
+
+def _find_duplicate_packing_item(mapped_row: dict, existing_items: list[dict]) -> dict | None:
+    for item in existing_items:
+        if _same_packing_source(mapped_row, item) and _same_packing_row_identity(mapped_row, item):
+            return item
+    return None
+
+
+def _same_packing_source(mapped_row: dict, item: dict) -> bool:
+    for fieldname in ("source_attachment_id", "source_file_name", "source_doc_no"):
+        source_value = _normalize_key(mapped_row.get(fieldname))
+        if source_value and source_value == _normalize_key(item.get(fieldname)):
+            return True
+    return False
+
+
+def _same_packing_row_identity(mapped_row: dict, item: dict) -> bool:
+    row_excel_no = str(mapped_row.get("excel_row_no") or "").strip()
+    item_excel_no = str(item.get("excel_row_no") or "").strip()
+    if row_excel_no and item_excel_no and row_excel_no == item_excel_no:
+        return True
+
+    if not any(_normalize_key(mapped_row.get(field)) for field in ITEM_KEY_FIELDS):
+        return False
+    for fieldname in ITEM_KEY_FIELDS:
+        row_key = _normalize_key(mapped_row.get(fieldname))
+        item_key = _normalize_key(item.get(fieldname))
+        if row_key != item_key:
+            return False
+    return all(
+        _values_equal_for_import(mapped_row.get(fieldname), item.get(fieldname))
+        for fieldname in ("actual_shipped_qty", "gross_weight_kg", "volume_m3")
+    )
+
+
+def resolve_packing_list_conflict_row(
+    *,
+    batch_name: str,
+    attachment_name: str | None,
+    target_item_name: str,
+    resolution_action: str,
+    file_url: str | None = None,
+    version_name: str | None = None,
+    template_hint: str | None = None,
+    sheet_rows_json: str | None = None,
+    recalculate_after_writeback: bool = True,
+) -> dict:
+    """按单条物料行处理装箱单差异：采用附件、保留系统或待核对。"""
+
+    actions = {
+        "use_attachment": "采用附件值",
+        "keep_system": "保留系统值",
+        "pending_review": "待核对",
+    }
+    action = str(resolution_action or "").strip()
+    if action not in actions:
+        return {"ok": False, "message": "请选择有效的差异处理方式。"}
+    if not str(target_item_name or "").strip():
+        return {"ok": False, "message": "缺少要处理的物料行。"}
+
+    preview_result = preview_packing_list_attachment(
+        batch_name=batch_name,
+        attachment_name=attachment_name,
+        file_url=file_url,
+        version_name=version_name,
+        template_hint=template_hint,
+        sheet_rows_json=sheet_rows_json,
+    )
+    if not preview_result.get("ok"):
+        return {
+            "ok": False,
+            "preview_result": preview_result,
+            "message": preview_result.get("message") or "装箱单预览失败，未处理差异。",
+        }
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "preview_result": preview_result,
+            "message": "当前未连接 Frappe，不能保存装箱单差异处理结果。",
+        }
+
+    writeback_preview = preview_result.get("writeback_preview") or {}
+    batch_doc_name = preview_result.get("batch_doc_name") or writeback_preview.get("batch_doc_name")
+    resolved_version_name = preview_result.get("version_name") or writeback_preview.get("version_name") or version_name
+    matched_row = next(
+        (
+            row
+            for row in writeback_preview.get("matched_rows") or []
+            if str(row.get("target_item_name") or "") == str(target_item_name)
+        ),
+        None,
+    )
+    if not batch_doc_name or not resolved_version_name or not matched_row:
+        return {
+            "ok": False,
+            "preview_result": preview_result,
+            "message": "未找到当前装箱单对应的物料差异行。",
+        }
+
+    conflict_changes = [
+        change
+        for change in matched_row.get("business_changes") or []
+        if change.get("status") == "conflict" and change.get("field_name") in PACKING_WRITEBACK_FIELDS
+    ]
+    if not conflict_changes:
+        return {
+            "ok": False,
+            "preview_result": preview_result,
+            "message": "该物料行当前没有需要处理的装箱单差异。",
+        }
+
+    resolution = _build_packing_conflict_resolution(
+        matched_row=matched_row,
+        action=action,
+        action_label=actions[action],
+        attachment_name=attachment_name,
+    )
+    changed_fields: list[dict] = []
+    if action == "use_attachment":
+        field_updates = {change["field_name"]: change.get("new_value") for change in conflict_changes}
+        provenance = _build_packing_conflict_provenance(
+            attachment_name=attachment_name,
+            file_url=file_url,
+            changed_field_names=field_updates.keys(),
+        )
+        field_updates.update(provenance)
+        changed_fields = _update_item_fields(
+            item_name=target_item_name,
+            batch_doc_name=batch_doc_name,
+            version_name=resolved_version_name,
+            row_no=matched_row.get("target_row_no"),
+            field_updates=field_updates,
+            action_remark=f"装箱单差异处理：采用附件值；来源：{provenance.get('source_doc_no') or attachment_name or '--'}",
+        )
+        if changed_fields:
+            _mark_batch_dirty(batch_doc_name)
+    else:
+        _create_audit_log(
+            batch_doc_name=batch_doc_name,
+            version_name=resolved_version_name,
+            row_no=matched_row.get("target_row_no"),
+            field_name="packing_conflict_resolution",
+            old_value={change.get("field_name"): change.get("old_value") for change in conflict_changes},
+            new_value=actions[action],
+            action_remark=f"装箱单差异处理：{actions[action]}",
+        )
+
+    resolution_saved = _record_packing_conflict_resolution(attachment_name, resolution)
+    commit = getattr(getattr(frappe, "db", None), "commit", None)
+    if callable(commit):
+        commit()
+    recalculate_result = _recalculate_after_writeback(
+        batch_doc_name=batch_doc_name,
+        version_name=resolved_version_name,
+        enabled=bool(changed_fields) and recalculate_after_writeback,
+    )
+    return {
+        "ok": True,
+        "batch_name": batch_name,
+        "batch_doc_name": batch_doc_name,
+        "version_name": resolved_version_name,
+        "target_item_name": target_item_name,
+        "target_row_no": matched_row.get("target_row_no"),
+        "resolution": resolution,
+        "changed_field_count": len(changed_fields),
+        "resolution_saved": resolution_saved,
+        "recalculate_result": recalculate_result,
+        "message": _message_with_recalculate_result(
+            f"已处理第 {matched_row.get('target_row_no') or '--'} 行差异：{actions[action]}。",
+            recalculate_result,
         ),
     }
+
+
+def _build_packing_conflict_provenance(
+    *,
+    attachment_name: str | None,
+    file_url: str | None,
+    changed_field_names,
+) -> dict:
+    provenance = _build_attachment_price_provenance(
+        attachment_name=attachment_name,
+        file_url=file_url,
+    )
+    price_fields = set(changed_field_names).intersection(PURCHASE_WRITEBACK_FIELDS)
+    if not price_fields:
+        provenance["source_type"] = "PACKING_LIST"
+    return provenance
+
+
+def _build_packing_conflict_resolution(
+    *,
+    matched_row: dict,
+    action: str,
+    action_label: str,
+    attachment_name: str | None,
+) -> dict:
+    operator_name = ""
+    resolved_at = ""
+    if frappe is not None:
+        session_user = getattr(getattr(frappe, "session", None), "user", None)
+        if session_user and session_user != "Guest":
+            operator_name = str(session_user)
+        try:
+            resolved_at = str(frappe.utils.now())
+        except Exception:
+            resolved_at = ""
+    conflicts = [
+        {
+            "field_name": change.get("field_name"),
+            "field_label": change.get("field_label"),
+            "system_value": change.get("old_value"),
+            "attachment_value": change.get("new_value"),
+        }
+        for change in matched_row.get("business_changes") or []
+        if change.get("status") == "conflict"
+    ]
+    return {
+        "target_item_name": matched_row.get("target_item_name") or "",
+        "target_row_no": matched_row.get("target_row_no"),
+        "attachment_name": attachment_name or "",
+        "action": action,
+        "action_label": action_label,
+        "conflicts": conflicts,
+        "resolved_by": operator_name,
+        "resolved_at": resolved_at,
+    }
+
+
+def _record_packing_conflict_resolution(attachment_name: str | None, resolution: dict) -> bool:
+    resolved_attachment_name = str(attachment_name or "").strip()
+    if frappe is None or not resolved_attachment_name:
+        return False
+    try:
+        attachment_doc = frappe.get_doc("Overseas Cost Attachment", resolved_attachment_name)
+    except Exception:
+        return False
+    mapped_result = _json_loads_dict(getattr(attachment_doc, "mapped_result_json", ""))
+    history = mapped_result.get("packing_conflict_resolutions")
+    if not isinstance(history, list):
+        history = []
+    history.append(resolution)
+    mapped_result["packing_conflict_resolutions"] = history[-50:]
+    attachment_doc.mapped_result_json = _json_dumps(mapped_result)
+    attachment_doc.save(ignore_permissions=True)
+    return True
+
+
+def _get_packing_conflict_resolutions(attachment_name: str | None) -> list[dict]:
+    resolved_attachment_name = str(attachment_name or "").strip()
+    if frappe is None or not resolved_attachment_name:
+        return []
+    try:
+        attachment_doc = frappe.get_doc("Overseas Cost Attachment", resolved_attachment_name)
+    except Exception:
+        return []
+    mapped_result = _json_loads_dict(getattr(attachment_doc, "mapped_result_json", ""))
+    history = mapped_result.get("packing_conflict_resolutions")
+    return [item for item in history if isinstance(item, dict)] if isinstance(history, list) else []
+
+
+def _latest_packing_conflict_resolution(history: list[dict], *, target_item_name: str | None) -> dict:
+    target = str(target_item_name or "")
+    for resolution in reversed(history):
+        if str(resolution.get("target_item_name") or "") == target:
+            return resolution
+    return {}
 
 
 def _attachment_ext_from_row(row: dict) -> str:
@@ -2790,6 +4494,7 @@ def _compact_packing_apply_result(result: dict) -> dict:
     return {
         "ok": result.get("ok"),
         "updated_count": result.get("updated_count", 0),
+        "created_count": result.get("created_count", 0),
         "changed_field_count": result.get("changed_field_count", 0),
         "skipped_count": result.get("skipped_count", 0),
         "conflict_row_count": result.get("conflict_row_count", 0),
@@ -2819,26 +4524,67 @@ def _is_dingtalk_permission_error(message: str | None) -> bool:
     )
 
 
+def _is_dingtalk_attachment_user_error(message: str | None) -> bool:
+    text = str(message or "")
+    return any(marker in text for marker in ("Missing required arguments:user_id", "找不到该用户", "userNotExist", "用户不存在"))
+
+
+def _is_dingtalk_attachment_permission_error(message: str | None) -> bool:
+    text = str(message or "")
+    return any(
+        marker in text
+        for marker in (
+            "qyapi_get_member",
+            "Storage.DownloadInfo.Read",
+            "Storage.File.Read",
+            "Drive.DownloadInfo.Read",
+            "应用尚未开通所需的权限",
+            "AccessTokenPermissionDenied",
+        )
+    )
+
+
+def _is_dingtalk_attachment_file_access_error(message: str | None) -> bool:
+    text = str(message or "")
+    return any(
+        marker in text
+        for marker in (
+            "permissionDenied",
+            "noPermission",
+            "无访问权限",
+            "dentryId",
+            "Unknown Error",
+        )
+    )
+
+
 def _build_oa_packing_parse_message(
     *,
     scanned_count: int,
     downloaded_count: int,
     parsed_count: int,
     updated_count: int,
+    created_count: int,
     changed_field_count: int,
     skipped_count: int,
     failed_count: int,
     permission_blocked_count: int,
+    file_access_blocked_count: int,
     permission_scopes: list[str],
 ) -> str:
     base = (
         f"已扫描 {scanned_count} 个 OA 发起附件，下载 {downloaded_count} 个 Excel 装箱单，"
-        f"解析 {parsed_count} 个，写入 {updated_count} 行、{changed_field_count} 个字段；"
+        f"解析 {parsed_count} 个，更新 {updated_count} 行、自动新增 {created_count} 条物料、写入 {changed_field_count} 个字段；"
         f"跳过 {skipped_count} 个，失败 {failed_count} 个。"
     )
     if permission_blocked_count:
         scope_text = "、".join(permission_scopes) or "钉钉审批附件下载"
         return f"{base} 其中 {permission_blocked_count} 个 Excel 装箱单因钉钉应用缺少 {scope_text} 权限，暂时无法下载解析。"
+    if file_access_blocked_count:
+        return (
+            f"{base} 其中 {file_access_blocked_count} 个 Excel 装箱单已找到钉钉附件记录，"
+            "但当前下载账号没有文件级访问权限；请换成能打开该附件的账号，或拖放上传附件后解析。"
+        )
     return base
 
 
@@ -2907,10 +4653,12 @@ def parse_oa_packing_list_attachments(
     downloaded_count = 0
     parsed_count = 0
     updated_count = 0
+    created_count = 0
     changed_field_count = 0
     skipped_count = 0
     failed_count = 0
     permission_blocked_count = 0
+    file_access_blocked_count = 0
     permission_scopes: list[str] = []
     permission_blocked = False
 
@@ -2962,6 +4710,8 @@ def parse_oa_packing_list_attachments(
             if not download_result.get("ok"):
                 item["action"] = "failed"
                 item["reason"] = download_result.get("message") or "附件下载失败"
+                if download_result.get("error_type"):
+                    item["error_type"] = download_result.get("error_type")
                 if _is_dingtalk_permission_error(item["reason"]):
                     item["error_type"] = "dingtalk_permission"
                     scopes = _extract_dingtalk_permission_scopes(item["reason"])
@@ -2971,6 +4721,8 @@ def parse_oa_packing_list_attachments(
                     for scope in scopes:
                         if scope not in permission_scopes:
                             permission_scopes.append(scope)
+                elif download_result.get("error_type") == "dingtalk_attachment_file_access":
+                    file_access_blocked_count += 1
                 failed_count += 1
                 processed_items.append(item)
                 continue
@@ -2991,6 +4743,8 @@ def parse_oa_packing_list_attachments(
                 version_name=row.get("version"),
                 attachment_name=row.get("name"),
                 file_url=file_url,
+                recalculate_after_writeback=False,
+                auto_create_unmatched_items=True,
             )
         except Exception as exc:
             item["action"] = "failed"
@@ -3010,10 +4764,12 @@ def parse_oa_packing_list_attachments(
         item["action"] = "parsed"
         parsed_count += 1
         row_updated_count = int(parse_result.get("updated_count") or 0)
+        row_created_count = int(parse_result.get("created_count") or 0)
         row_changed_field_count = int(parse_result.get("changed_field_count") or 0)
         updated_count += row_updated_count
+        created_count += row_created_count
         changed_field_count += row_changed_field_count
-        if row_updated_count:
+        if row_updated_count or row_created_count:
             parsed_batch_versions[parse_result.get("batch_doc_name") or row.get("batch")] = (
                 parse_result.get("version_name") or row.get("version") or ""
             )
@@ -3029,10 +4785,12 @@ def parse_oa_packing_list_attachments(
         "downloaded_count": downloaded_count,
         "parsed_count": parsed_count,
         "updated_count": updated_count,
+        "created_count": created_count,
         "changed_field_count": changed_field_count,
         "skipped_count": skipped_count,
         "failed_count": failed_count,
         "permission_blocked_count": permission_blocked_count,
+        "file_access_blocked_count": file_access_blocked_count,
         "permission_scopes": permission_scopes,
         "recalculate_results": recalculate_results,
         "items": processed_items,
@@ -3041,10 +4799,12 @@ def parse_oa_packing_list_attachments(
             downloaded_count=downloaded_count,
             parsed_count=parsed_count,
             updated_count=updated_count,
+            created_count=created_count,
             changed_field_count=changed_field_count,
             skipped_count=skipped_count,
             failed_count=failed_count,
             permission_blocked_count=permission_blocked_count,
+            file_access_blocked_count=file_access_blocked_count,
             permission_scopes=permission_scopes,
         ),
     }
