@@ -374,6 +374,9 @@ class OverseasCostWorkbench {
       this.batchItems = {};
       await this.prefetchBatchItems(this.batches);
       this.visibleBatches = this.filterBatches();
+      if (this.visibleBatches.length && !this.visibleBatches.some((batch) => batch.name === this.dataCheckBatchName)) {
+        this.dataCheckBatchName = this.visibleBatches[0].name;
+      }
       if (this.hasActiveFilters()) {
         this.expandedBatchNames = new Set(this.visibleBatches.map((batch) => batch.name));
       }
@@ -2159,10 +2162,6 @@ class OverseasCostWorkbench {
               <strong>${this.escape(batchLabel)}</strong>
               <em>只显示钉钉审批发起表单上传的附件；评论附件暂不纳入。</em>
             </div>
-            <div class="ocw-import-preview-actions">
-                <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="parse-current-oa-attachments">自动解析附件</button>
-                <span>自动处理 Excel 装箱单/CI&PL；能匹配的补入，系统没有的物料会新增。</span>
-            </div>
             <div class="ocw-purchase-loading" data-area="oa-attachment-list">正在读取发起附件</div>
           `,
         },
@@ -2193,8 +2192,15 @@ class OverseasCostWorkbench {
           $(event.currentTarget).attr("data-open-parse-after-download") === "1"
         ).catch((error) => this.showError(error));
       })
-      .on("click.ocwOaAttachments", "[data-action='parse-current-oa-attachments']", (event) => {
-        this.parseCurrentOaAttachments(batch, dialog, $(event.currentTarget)).catch((error) => this.showError(error));
+      .on("click.ocwOaAttachments", "[data-action='preview-oa-attachment-file']", (event) => {
+        this.openOaAttachmentFilePreview(
+          batch,
+          dialog,
+          $(event.currentTarget).attr("data-attachment-name"),
+          $(event.currentTarget).attr("data-file-url"),
+          $(event.currentTarget).attr("data-file-name"),
+          $(event.currentTarget)
+        ).catch((error) => this.showError(error));
       })
       .on("click.ocwOaAttachments", "[data-action='preview-source-document']", (event) => {
         this.openOaSourceAttachmentPreview(
@@ -2283,6 +2289,96 @@ class OverseasCostWorkbench {
     document.body.appendChild(link);
     link.click();
     window.setTimeout(() => link.remove(), 0);
+  }
+
+  async openOaAttachmentFilePreview(batch, parentDialog, attachmentName = "", fileUrl = "", fileName = "", $button = null) {
+    let previewUrl = fileUrl || "";
+    let previewName = fileName || "";
+    if (!previewUrl && attachmentName) {
+      if ($button && $button.length) {
+        $button.prop("disabled", true).text("准备预览");
+      }
+      const result = await this.call(
+        "overseas_costing.api.import_api.download_oa_form_attachment",
+        {
+          attachment_name: attachmentName,
+        },
+        true
+      );
+      if (!result || !result.ok) {
+        if ($button && $button.length) {
+          $button.prop("disabled", false).text(result && result.error_type ? "重试预览" : "附件预览");
+        }
+        this.showPendingFeature((result && result.message) || "钉钉附件下载失败，暂时无法预览。");
+        if (batch && parentDialog) {
+          await this.loadOaFormAttachments(batch, parentDialog);
+        }
+        return;
+      }
+      previewUrl = result.file_url || "";
+      previewName = result.file_name || previewName;
+      frappe.show_alert({
+        message: "附件已保存，可预览",
+        indicator: "green",
+      });
+      if (batch && parentDialog) {
+        await this.loadOaFormAttachments(batch, parentDialog);
+      }
+    }
+    if (!previewUrl) {
+      this.showPendingFeature("当前附件还没有可预览的文件。");
+      return;
+    }
+    this.openOaAttachmentFilePreviewDialog(previewUrl, previewName || attachmentName || "附件");
+  }
+
+  openOaAttachmentFilePreviewDialog(fileUrl = "", fileName = "") {
+    const dialog = new frappe.ui.Dialog({
+      title: "附件预览",
+      size: "large",
+      fields: [
+        {
+          fieldtype: "HTML",
+          fieldname: "oa_attachment_file_preview",
+          options: this.renderOaAttachmentFilePreview(fileUrl, fileName),
+        },
+      ],
+      primary_action_label: "关闭",
+      primary_action: () => dialog.hide(),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-purchase-modal ocw-attachment-file-preview-modal");
+  }
+
+  renderOaAttachmentFilePreview(fileUrl = "", fileName = "") {
+    const fileRef = fileName || fileUrl;
+    const downloadLink = `
+      <a class="ocw-link-btn" href="${this.escape(fileUrl)}" download="${this.escape(fileName || "")}" target="_self">下载到本地</a>
+    `;
+    let previewBody = "";
+    if (this.isImageFileRef(fileRef)) {
+      previewBody = `<img class="ocw-attachment-file-preview-image" src="${this.escape(fileUrl)}" alt="${this.escape(fileName || "附件预览")}">`;
+    } else if (this.isPdfFileRef(fileRef) || this.isTextFileRef(fileRef)) {
+      previewBody = `<iframe class="ocw-attachment-file-preview-frame" src="${this.escape(fileUrl)}" title="${this.escape(fileName || "附件预览")}"></iframe>`;
+    } else {
+      previewBody = `
+        <div class="ocw-purchase-empty">
+          <strong>当前格式暂不支持页面内预览</strong>
+          <span>请下载到本地查看原文件，系统仍会保留附件记录用于回溯。</span>
+        </div>
+      `;
+    }
+    return `
+      <div class="ocw-attachment-file-preview">
+        <div class="ocw-purchase-target ocw-source-document-target">
+          <span>原始附件</span>
+          <strong>${this.escape(fileName || "--")}</strong>
+          <em>这里显示的是钉钉发起附件原件，供人工复核使用，不代表系统已完整解析。</em>
+        </div>
+        <div class="ocw-attachment-file-preview-actions">${downloadLink}</div>
+        <div class="ocw-attachment-file-preview-body">${previewBody}</div>
+      </div>
+    `;
   }
 
   openOaSourceAttachmentPreview(attachmentName = "", batch = null, parentDialog = null) {
@@ -2635,7 +2731,7 @@ class OverseasCostWorkbench {
     }
     try {
       const result = await this.call(
-        "overseas_costing.api.import_api.parse_oa_packing_list_attachments",
+        "overseas_costing.api.import_api.parse_oa_source_attachments",
         {
           batch_name: batch.name,
           limit: 80,
@@ -2667,6 +2763,8 @@ class OverseasCostWorkbench {
       ["扫描附件", result.scanned_count || 0],
       ["已下载", result.downloaded_count || 0],
       ["已解析", result.parsed_count || 0],
+      ["装箱单", result.packing_parsed_count || 0],
+      ["内容识别", result.source_recognized_count || 0],
       ["新增物料", result.created_count || 0],
       ["写入字段", result.changed_field_count || 0],
       ["失败", result.failed_count || 0],
@@ -2696,7 +2794,7 @@ class OverseasCostWorkbench {
           .join("")
       : `<tr><td colspan="4" class="ocw-parse-result-empty">暂无失败附件</td></tr>`;
     const skippedText = skippedItems.length
-      ? `另有 ${skippedItems.length} 个附件暂未处理，通常是 PNG、PDF 或其他非 Excel 装箱单资料。`
+      ? `另有 ${skippedItems.length} 个附件暂未处理，通常是非装箱单 Excel 或暂不支持格式。`
       : "";
     const fileAccessNote = result.file_access_blocked_count
       ? "当前账号没有部分钉钉附件的文件级访问权限。请换成能在钉钉原单打开附件的账号，或手动下载后拖放上传。"
@@ -2765,10 +2863,14 @@ class OverseasCostWorkbench {
     const downloadFailedCount = items.filter((row) => row.last_download_error && row.last_download_error.error_type).length;
     const rows = items
       .map((row, index) => {
-        const typeLabel = row.confirmed_type_label || this.attachmentTypeLabel(row.attachment_type);
+        const recognizedType = String(row.recognized_type || "").trim();
+        const recognizedTypeLabel = recognizedType && recognizedType !== "unclassified" ? row.recognized_type_label : "";
+        const typeLabel = row.confirmed_type_label || recognizedTypeLabel || this.attachmentTypeLabel(row.attachment_type);
         const downloadError = row.last_download_error && row.last_download_error.error_type ? row.last_download_error : null;
         const savedFileRef = row.file_url
-          ? "已保存，可直接下载到本地"
+          ? row.recognized_type_label
+            ? `已保存，${recognizedTypeLabel ? `已识别为${recognizedTypeLabel}` : "已完成 OCR"}`
+            : "已保存，可直接下载到本地"
           : downloadError
             ? this.attachmentDownloadErrorLabel(downloadError)
             : "";
@@ -2789,6 +2891,15 @@ class OverseasCostWorkbench {
               download="${this.escape(row.file_name || "")}"
               target="_self"
             >下载到本地</a>
+          `);
+          actions.push(`
+            <button
+              class="ocw-link-btn"
+              data-action="preview-oa-attachment-file"
+              data-attachment-name="${this.escape(row.name || "")}"
+              data-file-url="${this.escape(row.file_url || "")}"
+              data-file-name="${this.escape(row.file_name || "")}"
+            >附件预览</button>
           `);
           if (canParsePackingList) {
             actions.push(`
@@ -2815,6 +2926,14 @@ class OverseasCostWorkbench {
               data-attachment-name="${this.escape(row.name || "")}"
               data-open-parse-after-download="0"
             >${downloadError ? "重试下载" : "下载到本地"}</button>
+          `);
+          actions.push(`
+            <button
+              class="ocw-link-btn"
+              data-action="preview-oa-attachment-file"
+              data-attachment-name="${this.escape(row.name || "")}"
+              data-file-name="${this.escape(row.file_name || "")}"
+            >附件预览</button>
           `);
           if (downloadError) {
             actions.push(`<span class="ocw-purchase-source-disabled">${this.escape(this.attachmentDownloadActionHint(downloadError))}</span>`);
@@ -2903,7 +3022,8 @@ class OverseasCostWorkbench {
 
   attachmentPurposeLabel(row = {}) {
     const confirmedType = String((row.manual_review && row.manual_review.confirmed_type) || "").trim();
-    const type = confirmedType || String(row.attachment_type || "").trim();
+    const recognizedType = String(row.recognized_type || "").trim();
+    const type = confirmedType || (recognizedType && recognizedType !== "unclassified" ? recognizedType : "") || String(row.attachment_type || "").trim();
     const purposes = {
       "Packing List": "核对实际数量、重量和体积",
       "Purchase Order": "核对采购单价、币种和货值",
@@ -3205,8 +3325,17 @@ class OverseasCostWorkbench {
 
   renderPackingUnmatchedSection(unmatchedRows = [], ambiguousRows = []) {
     const rows = [
-      ...ambiguousRows.map((row) => ({ ...(row.mapped_row || {}), reason: `匹配到多行：${(row.candidate_row_nos || []).join("、")}` })),
-      ...unmatchedRows.map((row) => ({ ...row, reason: "当前批次没有匹配物料，未写入" })),
+      ...ambiguousRows.map((row) => ({
+        ...(row.mapped_row || {}),
+        source_row_no: row.source_row_no,
+        reason: row.reason || `匹配到多行：${(row.candidate_row_nos || []).join("、")}`,
+        suggestion: row.suggestion || "补齐规格、数量或物料编码后重新解析。",
+      })),
+      ...unmatchedRows.map((row) => ({
+        ...row,
+        reason: row.reason || "当前批次没有匹配物料，未写入",
+        suggestion: row.suggestion || "确认属于本批次后，可先新增物料或修正编码再解析。",
+      })),
     ];
     if (!rows.length) {
       return `
@@ -3220,13 +3349,14 @@ class OverseasCostWorkbench {
       .map(
         (row) => `
           <tr>
+            <td>${this.escape(row.source_row_no || row.excel_row_no || "--")}</td>
             <td>${this.escape(row.material_code || "--")}</td>
             <td title="${this.escape(row.product_name || "")}">${this.escape(row.product_name || "--")}</td>
             <td title="${this.escape(row.spec_model || "")}">${this.escape(row.spec_model || "--")}</td>
             <td>${this.escape(this.formatValue(row.actual_shipped_qty) || "--")}</td>
             <td>${this.escape(this.formatValue(row.gross_weight_kg) || "--")}</td>
             <td>${this.escape(this.formatValue(row.volume_m3) || "--")}</td>
-            <td>${this.escape(row.reason || "--")}</td>
+            <td>${this.renderReasonCell(row)}</td>
           </tr>
         `
       )
@@ -3238,6 +3368,7 @@ class OverseasCostWorkbench {
           <table class="ocw-purchase-table">
             <thead>
               <tr>
+                <th>来源行</th>
                 <th>物料编码</th>
                 <th>品名</th>
                 <th>规格</th>
@@ -3403,8 +3534,17 @@ class OverseasCostWorkbench {
 
   renderPurchaseUnmatchedSection(unmatchedRows, ambiguousRows) {
     const rows = [
-      ...ambiguousRows.map((row) => ({ ...row.mapped_row, reason: `匹配到多行：${(row.candidate_row_nos || []).join("、")}` })),
-      ...unmatchedRows.map((row) => ({ ...row, reason: "当前批次没有该物料编码，未写入" })),
+      ...ambiguousRows.map((row) => ({
+        ...row.mapped_row,
+        source_row_no: row.source_row_no,
+        reason: row.reason || `匹配到多行：${(row.candidate_row_nos || []).join("、")}`,
+        suggestion: row.suggestion || "补齐规格或数量后重新匹配。",
+      })),
+      ...unmatchedRows.map((row) => ({
+        ...row,
+        reason: row.reason || "当前批次没有该物料编码，未写入",
+        suggestion: row.suggestion || "确认属于本批次后，可先新增物料或修正编码再解析。",
+      })),
     ];
     if (!rows.length) {
       return `
@@ -3418,13 +3558,14 @@ class OverseasCostWorkbench {
       .map(
         (row) => `
           <tr>
+            <td>${this.escape(row.source_row_no || row.excel_row_no || "--")}</td>
             <td>${this.escape(row.material_code || "--")}</td>
             <td title="${this.escape(row.product_name || "")}">${this.escape(row.product_name || "--")}</td>
             <td title="${this.escape(row.spec_model || "")}">${this.escape(row.spec_model || "--")}</td>
             <td>${this.escape(this.formatValue(row.unit_price) || "--")}</td>
             <td>${this.escape(row.purchase_currency || "--")}</td>
             <td>${this.escape(row.source_approval_no || "--")}</td>
-            <td>${this.escape(row.reason || "--")}</td>
+            <td>${this.renderReasonCell(row)}</td>
           </tr>
         `
       )
@@ -3436,6 +3577,7 @@ class OverseasCostWorkbench {
           <table class="ocw-purchase-table">
             <thead>
               <tr>
+                <th>来源行</th>
                 <th>物料编码</th>
                 <th>采购品名</th>
                 <th>采购规格</th>
@@ -3449,6 +3591,17 @@ class OverseasCostWorkbench {
           </table>
         </div>
       </section>
+    `;
+  }
+
+  renderReasonCell(row = {}) {
+    const reason = row.reason || "--";
+    const suggestion = row.suggestion || "";
+    return `
+      <div class="ocw-match-reason">
+        <strong>${this.escape(reason)}</strong>
+        ${suggestion ? `<small>${this.escape(suggestion)}</small>` : ""}
+      </div>
     `;
   }
 
@@ -4089,6 +4242,19 @@ class OverseasCostWorkbench {
       : 0;
     const badUnitCost = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.total_unit_rmb)) : 0;
     const needsRecalculate = batchStatus.needsRecalculate || badUnitCost > 0;
+    const missingMaterialDetail = this.describeProblemRows(
+      loadedItems,
+      (row) => !this.hasText(row.material_code) || !this.hasText(row.product_name) || !this.isPositive(row.quantity)
+    );
+    const missingPurchaseDetail = this.describeProblemRows(
+      loadedItems,
+      (row) => !this.isPositive(row.unit_price) || !this.hasText(row.purchase_currency) || !this.isPositive(row.goods_value)
+    );
+    const missingPackingDetail = this.describeProblemRows(
+      loadedItems,
+      (row) => !this.isPositive(row.actual_shipped_qty) || !this.isPositive(row.gross_weight_kg)
+    );
+    const missingCostDetail = this.describeProblemRows(loadedItems, (row) => !this.isPositive(row.total_unit_rmb));
     const attachmentCount = Number(sourceStatus.oa_attachment_count || batch.source_attachment_count || 0);
     const packingListCount = Number(sourceStatus.packing_list_count || 0);
     const parsedPackingListCount = Number(sourceStatus.parsed_packing_list_count || 0);
@@ -4120,7 +4286,7 @@ class OverseasCostWorkbench {
           : !hasLoadedItems
           ? "展开批次后检查行级字段"
           : missingCode || missingName || badQuantity
-          ? `编码缺 ${missingCode} 行，名称缺 ${missingName} 行，数量异常 ${badQuantity} 行`
+          ? `编码缺 ${missingCode} 行，名称缺 ${missingName} 行，数量异常 ${badQuantity} 行；${missingMaterialDetail}`
           : `${customsNo || sourceNo || "--"} / ${waybillNo || "--"}`,
       },
       {
@@ -4132,7 +4298,7 @@ class OverseasCostWorkbench {
           : !hasLoadedItems
           ? "展开批次后检查采购单价和币种"
           : badPrice || badCurrency || badGoods
-          ? `单价缺 ${badPrice} 行，币种缺 ${badCurrency} 行，货值缺 ${badGoods} 行`
+          ? `单价缺 ${badPrice} 行，币种缺 ${badCurrency} 行，货值缺 ${badGoods} 行；${missingPurchaseDetail}`
           : "已具备单价、币种和总货值",
       },
       {
@@ -4164,9 +4330,9 @@ class OverseasCostWorkbench {
           : !hasLoadedItems
           ? "展开批次后检查实际数量和毛重"
           : packingListCount && (badActualQty || badWeight)
-          ? `已登记装箱单 ${packingListCount} 个，已解析 ${parsedPackingListCount} 个；实际数量缺 ${badActualQty} 行，毛重缺 ${badWeight} 行`
+          ? `已登记装箱单 ${packingListCount} 个，已解析 ${parsedPackingListCount} 个；实际数量缺 ${badActualQty} 行，毛重缺 ${badWeight} 行；${missingPackingDetail}`
           : badActualQty || badWeight
-          ? `实际数量缺 ${badActualQty} 行，毛重缺 ${badWeight} 行；先看发起附件里的装箱单`
+          ? `实际数量缺 ${badActualQty} 行，毛重缺 ${badWeight} 行；${missingPackingDetail}`
           : "可用于重量分摊，体积字段后续按口径启用",
       },
       {
@@ -4188,7 +4354,7 @@ class OverseasCostWorkbench {
           : batchStatus.needsRecalculate
           ? "明细已修改，请点击重新试算"
           : badUnitCost
-          ? `综合单价缺 ${badUnitCost} 行，点击重新试算`
+          ? `综合单价缺 ${badUnitCost} 行：${missingCostDetail}；点击重新试算`
           : `已生成综合成本，国际运费分摊 ${this.formatNumber(freightAlloc)} RMB`,
       },
     ];
@@ -4662,21 +4828,65 @@ class OverseasCostWorkbench {
     const itemFilters = ["material_code", "product_name", "import_name", "hs_code", "category"];
     return this.batches.filter((batch) => {
       const items = this.batchItems[batch.name] || [];
-      const customsMatched =
-        !customs ||
-        this.lower(batch.customs_no).includes(customs) ||
-        items.some((item) => this.lower(item.customs_no).includes(customs));
-      const waybillMatched =
-        !waybill ||
-        this.lower(batch.waybill_no).includes(waybill) ||
-        items.some((item) => this.lower(item.waybill_no).includes(waybill));
+      const customsMatched = !customs || this.batchMatchesQuery(batch, items, customs, [
+        "customs_no",
+        "batch_no",
+        "source_approval_no",
+        "source_instance_id",
+        "source_dingtalk_url",
+        "source_file_name",
+      ]);
+      const waybillMatched = !waybill || this.batchMatchesQuery(batch, items, waybill, [
+        "waybill_no",
+        "container_no",
+        "sea_bill_no",
+        "commercial_invoice_no",
+        "batch_no",
+        "source_approval_no",
+        "source_instance_id",
+        "source_dingtalk_url",
+      ]);
       if (!customsMatched || !waybillMatched) return false;
       return itemFilters.every((fieldname) => {
         const needle = this.lower(this.filters[fieldname]);
         if (!needle) return true;
-        return items.some((item) => this.lower(item[fieldname]).includes(needle));
+        return items.some((item) => this.itemMatchesField(item, fieldname, needle));
       });
     });
+  }
+
+  batchMatchesQuery(batch, items, needle, batchFields) {
+    if (!needle) return true;
+    const sourceStatus = batch.source_status || {};
+    const batchValues = [
+      ...batchFields.map((fieldname) => batch[fieldname]),
+      sourceStatus.source_no,
+      sourceStatus.source_approval_status,
+    ];
+    if (batchValues.some((value) => this.lower(value).includes(needle))) return true;
+    return (items || []).some((item) =>
+      [
+        item.customs_no,
+        item.waybill_no,
+        item.source_doc_no,
+        item.source_file_name,
+        item.source_attachment_id,
+        item.dingtalk_instance_id,
+        item.dingtalk_official_url,
+      ].some((value) => this.lower(value).includes(needle))
+    );
+  }
+
+  itemMatchesField(item, fieldname, needle) {
+    const aliases = {
+      material_code: ["material_code", "source_doc_no"],
+      product_name: ["product_name", "product_name_es", "spec_model"],
+      import_name: ["import_name", "product_name", "product_name_es"],
+      hs_code: ["hs_code"],
+      category: ["category", "project_collection"],
+    };
+    const fields = aliases[fieldname] || [fieldname];
+    return fields.some((name) => this.lower(item[name]).includes(needle));
   }
 
   countVisibleItems() {
@@ -4915,6 +5125,25 @@ class OverseasCostWorkbench {
 
   countRows(rows, predicate) {
     return (rows || []).reduce((total, row) => (predicate(row) ? total + 1 : total), 0);
+  }
+
+  describeProblemRows(rows, predicate, limit = 3) {
+    const matches = [];
+    (rows || []).forEach((row, index) => {
+      if (predicate(row)) {
+        matches.push(this.itemLocationLabel(row, index));
+      }
+    });
+    if (!matches.length) return "";
+    const head = matches.slice(0, limit).join("、");
+    const tail = matches.length > limit ? ` 等 ${matches.length} 行` : "";
+    return `${head}${tail}`;
+  }
+
+  itemLocationLabel(row, index = 0) {
+    const rowNo = row.excel_row_no || row.row_no || index + 1;
+    const material = this.materialAuditLabel(row);
+    return `第 ${rowNo} 行 ${material}`;
   }
 
   hasText(value) {

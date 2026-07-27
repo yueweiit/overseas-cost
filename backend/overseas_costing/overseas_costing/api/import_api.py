@@ -479,6 +479,29 @@ def parse_oa_packing_list_attachments(
 
 
 @frappe.whitelist()
+def parse_oa_source_attachments(
+    batch_name: str | None = None,
+    limit: int | None = 200,
+    env_file: str | None = None,
+    access_token: str | None = None,
+    skip_parsed=1,
+    recalculate=1,
+) -> dict:
+    """批量下载并解析钉钉发起附件；Excel 可回填，图片/PDF 等只保存识别快照。"""
+
+    skip_parsed_flag = str(skip_parsed or "").strip().lower() in ("1", "true", "yes", "y")
+    recalculate_flag = str(recalculate or "").strip().lower() in ("1", "true", "yes", "y")
+    return import_service.parse_oa_source_attachments(
+        batch_name=batch_name,
+        limit=limit,
+        env_file=env_file,
+        access_token=access_token,
+        skip_parsed=skip_parsed_flag,
+        recalculate=recalculate_flag,
+    )
+
+
+@frappe.whitelist()
 def parse_packing_list_attachment(
     batch_name: str,
     attachment_name: str | None = None,

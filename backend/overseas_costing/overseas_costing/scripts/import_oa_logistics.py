@@ -61,6 +61,7 @@ LEGACY_USER_DETAIL_PATH = "/topapi/v2/user/get?access_token={access_token}"
 NEW_STORAGE_DENTRY_DOWNLOAD_INFO_PATH = "/v1.0/storage/spaces/{space_id}/dentries/{dentry_id}/downloadInfos/query"
 NEW_STORAGE_DENTRY_LIST_PATH = "/v1.0/storage/spaces/{space_id}/dentries"
 NEW_DRIVE_FILE_DOWNLOAD_INFO_PATH = "/v1.0/drive/spaces/{space_id}/files/{file_id}/downloadInfos"
+NEW_STORAGE_THUMBNAILS_QUERY_PATH = "/v1.0/storage/spaces/{space_id}/thumbnails/query"
 
 DEFAULT_SEA_KEYWORDS = ("海运", "SEA", "OCEAN", "MARITIMO", "MARÍTIMO")
 HIDDEN_APPROVAL_STATUSES = ("TERMINATED", "CANCELED", "CANCELLED", "REVOKED", "撤销", "已撤销")
@@ -814,6 +815,80 @@ def _storage_dentry_download_info(
     return download_uri, download_headers, result
 
 
+def _extract_storage_thumbnail_info(body: dict, *, dentry_id: str) -> tuple[str, dict]:
+    items = (
+        body.get("resultItems")
+        or body.get("result_items")
+        or body.get("items")
+        or body.get("list")
+        or []
+    )
+    if isinstance(items, dict):
+        items = [items]
+    if not isinstance(items, list):
+        items = []
+
+    requested_dentry_id = _clean(dentry_id)
+    fallback_item: dict = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        candidate_id = _clean(item.get("dentryId") or item.get("dentry_id") or item.get("fileId") or item.get("file_id"))
+        if requested_dentry_id and candidate_id and candidate_id != requested_dentry_id:
+            fallback_item = fallback_item or item
+            continue
+        thumbnail = item.get("thumbnail") if isinstance(item.get("thumbnail"), dict) else item
+        url = _clean(
+            thumbnail.get("url")
+            or thumbnail.get("downloadUrl")
+            or thumbnail.get("download_url")
+            or thumbnail.get("resourceUrl")
+            or thumbnail.get("resource_url")
+        )
+        if url:
+            return url, item
+        fallback_item = fallback_item or item
+
+    thumbnail = fallback_item.get("thumbnail") if isinstance(fallback_item.get("thumbnail"), dict) else fallback_item
+    url = _clean(
+        thumbnail.get("url")
+        or thumbnail.get("downloadUrl")
+        or thumbnail.get("download_url")
+        or thumbnail.get("resourceUrl")
+        or thumbnail.get("resource_url")
+    )
+    if url:
+        return url, fallback_item
+    raise RuntimeError("钉钉缩略图响应中没有可下载的 thumbnail.url。")
+
+
+def _storage_dentry_thumbnail_info(
+    *,
+    token: str,
+    space_id: str,
+    dentry_id: str,
+    union_id: str,
+) -> tuple[str, dict, dict]:
+    resolved_dentry_id = _clean(dentry_id)
+    if not resolved_dentry_id:
+        raise RuntimeError("钉钉缩略图下载缺少 dentryId。")
+    query = f"?unionId={quote(union_id, safe='')}" if union_id else ""
+    result = _request_json(
+        f"{_api_url()}{NEW_STORAGE_THUMBNAILS_QUERY_PATH.format(space_id=quote(space_id, safe=''))}{query}",
+        method="POST",
+        token=token,
+        api_style="new",
+        payload={
+            "dentryIds": [resolved_dentry_id],
+            "thumbnailOptions": {"size": "large"},
+        },
+    )
+    _ensure_dingtalk_success(result, api_style="new")
+    body = _unwrap_result(result)
+    thumbnail_uri, thumbnail_item = _extract_storage_thumbnail_info(body, dentry_id=resolved_dentry_id)
+    return thumbnail_uri, {}, {"raw_response": result, "thumbnail_item": thumbnail_item}
+
+
 def _new_auth_process_attachment_download(
     *,
     token: str,
@@ -1032,30 +1107,48 @@ def _fallback_process_attachment_download_url(
         )
         fallback_api = "storage_dentry_download_info"
     except Exception as storage_exc:
-        dentry_id, list_response = _resolve_storage_dentry_id(
-            token=new_token,
-            space_id=space_id,
-            union_id=union_id,
-            file_id=file_id,
-            file_name=file_name,
-        )
-        download_uri, download_headers, storage_response = _storage_dentry_download_info(
-            token=new_token,
-            space_id=space_id,
-            dentry_id=dentry_id,
-            union_id=union_id,
-        )
-        storage_response = {
-            "legacy_auth_response": legacy_auth_result,
-            "legacy_auth_error": legacy_auth_error,
-            "auth_response": auth_result,
-            "auth_error": auth_error,
-            "original_storage_error": str(storage_exc),
-            "dentry_list_response": list_response,
-            "download_response": storage_response,
-            "resolved_dentry_id": dentry_id,
-        }
-        fallback_api = "storage_dentry_list_then_download_info"
+        try:
+            dentry_id, list_response = _resolve_storage_dentry_id(
+                token=new_token,
+                space_id=space_id,
+                union_id=union_id,
+                file_id=file_id,
+                file_name=file_name,
+            )
+            download_uri, download_headers, storage_response = _storage_dentry_download_info(
+                token=new_token,
+                space_id=space_id,
+                dentry_id=dentry_id,
+                union_id=union_id,
+            )
+            storage_response = {
+                "legacy_auth_response": legacy_auth_result,
+                "legacy_auth_error": legacy_auth_error,
+                "auth_response": auth_result,
+                "auth_error": auth_error,
+                "original_storage_error": str(storage_exc),
+                "dentry_list_response": list_response,
+                "download_response": storage_response,
+                "resolved_dentry_id": dentry_id,
+            }
+            fallback_api = "storage_dentry_list_then_download_info"
+        except Exception as list_exc:
+            download_uri, download_headers, thumbnail_response = _storage_dentry_thumbnail_info(
+                token=new_token,
+                space_id=space_id,
+                dentry_id=file_id,
+                union_id=union_id,
+            )
+            storage_response = {
+                "legacy_auth_response": legacy_auth_result,
+                "legacy_auth_error": legacy_auth_error,
+                "auth_response": auth_result,
+                "auth_error": auth_error,
+                "original_storage_error": str(storage_exc),
+                "dentry_list_error": str(list_exc),
+                "thumbnail_response": thumbnail_response,
+            }
+            fallback_api = "storage_thumbnail_query"
     return {
         "space_id": space_id,
         "union_id_obtained": bool(union_id),
@@ -2440,15 +2533,160 @@ def _looks_like_purchase_detail_row(row: dict) -> bool:
     )
 
 
+def _purchase_text_value(text: str, aliases: tuple[str, ...]) -> str:
+    alias_pattern = "|".join(re.escape(alias) for alias in aliases)
+    stop_pattern = (
+        r"物品编码|物料编码|品目编码|C[oó]digo|Codigo|Código|SKU|"
+        r"物品名称|物料名称|品名|Nombre(?:\s+del\s+art[ií]culo)?|"
+        r"物品规格|规格|Especificaci[oó]n|Especificacion|"
+        r"数量|Cantidad|Qty|QTY|单位|Unidad|"
+        r"单价|Precio|Unit\s*Price|总金额|Monto\s*Total|金额|Total|币种|Moneda"
+    )
+    match = re.search(
+        rf"(?:{alias_pattern})\s*[:：]?\s*(.+?)(?=\s+(?:{stop_pattern})\s*[:：]?|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return _clean(match.group(1)) if match else ""
+
+
+def _purchase_text_number(text: str, aliases: tuple[str, ...]):
+    value = _purchase_text_value(text, aliases)
+    if not value:
+        return None
+    match = re.search(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", value)
+    return match.group(0) if match else None
+
+
+def _purchase_text_currency(text: str, default_currency: Any = "") -> str:
+    upper = text.upper()
+    if any(marker in upper for marker in ("人民币", "RMB", "CNY", "¥")):
+        return "人民币RMB"
+    if any(marker in upper for marker in ("美元", "USD", "US$")):
+        return "美元USD"
+    if any(marker in upper for marker in ("MXN", "PESO", "比索")):
+        return "墨西哥比索MXN"
+    return _clean(default_currency)
+
+
+def _clean_purchase_product_name(value: str) -> str:
+    text = _clean(value)
+    text = re.sub(r"^(?:[-－—*•]|\d+[.、)）])\s*", "", text)
+    return text.strip(" -－—")
+
+
+def _parse_purchase_text_chunk(chunk: str, *, currency: Any = "", source_field: str = "") -> dict:
+    text = _clean(chunk)
+    if not text:
+        return {}
+
+    material_code = _purchase_text_value(text, ("物品编码", "物料编码", "品目编码", "Código", "Codigo", "SKU"))
+    if not material_code:
+        code_match = re.search(r"\b([A-Z]{1,5}\d{3,}[A-Z0-9-]*)\b", text, flags=re.IGNORECASE)
+        material_code = _clean(code_match.group(1)).upper() if code_match else ""
+
+    product_name = _purchase_text_value(text, ("物品名称", "物料名称", "品名", "Nombre del artículo", "Nombre del articulo", "Nombre"))
+    spec_model = _purchase_text_value(text, ("物品规格", "规格型号", "规格", "Especificación", "Especificacion"))
+    quantity = _purchase_text_number(text, ("数量", "Cantidad", "Qty", "QTY"))
+    unit = _purchase_text_value(text, ("单位", "Unidad"))
+    unit_price = _purchase_text_number(text, ("单价", "Precio", "Unit Price"))
+    goods_value = _purchase_text_number(text, ("总金额", "Monto Total", "金额", "Total"))
+
+    if material_code and not (quantity and unit_price and goods_value):
+        after_code = re.split(re.escape(material_code), text, maxsplit=1, flags=re.IGNORECASE)
+        tail = after_code[1] if len(after_code) > 1 else text
+        numbers = re.findall(r"(?<![A-Z0-9])[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", tail, flags=re.IGNORECASE)
+        if len(numbers) >= 3:
+            quantity = quantity or numbers[-3]
+            unit_price = unit_price or numbers[-2]
+            goods_value = goods_value or numbers[-1]
+
+    if not product_name and material_code:
+        after_code = re.split(re.escape(material_code), text, maxsplit=1, flags=re.IGNORECASE)
+        tail = after_code[1] if len(after_code) > 1 else ""
+        product_name = re.split(r"\s+(?:数量|Cantidad|Qty|QTY|单价|Precio|总金额|Monto\s*Total|金额|Total)\b", tail, maxsplit=1, flags=re.IGNORECASE)[0]
+        if numbers := re.findall(r"(?<![A-Z0-9])[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", product_name, flags=re.IGNORECASE):
+            product_name = product_name.split(numbers[0], 1)[0]
+        product_name = _clean_purchase_product_name(product_name)
+
+    if not (quantity and (unit_price or goods_value) and (material_code or product_name)):
+        return {}
+
+    row = {
+        "物品编码Código": material_code,
+        "物品名称Nombre del artículo": product_name,
+        "物品规格Especificacion": spec_model,
+        "数量Cantidad": quantity,
+        "单位Unidad": unit,
+        "单价Precio": unit_price,
+        "总金额Monto Total": goods_value,
+        "币种Moneda": _purchase_text_currency(text, currency),
+        "_dingtalk_table_name": source_field or "文本采购明细",
+        "_purchase_text_source": "text",
+    }
+    return {key: value for key, value in row.items() if value not in (None, "")}
+
+
+def _parse_purchase_expense_text_rows(value: Any, *, currency: Any = "", source_field: str = "") -> list[dict]:
+    text = _clean(value)
+    if not text:
+        return []
+
+    normalized_text = re.sub(r"[ \t]+", " ", text.replace("\r", "\n"))
+    chunks: list[str] = []
+    code_matches = list(re.finditer(r"\b[A-Z]{1,5}\d{3,}[A-Z0-9-]*\b", normalized_text, flags=re.IGNORECASE))
+    if len(code_matches) > 1:
+        for index, match in enumerate(code_matches):
+            start = match.start()
+            end = code_matches[index + 1].start() if index + 1 < len(code_matches) else len(normalized_text)
+            chunks.append(normalized_text[start:end])
+    else:
+        chunks = [line for line in re.split(r"[\n;；]+", normalized_text) if _clean(line)]
+        if len(chunks) <= 1:
+            chunks = [normalized_text]
+
+    rows: list[dict] = []
+    for chunk in chunks:
+        if re.match(r"^\s*(?:合计|总计|小计|total)\b", chunk, flags=re.IGNORECASE):
+            continue
+        row = _parse_purchase_text_chunk(chunk, currency=currency, source_field=source_field)
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _is_purchase_text_candidate_field(fieldname: Any, value: Any) -> bool:
+    text = _clean(value)
+    if not text:
+        return False
+    normalized_name = _normalize_key(fieldname)
+    name_hit = any(
+        marker in normalized_name
+        for marker in ("明细", "详情", "物品", "商品", "采购", "备注", "otro", "descripcion", "description", "desglose")
+    )
+    normalized_text = _normalize_key(text)
+    price_hit = any(marker in normalized_text for marker in ("单价", "precio", "金额", "montototal", "total"))
+    goods_hit = any(marker in normalized_text for marker in ("物品", "物料", "编码", "codigo", "sku", "名称", "nombre"))
+    return name_hit and price_hit and goods_hit
+
+
 def extract_purchase_expense_rows(instance: dict) -> list[dict]:
     """从采购支出 OA 详情里提取明细行，并补上表单级币种。"""
 
     currency = _find_component_value(instance, PURCHASE_CURRENCY_FIELD_ALIASES)
     rows: list[dict] = []
     fallback_rows: list[dict] = []
+    text_rows: list[dict] = []
     for component in _iter_form_components(instance):
         name = _clean(component.get("name") or component.get("label") or component.get("id"))
-        if _clean(component.get("componentType") or component.get("component_type")) != "TableField":
+        component_type = _clean(component.get("componentType") or component.get("component_type"))
+        if component_type != "TableField":
+            value = _parse_json_text(component.get("value"))
+            if isinstance(value, str) and _is_purchase_text_candidate_field(name, value):
+                for row in _parse_purchase_expense_text_rows(value, currency=currency, source_field=name):
+                    if currency and "币种Moneda" not in row:
+                        row["币种Moneda"] = currency
+                    text_rows.append(row)
             continue
 
         parsed_table = _parse_json_text(component.get("value"))
@@ -2470,7 +2708,8 @@ def extract_purchase_expense_rows(instance: dict) -> list[dict]:
         else:
             fallback_rows.extend([row for row in table_rows if _looks_like_purchase_detail_row(row)])
 
-    return rows or fallback_rows
+    return rows or fallback_rows or text_rows
+
 
 
 def build_purchase_expense_item_values_from_approval(instance: dict) -> list[dict]:

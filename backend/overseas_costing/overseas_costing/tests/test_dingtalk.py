@@ -404,6 +404,59 @@ def test_get_process_attachment_download_url_resolves_storage_dentry_by_file_nam
     assert any("/v1.0/storage/spaces/SPACE-001/dentries/DENTRY-002/downloadInfos/query" in call["url"] for call in calls)
 
 
+def test_get_process_attachment_download_url_falls_back_to_thumbnail(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    calls = []
+
+    def fake_request_json(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        if "/topapi/processinstance/file/url/get" in url:
+            return {"errcode": 60121, "errmsg": "找不到该用户", "success": False}
+        if "/topapi/processinstance/cspace/info" in url:
+            return {"errcode": 0, "result": {"space_id": "SPACE-001"}}
+        if "/topapi/process/dentry/auth" in url:
+            raise RuntimeError("legacy auth failed")
+        if "/topapi/v2/user/get" in url:
+            return {"errcode": 0, "result": {"unionid": "UNION-001"}}
+        if "/v1.0/workflow/processInstances/spaces/files/authDownload" in url:
+            raise RuntimeError("noPermission")
+        if "/v1.0/storage/spaces/SPACE-001/dentries/FILE-001/downloadInfos/query" in url:
+            raise RuntimeError("permissionDenied")
+        if "/v1.0/storage/spaces/SPACE-001/dentries?" in url:
+            raise RuntimeError("list noPermission")
+        if "/v1.0/storage/spaces/SPACE-001/thumbnails/query" in url:
+            return {
+                "resultItems": [
+                    {
+                        "dentryId": "FILE-001",
+                        "thumbnail": {"url": "https://download.example.com/thumb.png"},
+                    }
+                ]
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(import_oa_logistics, "_request_json", fake_request_json)
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "NEW-TOKEN")
+
+    result = get_process_attachment_download_url(
+        token="LEGACY-TOKEN",
+        process_instance_id="PROC-SEA-001",
+        file_id="FILE-001",
+        file_name="报价.png",
+        user_id="USER-001",
+        corp_id="ding-corp-001",
+        api_style="legacy",
+    )
+
+    assert result["download_uri"] == "https://download.example.com/thumb.png"
+    assert result["download_headers"] == {}
+    assert result["fallback_api"] == "storage_thumbnail_query"
+    thumbnail_call = next(call for call in calls if "/v1.0/storage/spaces/SPACE-001/thumbnails/query" in call["url"])
+    assert "unionId=UNION-001" in thumbnail_call["url"]
+    assert thumbnail_call["payload"]["dentryIds"] == ["FILE-001"]
+
+
 def test_logistics_approval_summary_extracts_sea_trace_fields() -> None:
     instance = {
         "processInstanceId": "PROC-SEA-001",
@@ -806,6 +859,34 @@ def test_pull_purchase_expense_approvals_reads_process_details(monkeypatch) -> N
     assert result["items"][0]["detail_row_count"] == 1
     assert result["items"][0]["mapped_preview_items"][0]["material_code"] == "YL000097"
     assert result["items"][0]["mapped_preview_items"][0]["unit_price"] == 2.9
+
+
+def test_extract_purchase_expense_rows_from_plain_text_detail() -> None:
+    instance = {
+        "formComponentValues": [
+            {"componentType": "TextField", "name": "币种Moneda", "value": "人民币RMB"},
+            {
+                "componentType": "TextareaField",
+                "name": "采购明细",
+                "value": (
+                    "物品编码Código: YL000097 物品名称Nombre del artículo: TPU原料 "
+                    "物品规格Especificacion: 25KG 数量Cantidad: 10000 单价Precio: 2.9 总金额Monto Total: 29000\n"
+                    "FL004104 包装袋 1000 0.049 49"
+                ),
+            },
+        ]
+    }
+
+    rows = extract_purchase_expense_rows(instance)
+    mapped = build_purchase_expense_item_values_from_approval(instance)
+
+    assert len(rows) == 2
+    assert rows[0]["物品编码Código"] == "YL000097"
+    assert rows[0]["币种Moneda"] == "人民币RMB"
+    assert mapped[0]["unit_price"] == 2.9
+    assert mapped[1]["material_code"] == "FL004104"
+    assert mapped[1]["product_name"] == "包装袋"
+    assert mapped[1]["goods_value"] == 49
 
 
 def test_pull_purchase_expense_approvals_skips_running_by_default(monkeypatch) -> None:

@@ -17,6 +17,8 @@ from overseas_costing.services.attachment_parse_service import (
 from overseas_costing.services.import_service import (
     _build_attachment_price_provenance,
     _build_source_document_manual_review,
+    _diagnose_ambiguous_source_row,
+    _diagnose_unmatched_source_row,
     apply_linked_purchase_expense_fillable_fields,
     confirm_oa_source_attachment_type,
     confirm_logistics_quote_candidate,
@@ -33,6 +35,7 @@ from overseas_costing.services.import_service import (
     list_tax_certificate_parse_records,
     parse_packing_list_attachment,
     parse_oa_packing_list_attachments,
+    parse_oa_source_attachments,
     preview_packing_list_attachment,
     preview_oa_source_attachment,
     preview_linked_purchase_expense_oa,
@@ -42,6 +45,30 @@ from overseas_costing.services.import_service import (
     apply_packing_list_fillable_fields,
     download_oa_form_attachment,
 )
+
+
+def test_unmatched_row_diagnosis_explains_missing_code() -> None:
+    result = _diagnose_unmatched_source_row(
+        {"product_name": "墨镜", "spec_model": "黑色", "unit_price": 12.5},
+        source_index=2,
+    )
+
+    assert result["source_row_no"] == 3
+    assert "没有物料编码" in result["reason"]
+    assert "优先补物料编码" in result["suggestion"]
+
+
+def test_ambiguous_row_diagnosis_lists_candidate_rows() -> None:
+    result = _diagnose_ambiguous_source_row(
+        {"material_code": "SKU001", "product_name": "镜片"},
+        matched_by="material_code",
+        candidates=[{"row_no": 4}, {"row_no": 8}],
+        source_index=0,
+    )
+
+    assert result["source_row_no"] == 1
+    assert result["candidate_row_nos"] == [4, 8]
+    assert "第 4、8 行" in result["reason"]
 
 
 def test_import_purchase_expense_oa_returns_preview_and_dingtalk_payload() -> None:
@@ -1045,6 +1072,89 @@ def test_download_oa_form_attachment_reports_file_access_error(monkeypatch) -> N
     assert commit_count["value"] == 1
 
 
+def test_download_oa_form_attachment_uses_thumbnail_media_fallback(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    commit_count = {"value": 0}
+    saved_payload = {}
+    fetched_urls: list[str] = []
+
+    class FakeAttachmentDoc:
+        name = "ATTACH-PNG"
+        source_type = "OA"
+        attachment_type = "Other"
+        file_name = "报价.png"
+        file_url = ""
+        parse_status = "Queued"
+        remark = ""
+        parse_result_json = json.dumps(
+            {
+                "source": "dingtalk_oa_form_attachment",
+                "instance_id": "PROC-SEA-001",
+                "file_id": "FILE-001",
+                "raw_attachment": {
+                    "fileName": "报价.png",
+                    "fileId": "FILE-001",
+                    "thumbnail": {"authMediaId": "MEDIA-001"},
+                },
+            },
+            ensure_ascii=False,
+        )
+
+        def save(self, **_kwargs):
+            return self
+
+    attachment_doc = FakeAttachmentDoc()
+
+    class FakeDB:
+        @staticmethod
+        def commit():
+            commit_count["value"] += 1
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_doc(*args):
+            if args == ("Overseas Cost Attachment", "ATTACH-PNG"):
+                return attachment_doc
+            raise AssertionError(args)
+
+    def fake_fetch(download_uri, **_kwargs):
+        fetched_urls.append(download_uri)
+        return b"\x89PNG\r\n", {"content_type": "image/png", "content_length": 6}
+
+    def fake_save(**kwargs):
+        saved_payload.update(kwargs)
+        return {"file_url": "/private/files/报价.png"}
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_service, "_resolve_dingtalk_env_file", lambda env_file=None: "")
+    monkeypatch.setattr(import_oa_logistics, "load_env_file", lambda _path: _path)
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "TOKEN-001")
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "get_process_attachment_download_url",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError('HTTP 403：{"code":"permissionDenied","message":"dentryId"}')),
+    )
+    monkeypatch.setattr(import_service, "_fetch_dingtalk_attachment_content", fake_fetch)
+    monkeypatch.setattr(import_service, "_save_content_as_frappe_file", fake_save)
+
+    result = download_oa_form_attachment("ATTACH-PNG")
+    updated_snapshot = json.loads(attachment_doc.parse_result_json)
+
+    assert result["ok"] is True
+    assert result["downloaded"] is True
+    assert result["file_url"] == "/private/files/报价.png"
+    assert "media/downloadFile" in fetched_urls[0]
+    assert "media_id=MEDIA-001" in fetched_urls[0]
+    assert saved_payload["file_name"] == "报价.png"
+    assert updated_snapshot["download"]["fallback_api"] == "thumbnail_media_download"
+    assert updated_snapshot["download"]["saved_file_name"] == "报价.png"
+    assert commit_count["value"] == 1
+
+
 def test_save_large_content_as_private_file_registers_file_doc(monkeypatch) -> None:
     from overseas_costing.services import import_service
 
@@ -1191,6 +1301,108 @@ def test_parse_oa_packing_list_attachments_only_handles_excel_packing_lists(monk
     assert parse_calls[0]["attachment_name"] == "ATTACH-XLSX"
     assert parse_calls[0]["auto_create_unmatched_items"] is True
     assert any(item["attachment_name"] == "ATTACH-PDF" and item["action"] == "skipped" for item in result["items"])
+
+
+def test_parse_oa_source_attachments_downloads_excel_and_recognizes_image(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    rows = [
+        {
+            "name": "ATTACH-XLSX",
+            "batch": "BATCH-DOC",
+            "version": "VER-DOC",
+            "source_type": "OA",
+            "attachment_type": "Packing List",
+            "source_doc_no": "OA-001::FILE-XLSX",
+            "file_name": "CI&PL.xlsx",
+            "file_url": "",
+            "parse_status": "Queued",
+            "parse_result_json": json.dumps({"file_id": "FILE-XLSX", "file_ext": "xlsx"}, ensure_ascii=False),
+            "mapped_result_json": json.dumps({"parse_targets": ["actual_shipped_qty", "gross_weight_kg"]}, ensure_ascii=False),
+        },
+        {
+            "name": "ATTACH-PNG",
+            "batch": "BATCH-DOC",
+            "version": "VER-DOC",
+            "source_type": "OA",
+            "attachment_type": "Other",
+            "source_doc_no": "OA-001::FILE-PNG",
+            "file_name": "劳保鞋物流报价3.26.png",
+            "file_url": "",
+            "parse_status": "Queued",
+            "parse_result_json": json.dumps({"file_id": "FILE-PNG", "file_ext": "png"}, ensure_ascii=False),
+            "mapped_result_json": "{}",
+        },
+    ]
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            assert doctype == "Overseas Cost Attachment"
+            return rows
+
+    download_calls: list[str] = []
+    parse_calls: list[dict] = []
+    preview_calls: list[str] = []
+
+    def fake_download(attachment_name, **_kwargs):
+        download_calls.append(attachment_name)
+        return {
+            "ok": True,
+            "downloaded": True,
+            "attachment_name": attachment_name,
+            "file_url": f"/private/files/{attachment_name}.{'xlsx' if attachment_name.endswith('XLSX') else 'png'}",
+            "message": "已下载",
+        }
+
+    def fake_apply(**kwargs):
+        parse_calls.append(kwargs)
+        return {
+            "ok": True,
+            "batch_doc_name": kwargs["batch_name"],
+            "version_name": kwargs["version_name"],
+            "updated_count": 1,
+            "created_count": 0,
+            "changed_field_count": 2,
+            "skipped_count": 0,
+            "conflict_row_count": 0,
+            "unmatched_count": 0,
+            "ambiguous_count": 0,
+            "attachment_marked_parsed": True,
+            "message": "已解析",
+        }
+
+    def fake_preview(attachment_name):
+        preview_calls.append(attachment_name)
+        return {
+            "ok": True,
+            "classification": {"code": "logistics_quote", "label": "物流报价"},
+            "extraction_method": "ocr_image",
+            "text_length": 120,
+            "purchase_order": {},
+            "can_write_purchase_price": False,
+            "message": "附件内容识别预览已生成，当前不会写入物料单价或货值。",
+        }
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_service, "download_oa_form_attachment", fake_download)
+    monkeypatch.setattr(import_service, "apply_packing_list_fillable_fields", fake_apply)
+    monkeypatch.setattr(import_service, "preview_oa_source_attachment", fake_preview)
+
+    result = parse_oa_source_attachments(recalculate=False)
+
+    assert result["ok"] is True
+    assert result["scanned_count"] == 2
+    assert result["downloaded_count"] == 2
+    assert result["packing_parsed_count"] == 1
+    assert result["source_recognized_count"] == 1
+    assert result["parsed_count"] == 2
+    assert result["updated_count"] == 1
+    assert result["changed_field_count"] == 2
+    assert download_calls == ["ATTACH-XLSX", "ATTACH-PNG"]
+    assert parse_calls[0]["attachment_name"] == "ATTACH-XLSX"
+    assert preview_calls == ["ATTACH-PNG"]
+    assert result["items"][1]["recognized_type_label"] == "物流报价"
 
 
 def test_parse_oa_packing_list_attachments_summarizes_dingtalk_permission_error(monkeypatch) -> None:

@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 try:
@@ -549,6 +550,10 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
         parse_result = _json_loads_dict(row.get("parse_result_json"))
         mapped_result = _json_loads_dict(row.get("mapped_result_json"))
         manual_review = _source_document_manual_review(mapped_result)
+        source_preview = _source_document_preview_cache(mapped_result, row.get("file_url") or "")
+        source_classification = (
+            source_preview.get("classification") if isinstance(source_preview.get("classification"), dict) else {}
+        )
         last_download_error = parse_result.get("last_download_error") if isinstance(parse_result.get("last_download_error"), dict) else {}
         items.append(
             {
@@ -567,6 +572,10 @@ def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
                 "parse_targets": mapped_result.get("parse_targets") or [],
                 "manual_review": manual_review,
                 "confirmed_type_label": manual_review.get("confirmed_type_label") or "",
+                "recognized_type": source_classification.get("code") or "",
+                "recognized_type_label": source_classification.get("label") or "",
+                "extraction_method": source_preview.get("extraction_method") or "",
+                "text_length": source_preview.get("text_length") or 0,
                 "last_download_error": last_download_error,
                 "can_download": bool(parse_result.get("file_id")) and not bool(row.get("file_url")),
                 "remark": row.get("remark") or "",
@@ -683,25 +692,45 @@ def download_oa_form_attachment(
             access_token=str(access_token or "").strip(),
             corp_id=corp_id,
         )
-        download_info = get_process_attachment_download_url(
-            token=token,
-            process_instance_id=process_instance_id,
-            file_id=file_id,
-            file_name=file_name,
-            space_id=space_id,
-            user_id=user_id,
-            corp_id=corp_id,
-            api_style="auto",
-        )
-        fetch_kwargs = {}
-        if download_info.get("download_headers"):
-            fetch_kwargs["headers"] = download_info.get("download_headers") or {}
-        content, response_meta = _fetch_dingtalk_attachment_content(download_info["download_uri"], **fetch_kwargs)
-        file_doc = _save_content_as_frappe_file(
-            file_name=file_name,
-            content=content,
-            attached_to_name=resolved_attachment_name,
-        )
+        try:
+            download_info = get_process_attachment_download_url(
+                token=token,
+                process_instance_id=process_instance_id,
+                file_id=file_id,
+                file_name=file_name,
+                space_id=space_id,
+                user_id=user_id,
+                corp_id=corp_id,
+                api_style="auto",
+            )
+            fetch_kwargs = {}
+            if download_info.get("download_headers"):
+                fetch_kwargs["headers"] = download_info.get("download_headers") or {}
+            content, response_meta = _fetch_dingtalk_attachment_content(download_info["download_uri"], **fetch_kwargs)
+            saved_file_name = _thumbnail_media_file_name(file_name, file_id) if download_info.get("fallback_api") == "storage_thumbnail_query" else file_name
+            file_doc = _save_content_as_frappe_file(
+                file_name=saved_file_name,
+                content=content,
+                attached_to_name=resolved_attachment_name,
+            )
+        except Exception as primary_exc:
+            try:
+                file_doc, response_meta, saved_file_name, thumbnail_media_id = _download_dingtalk_thumbnail_media(
+                    token=token,
+                    parse_snapshot=parse_snapshot,
+                    file_name=file_name,
+                    file_id=file_id,
+                    attached_to_name=resolved_attachment_name,
+                )
+            except Exception as thumbnail_exc:
+                raise RuntimeError(f"{primary_exc}；缩略图媒体兜底失败：{thumbnail_exc}") from thumbnail_exc
+            download_info = {
+                "space_id": space_id,
+                "fallback_api": "thumbnail_media_download",
+                "download_headers": {},
+                "thumbnail_media_id": thumbnail_media_id,
+                "primary_error": str(primary_exc),
+            }
     except Exception as exc:
         error_message = str(exc)
         if _is_dingtalk_attachment_file_access_error(error_message):
@@ -806,6 +835,7 @@ def download_oa_form_attachment(
         "user_id": user_id,
         "space_id": download_info.get("space_id") or "",
         "fallback_api": download_info.get("fallback_api") or "",
+        "saved_file_name": saved_file_name,
         "download_uri_obtained": True,
         "download_headers_obtained": bool(download_info.get("download_headers")),
         "content_type": response_meta.get("content_type") or "",
@@ -823,7 +853,8 @@ def download_oa_form_attachment(
         "ok": True,
         "downloaded": True,
         "attachment_name": resolved_attachment_name,
-        "file_name": file_name,
+        "file_name": saved_file_name,
+        "source_file_name": file_name,
         "file_url": file_url,
         "content_type": response_meta.get("content_type") or "",
         "content_length": response_meta.get("content_length") or len(content),
@@ -999,11 +1030,26 @@ def preview_oa_source_attachment(attachment_name: str) -> dict:
                 file_url=file_url,
             )
         except Exception as exc:
+            message = f"附件内容识别失败：{exc}"
+            try:
+                mapped_result["source_document_preview_error"] = {
+                    "message": message,
+                    "file_url": file_url,
+                    "failed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                attachment_doc.parse_status = "Failed"
+                attachment_doc.mapped_result_json = _json_dumps(mapped_result)
+                attachment_doc.remark = message[:500]
+                attachment_doc.save(ignore_permissions=True)
+                if hasattr(frappe.db, "commit"):
+                    frappe.db.commit()
+            except Exception:
+                pass
             return {
                 "ok": False,
                 "attachment_name": resolved_attachment_name,
                 "file_url": file_url,
-                "message": f"附件内容识别失败：{exc}",
+                "message": message,
             }
         preview = {**preview, "cache_hit": False}
         try:
@@ -1484,6 +1530,54 @@ def _fetch_dingtalk_attachment_content(download_uri: str, headers: dict | None =
         raise RuntimeError(f"附件下载网络失败：{exc}") from exc
 
 
+def _dingtalk_thumbnail_media_id(parse_snapshot: dict) -> str:
+    raw_attachment = parse_snapshot.get("raw_attachment") if isinstance(parse_snapshot.get("raw_attachment"), dict) else {}
+    thumbnail = raw_attachment.get("thumbnail") if isinstance(raw_attachment.get("thumbnail"), dict) else {}
+    return str(
+        thumbnail.get("authMediaId")
+        or thumbnail.get("mediaId")
+        or parse_snapshot.get("authMediaId")
+        or parse_snapshot.get("auth_media_id")
+        or ""
+    ).strip()
+
+
+def _thumbnail_media_file_name(file_name: str, file_id: str) -> str:
+    suffix = Path(file_name).suffix.lower()
+    if suffix in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}:
+        return file_name
+    return f"{Path(file_name).stem or file_id}_缩略图.png"
+
+
+def _download_dingtalk_thumbnail_media(
+    *,
+    token: str,
+    parse_snapshot: dict,
+    file_name: str,
+    file_id: str,
+    attached_to_name: str,
+):
+    media_id = _dingtalk_thumbnail_media_id(parse_snapshot)
+    if not media_id:
+        raise RuntimeError("附件记录没有 thumbnail.authMediaId，无法走图片缩略图兜底下载。")
+    media_url = (
+        "https://oapi.dingtalk.com/media/downloadFile"
+        f"?access_token={quote(str(token or ''), safe='')}&media_id={quote(media_id, safe='')}"
+    )
+    content, response_meta = _fetch_dingtalk_attachment_content(media_url)
+    content_type = str(response_meta.get("content_type") or "").lower()
+    if "json" in content_type or content.lstrip()[:1] in (b"{", b"["):
+        detail = content.decode("utf-8", errors="replace")
+        raise RuntimeError(f"钉钉缩略图媒体下载失败：{detail[:300]}")
+    saved_file_name = _thumbnail_media_file_name(file_name, file_id)
+    file_doc = _save_content_as_frappe_file(
+        file_name=saved_file_name,
+        content=content,
+        attached_to_name=attached_to_name,
+    )
+    return file_doc, response_meta, saved_file_name, media_id
+
+
 def _save_content_as_frappe_file(*, file_name: str, content: bytes, attached_to_name: str):
     if frappe is None:
         raise RuntimeError("当前未连接 Frappe。")
@@ -1782,6 +1876,10 @@ def _first_non_empty(*values):
         if value not in (None, ""):
             return value
     return None
+
+
+def _has_source_value(value) -> bool:
+    return str(value or "").strip() != ""
 
 
 def _first_mapped_value(mapped_rows: list[dict], fieldname: str, default: float = 0.0) -> float:
@@ -2925,6 +3023,83 @@ def _compact_packing_row(mapped_row: dict) -> dict:
     }
 
 
+def _source_row_no(mapped_row: dict, source_index: int | None = None):
+    row_no = mapped_row.get("excel_row_no") or mapped_row.get("row_no")
+    if row_no not in (None, ""):
+        return row_no
+    if source_index is not None:
+        return source_index + 1
+    return ""
+
+
+def _source_identity_text(mapped_row: dict) -> str:
+    parts = [
+        mapped_row.get("material_code"),
+        mapped_row.get("product_name"),
+        mapped_row.get("spec_model"),
+    ]
+    return " / ".join(str(part).strip() for part in parts if str(part or "").strip()) or "未识别物料"
+
+
+def _diagnose_unmatched_source_row(
+    mapped_row: dict,
+    *,
+    matched_by: str = "",
+    source_index: int | None = None,
+    compact_row: Callable[[dict], dict] | None = None,
+) -> dict:
+    compact = dict(compact_row(mapped_row) if compact_row else mapped_row)
+    has_code = _has_source_value(mapped_row.get("material_code"))
+    has_name = _has_source_value(mapped_row.get("product_name"))
+    has_spec = _has_source_value(mapped_row.get("spec_model"))
+
+    if not has_code and not has_name and not has_spec:
+        reason = "来源行缺少物料编码、名称和规格，系统无法判断对应物料。"
+        suggestion = "检查附件表头是否识别正确，或在源文件补齐物料编码/名称后重新解析。"
+    elif matched_by == "material_code":
+        reason = "物料编码在系统中有候选，但规格或名称不一致，未自动写入。"
+        suggestion = "核对规格型号；如果确实是新物料，先新增物料行后重新解析。"
+    elif has_code:
+        reason = "当前批次没有相同物料编码。"
+        suggestion = "确认该物料是否属于当前批次；属于的话先新增物料或修正系统编码。"
+    else:
+        reason = "来源行没有物料编码，仅凭名称或规格未匹配到系统物料。"
+        suggestion = "优先补物料编码；名称相近但叫法不同的，后续走人工归并后再匹配。"
+
+    compact.update(
+        {
+            "source_row_no": _source_row_no(mapped_row, source_index),
+            "source_identity": _source_identity_text(mapped_row),
+            "reason": reason,
+            "suggestion": suggestion,
+        }
+    )
+    return compact
+
+
+def _diagnose_ambiguous_source_row(
+    mapped_row: dict,
+    *,
+    matched_by: str,
+    candidates: list[dict],
+    source_index: int | None = None,
+    compact_row: Callable[[dict], dict] | None = None,
+) -> dict:
+    candidate_row_nos = [candidate.get("row_no") for candidate in candidates if candidate.get("row_no") not in (None, "")]
+    compact = dict(compact_row(mapped_row) if compact_row else mapped_row)
+    compact.update(
+        {
+            "source_row_no": _source_row_no(mapped_row, source_index),
+            "source_identity": _source_identity_text(mapped_row),
+            "matched_by": matched_by,
+            "candidate_row_nos": candidate_row_nos,
+            "reason": f"同一来源行匹配到多条系统物料：第 {'、'.join(str(row_no) for row_no in candidate_row_nos) or '--'} 行。",
+            "suggestion": "补齐规格、数量或物料编码后重新解析；无法区分时由人工在表格中修正。",
+        }
+    )
+    return compact
+
+
 def _build_purchase_updates_for_preview(mapped_row: dict, _target: dict) -> dict:
     return {
         "unit_price": mapped_row.get("unit_price"),
@@ -3075,6 +3250,10 @@ def _preview_item_writeback(
 ) -> dict:
     compact = compact_row or _compact_purchase_row
     if frappe is None:
+        unmatched = [
+            _diagnose_unmatched_source_row(row, source_index=index, compact_row=compact)
+            for index, row in enumerate(mapped_rows)
+        ]
         return {
             "dry_run": True,
             "matched_count": 0,
@@ -3086,12 +3265,17 @@ def _preview_item_writeback(
             "unmatched_count": len(mapped_rows),
             "matched_rows": [],
             "ambiguous_rows": [],
-            "unmatched_rows": [compact(row) for row in mapped_rows],
+            "unmatched_rows": unmatched,
+            "match_diagnostics": unmatched,
             "message": "当前未连接 Frappe，仅完成来源行解析，无法匹配批次 SKU。",
         }
 
     batch_doc_name = _resolve_batch_name(batch_name)
     if not batch_doc_name:
+        unmatched = [
+            _diagnose_unmatched_source_row(row, source_index=index, compact_row=compact)
+            for index, row in enumerate(mapped_rows)
+        ]
         return {
             "matched_count": 0,
             "fillable_row_count": 0,
@@ -3102,12 +3286,17 @@ def _preview_item_writeback(
             "unmatched_count": len(mapped_rows),
             "matched_rows": [],
             "ambiguous_rows": [],
-            "unmatched_rows": [compact(row) for row in mapped_rows],
+            "unmatched_rows": unmatched,
+            "match_diagnostics": unmatched,
             "message": f"未找到批次：{batch_name}",
         }
 
     resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
     if not resolved_version_name:
+        unmatched = [
+            _diagnose_unmatched_source_row(row, source_index=index, compact_row=compact)
+            for index, row in enumerate(mapped_rows)
+        ]
         return {
             "batch_doc_name": batch_doc_name,
             "matched_count": 0,
@@ -3119,7 +3308,8 @@ def _preview_item_writeback(
             "unmatched_count": len(mapped_rows),
             "matched_rows": [],
             "ambiguous_rows": [],
-            "unmatched_rows": [compact(row) for row in mapped_rows],
+            "unmatched_rows": unmatched,
+            "match_diagnostics": unmatched,
             "message": f"批次 {batch_name} 暂无可用版本，无法匹配。",
         }
 
@@ -3153,16 +3343,34 @@ def _preview_item_writeback(
         matched_by = match.get("matched_by") or ""
         candidates = match.get("candidates") or []
         if not candidates:
-            unmatched_rows.append(compact(mapped_row))
+            unmatched_rows.append(
+                _diagnose_unmatched_source_row(
+                    mapped_row,
+                    matched_by=matched_by,
+                    source_index=match.get("source_index"),
+                    compact_row=compact,
+                )
+            )
             continue
         if match.get("assigned_candidate"):
             candidates = [match["assigned_candidate"]]
         if len(candidates) > 1:
+            diagnosis = _diagnose_ambiguous_source_row(
+                mapped_row,
+                matched_by=matched_by,
+                candidates=candidates,
+                source_index=match.get("source_index"),
+                compact_row=compact,
+            )
             ambiguous_rows.append(
                 {
                     "matched_by": matched_by,
                     "mapped_row": compact(mapped_row),
                     "candidate_row_nos": [candidate.get("row_no") for candidate in candidates],
+                    "source_row_no": diagnosis.get("source_row_no"),
+                    "source_identity": diagnosis.get("source_identity"),
+                    "reason": diagnosis.get("reason"),
+                    "suggestion": diagnosis.get("suggestion"),
                     "candidate_items": [
                         {
                             "name": candidate.get("name"),
@@ -3233,6 +3441,28 @@ def _preview_item_writeback(
         "matched_rows": matched_rows,
         "ambiguous_rows": ambiguous_rows,
         "unmatched_rows": unmatched_rows,
+        "match_diagnostics": [
+            *[
+                {
+                    "type": "ambiguous",
+                    "source_row_no": row.get("source_row_no"),
+                    "source_identity": row.get("source_identity"),
+                    "reason": row.get("reason"),
+                    "suggestion": row.get("suggestion"),
+                }
+                for row in ambiguous_rows
+            ],
+            *[
+                {
+                    "type": "unmatched",
+                    "source_row_no": row.get("source_row_no"),
+                    "source_identity": row.get("source_identity"),
+                    "reason": row.get("reason"),
+                    "suggestion": row.get("suggestion"),
+                }
+                for row in unmatched_rows
+            ],
+        ],
         "message": message,
     }
 
@@ -4451,6 +4681,21 @@ def _is_excel_packing_attachment(row: dict) -> bool:
     return row.get("attachment_type") == "Packing List" or "actual_shipped_qty" in targets
 
 
+def _is_source_document_attachment(row: dict) -> bool:
+    return _attachment_ext_from_row(row) in {
+        "pdf",
+        "png",
+        "jpg",
+        "jpeg",
+        "bmp",
+        "tif",
+        "tiff",
+        "doc",
+        "docx",
+        "txt",
+    }
+
+
 def _query_oa_attachment_rows(batch_name: str | None = None, limit: int | None = 200) -> tuple[str, list[dict]]:
     resolved_batch_name = _resolve_batch_name(batch_name) if batch_name else ""
     filters = {"source_type": "OA"}
@@ -4501,6 +4746,22 @@ def _compact_packing_apply_result(result: dict) -> dict:
         "unmatched_count": result.get("unmatched_count", 0),
         "ambiguous_count": result.get("ambiguous_count", 0),
         "attachment_marked_parsed": result.get("attachment_marked_parsed", False),
+        "message": result.get("message") or "",
+    }
+
+
+def _compact_source_document_preview_result(result: dict) -> dict:
+    classification = result.get("classification") if isinstance(result.get("classification"), dict) else {}
+    purchase_order = result.get("purchase_order") if isinstance(result.get("purchase_order"), dict) else {}
+    return {
+        "ok": result.get("ok"),
+        "classification_code": classification.get("code") or "",
+        "classification_label": classification.get("label") or "",
+        "extraction_method": result.get("extraction_method") or "",
+        "text_length": result.get("text_length", 0),
+        "can_write_purchase_price": bool(result.get("can_write_purchase_price")),
+        "purchase_order_line_count": purchase_order.get("recognized_line_count", 0),
+        "cache_hit": bool(result.get("cache_hit")),
         "message": result.get("message") or "",
     }
 
@@ -4584,6 +4845,38 @@ def _build_oa_packing_parse_message(
         return (
             f"{base} 其中 {file_access_blocked_count} 个 Excel 装箱单已找到钉钉附件记录，"
             "但当前下载账号没有文件级访问权限；请换成能打开该附件的账号，或拖放上传附件后解析。"
+        )
+    return base
+
+
+def _build_oa_source_attachment_parse_message(
+    *,
+    scanned_count: int,
+    downloaded_count: int,
+    packing_parsed_count: int,
+    source_recognized_count: int,
+    updated_count: int,
+    created_count: int,
+    changed_field_count: int,
+    skipped_count: int,
+    failed_count: int,
+    permission_blocked_count: int,
+    file_access_blocked_count: int,
+    permission_scopes: list[str],
+) -> str:
+    base = (
+        f"已扫描 {scanned_count} 个 OA 发起附件，自动下载 {downloaded_count} 个；"
+        f"解析 Excel 装箱单 {packing_parsed_count} 个，识别图片/PDF/Word/TXT {source_recognized_count} 个；"
+        f"更新 {updated_count} 行、自动新增 {created_count} 条物料、写入 {changed_field_count} 个字段；"
+        f"跳过 {skipped_count} 个，失败 {failed_count} 个。"
+    )
+    if permission_blocked_count:
+        scope_text = "、".join(permission_scopes) or "钉钉审批附件下载"
+        return f"{base} 其中 {permission_blocked_count} 个附件因钉钉应用缺少 {scope_text} 权限，暂时无法下载解析。"
+    if file_access_blocked_count:
+        return (
+            f"{base} 其中 {file_access_blocked_count} 个附件已找到钉钉记录，"
+            "但当前下载账号没有文件级访问权限；请换成能打开该附件的在职账号后重试。"
         )
     return base
 
@@ -4798,6 +5091,229 @@ def parse_oa_packing_list_attachments(
             scanned_count=len(rows),
             downloaded_count=downloaded_count,
             parsed_count=parsed_count,
+            updated_count=updated_count,
+            created_count=created_count,
+            changed_field_count=changed_field_count,
+            skipped_count=skipped_count,
+            failed_count=failed_count,
+            permission_blocked_count=permission_blocked_count,
+            file_access_blocked_count=file_access_blocked_count,
+            permission_scopes=permission_scopes,
+        ),
+    }
+
+
+def parse_oa_source_attachments(
+    *,
+    batch_name: str | None = None,
+    limit: int | None = 200,
+    env_file: str | None = None,
+    access_token: str | None = None,
+    skip_parsed: bool = True,
+    recalculate: bool = True,
+) -> dict:
+    """批量下载并解析钉钉发起附件。
+
+    Excel 装箱单会回填可补字段；图片、PDF、Word、TXT 只保存识别快照，
+    供财务查看资料类型和字段候选，不直接改写金额字段。
+    """
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，不能批量解析钉钉附件。",
+        }
+
+    resolved_batch_name, rows = _query_oa_attachment_rows(batch_name=batch_name, limit=limit)
+    if batch_name and not resolved_batch_name:
+        return {
+            "ok": False,
+            "batch_name": batch_name,
+            "message": f"未找到批次：{batch_name}",
+            "items": [],
+        }
+
+    processed_items: list[dict] = []
+    parsed_batch_versions: dict[str, str] = {}
+    downloaded_count = 0
+    packing_parsed_count = 0
+    source_recognized_count = 0
+    updated_count = 0
+    created_count = 0
+    changed_field_count = 0
+    skipped_count = 0
+    failed_count = 0
+    permission_blocked_count = 0
+    file_access_blocked_count = 0
+    permission_scopes: list[str] = []
+    permission_blocked = False
+
+    for row in rows:
+        item = {
+            "attachment_name": row.get("name"),
+            "batch_name": row.get("batch"),
+            "version_name": row.get("version"),
+            "file_name": row.get("file_name") or "",
+            "attachment_type": row.get("attachment_type") or "Other",
+            "parse_status": row.get("parse_status") or "",
+            "file_ext": _attachment_ext_from_row(row),
+        }
+        if skip_parsed and str(row.get("parse_status") or "").strip().lower() == "parsed":
+            item["action"] = "skipped"
+            item["reason"] = "附件已解析"
+            skipped_count += 1
+            processed_items.append(item)
+            continue
+
+        file_url = str(row.get("file_url") or "").strip()
+        if not file_url and permission_blocked:
+            item["action"] = "blocked"
+            item["error_type"] = "dingtalk_permission"
+            item["permission_scopes"] = permission_scopes
+            item["reason"] = (
+                f"本次批处理已确认钉钉应用缺少 {'、'.join(permission_scopes) or '审批附件下载'} 权限，"
+                "该附件暂不重复请求下载。"
+            )
+            permission_blocked_count += 1
+            skipped_count += 1
+            processed_items.append(item)
+            continue
+
+        if not file_url:
+            download_result = download_oa_form_attachment(
+                row.get("name"),
+                env_file=env_file,
+                access_token=access_token,
+            )
+            item["download"] = _compact_download_result(download_result)
+            if not download_result.get("ok"):
+                item["action"] = "failed"
+                item["reason"] = download_result.get("message") or "附件下载失败"
+                if download_result.get("error_type"):
+                    item["error_type"] = download_result.get("error_type")
+                if _is_dingtalk_permission_error(item["reason"]):
+                    item["error_type"] = "dingtalk_permission"
+                    scopes = _extract_dingtalk_permission_scopes(item["reason"])
+                    item["permission_scopes"] = scopes
+                    permission_blocked = True
+                    permission_blocked_count += 1
+                    for scope in scopes:
+                        if scope not in permission_scopes:
+                            permission_scopes.append(scope)
+                elif download_result.get("error_type") == "dingtalk_attachment_file_access":
+                    file_access_blocked_count += 1
+                failed_count += 1
+                processed_items.append(item)
+                continue
+            if download_result.get("downloaded"):
+                downloaded_count += 1
+            file_url = download_result.get("file_url") or file_url
+
+        if not file_url:
+            item["action"] = "failed"
+            item["reason"] = "附件没有系统文件地址，无法解析。"
+            failed_count += 1
+            processed_items.append(item)
+            continue
+
+        row_for_parse = {**row, "file_url": file_url}
+        item["file_url"] = file_url
+        item["file_ext"] = _attachment_ext_from_row(row_for_parse)
+
+        if _is_excel_packing_attachment(row_for_parse):
+            try:
+                parse_result = apply_packing_list_fillable_fields(
+                    batch_name=row.get("batch"),
+                    version_name=row.get("version"),
+                    attachment_name=row.get("name"),
+                    file_url=file_url,
+                    recalculate_after_writeback=False,
+                    auto_create_unmatched_items=True,
+                )
+            except Exception as exc:
+                item["action"] = "failed"
+                item["reason"] = f"装箱单解析失败：{exc}"
+                failed_count += 1
+                processed_items.append(item)
+                continue
+
+            item["parse_mode"] = "packing_list"
+            item["parse"] = _compact_packing_apply_result(parse_result)
+            if not parse_result.get("ok"):
+                item["action"] = "failed"
+                item["reason"] = parse_result.get("message") or "装箱单解析失败"
+                failed_count += 1
+                processed_items.append(item)
+                continue
+
+            item["action"] = "parsed"
+            packing_parsed_count += 1
+            row_updated_count = int(parse_result.get("updated_count") or 0)
+            row_created_count = int(parse_result.get("created_count") or 0)
+            row_changed_field_count = int(parse_result.get("changed_field_count") or 0)
+            updated_count += row_updated_count
+            created_count += row_created_count
+            changed_field_count += row_changed_field_count
+            if row_updated_count or row_created_count:
+                parsed_batch_versions[parse_result.get("batch_doc_name") or row.get("batch")] = (
+                    parse_result.get("version_name") or row.get("version") or ""
+                )
+            processed_items.append(item)
+            continue
+
+        if _is_source_document_attachment(row_for_parse):
+            preview_result = preview_oa_source_attachment(str(row.get("name") or ""))
+            item["parse_mode"] = "source_document"
+            item["preview"] = _compact_source_document_preview_result(preview_result)
+            if not preview_result.get("ok"):
+                item["action"] = "failed"
+                item["reason"] = preview_result.get("message") or "附件内容识别失败"
+                failed_count += 1
+                processed_items.append(item)
+                continue
+
+            classification = preview_result.get("classification") if isinstance(preview_result.get("classification"), dict) else {}
+            item["action"] = "parsed"
+            item["recognized_type"] = classification.get("code") or ""
+            item["recognized_type_label"] = classification.get("label") or ""
+            item["reason"] = preview_result.get("message") or "附件内容识别完成"
+            source_recognized_count += 1
+            processed_items.append(item)
+            continue
+
+        item["action"] = "skipped"
+        item["reason"] = f"暂不支持自动识别 {item['file_ext'] or '未知'} 格式附件。"
+        skipped_count += 1
+        processed_items.append(item)
+
+    recalculate_results = _recalculate_batches_after_attachment_parse(parsed_batch_versions) if recalculate else []
+    parsed_count = packing_parsed_count + source_recognized_count
+
+    return {
+        "ok": failed_count == 0,
+        "batch_name": batch_name or "",
+        "resolved_batch_name": resolved_batch_name,
+        "scanned_count": len(rows),
+        "downloaded_count": downloaded_count,
+        "parsed_count": parsed_count,
+        "packing_parsed_count": packing_parsed_count,
+        "source_recognized_count": source_recognized_count,
+        "updated_count": updated_count,
+        "created_count": created_count,
+        "changed_field_count": changed_field_count,
+        "skipped_count": skipped_count,
+        "failed_count": failed_count,
+        "permission_blocked_count": permission_blocked_count,
+        "file_access_blocked_count": file_access_blocked_count,
+        "permission_scopes": permission_scopes,
+        "recalculate_results": recalculate_results,
+        "items": processed_items,
+        "message": _build_oa_source_attachment_parse_message(
+            scanned_count=len(rows),
+            downloaded_count=downloaded_count,
+            packing_parsed_count=packing_parsed_count,
+            source_recognized_count=source_recognized_count,
             updated_count=updated_count,
             created_count=created_count,
             changed_field_count=changed_field_count,
