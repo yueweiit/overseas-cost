@@ -35,6 +35,7 @@ data/*.json
 
 # Local prototype reference kept outside first delivery repo because it has its own Git history
 frontend-demo/
+docs/
 
 # Frappe bench/runtime artifacts should not be committed from app source
 sites/
