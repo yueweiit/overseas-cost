@@ -44,6 +44,7 @@ class OverseasCostWorkbench {
     this.lastRecalculateResult = null;
     this.lastImportedBatchNames = new Set();
     this.isOpeningDingtalk = false;
+    this.isParsingManualDocuments = false;
   }
 
   init() {
@@ -234,7 +235,7 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='preview-categories']", () => this.openCategoryPreviewDialog());
     this.$root.on("click", "[data-action='file-parse']", () => this.openFileParseDialog());
     this.$root.on("click", "[data-action='show-scope']", () => this.showPendingFeature("当前先支持成本总表和国际物流审批附件 Excel 的数据摘取；费用口径不完整时先落基础明细，后续由钉钉/凭证继续补数。"));
-    this.$root.on("click", "[data-action='open-dingtalk']", (event) => this.openDingtalkOrder($(event.currentTarget).attr("data-batch-name")));
+    this.$root.on("click", "[data-action='open-dingtalk']", (event) => this.openApprovalSourceDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='preview-purchase']", (event) => this.openPurchasePreviewDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='oa-attachments']", (event) => this.openOaAttachmentDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='source-center']", (event) => this.openSourceCenterDialog($(event.currentTarget).attr("data-batch-name")));
@@ -1926,35 +1927,39 @@ class OverseasCostWorkbench {
     }
   }
 
-  openSourceCenterDialog(batchName = "") {
+  openApprovalSourceDialog(batchName = "") {
     const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
     if (!batch) {
-      this.showPendingFeature("当前没有可查看资料的批次。");
+      this.showPendingFeature("当前没有可查看审批单来源的批次。");
       return;
     }
     this.activeBatchName = batch.name;
     const batchLabel = batch.batch_no || batch.waybill_no || batch.name;
     const dialog = new frappe.ui.Dialog({
-      title: "相关资料",
+      title: "审批单与 OA 来源",
       fields: [
         {
           fieldtype: "HTML",
-          fieldname: "source_center",
+          fieldname: "approval_source",
           options: `
             <div class="ocw-quick-panel">
               <div class="ocw-quick-context">
                 <span>当前批次</span>
                 <strong>${this.escape(batchLabel)}</strong>
               </div>
-              <button class="ocw-quick-card" data-action="source-purchase">
-                <strong>采购支出单</strong>
-                <span>查看关联采购审批，同步单价、币种、总金额</span>
+              <button class="ocw-quick-card" data-action="approval-open-original">
+                <strong>钉钉原单</strong>
+                <span>打开当前批次对应的钉钉审批表</span>
               </button>
-              <button class="ocw-quick-card" data-action="source-attachments">
+              <button class="ocw-quick-card" data-action="approval-attachments">
                 <strong>发起附件</strong>
                 <span>查看发起表单上传的装箱单、提单、发票等附件</span>
               </button>
-              <button class="ocw-quick-card" data-action="source-logistics-quote">
+              <button class="ocw-quick-card" data-action="approval-purchase">
+                <strong>采购支出单</strong>
+                <span>查看关联采购审批，同步单价、币种、总金额</span>
+              </button>
+              <button class="ocw-quick-card" data-action="approval-logistics-quote">
                 <strong>物流报价</strong>
                 <span>查看 OA 填写的报价候选，确认后才计入物流成本</span>
               </button>
@@ -1968,19 +1973,527 @@ class OverseasCostWorkbench {
     dialog.show();
     dialog.$wrapper.addClass("ocw-quick-modal");
     dialog.$wrapper
-      .off("click.ocwSourceCenter")
-      .on("click.ocwSourceCenter", "[data-action='source-purchase']", () => {
-        dialog.hide();
-        this.openPurchasePreviewDialog(batch.name);
+      .off("click.ocwApprovalSource")
+      .on("click.ocwApprovalSource", "[data-action='approval-open-original']", () => {
+        this.openDingtalkOrder(batch.name);
       })
-      .on("click.ocwSourceCenter", "[data-action='source-attachments']", () => {
+      .on("click.ocwApprovalSource", "[data-action='approval-attachments']", () => {
         dialog.hide();
         this.openOaAttachmentDialog(batch.name);
       })
-      .on("click.ocwSourceCenter", "[data-action='source-logistics-quote']", () => {
+      .on("click.ocwApprovalSource", "[data-action='approval-purchase']", () => {
+        dialog.hide();
+        this.openPurchasePreviewDialog(batch.name);
+      })
+      .on("click.ocwApprovalSource", "[data-action='approval-logistics-quote']", () => {
         dialog.hide();
         this.openLogisticsQuoteDialog(batch.name);
       });
+  }
+
+  openSourceCenterDialog(batchName = "") {
+    const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
+    if (!batch) {
+      this.showPendingFeature("当前没有可查看资料的批次。");
+      return;
+    }
+    this.activeBatchName = batch.name;
+    const logisticsType = this.detectManualDocumentLogisticsType(batch);
+    const dialog = new frappe.ui.Dialog({
+      title: "资料上传与补齐",
+      size: "large",
+      fields: [
+        {
+          fieldtype: "HTML",
+          fieldname: "manual_documents",
+          options: `<div data-area="manual-documents">${this.renderManualDocumentPanel(batch, logisticsType, [])}</div>`,
+        },
+      ],
+      primary_action_label: "关闭",
+      primary_action: () => dialog.hide(),
+    });
+    dialog.show();
+    dialog.$wrapper.addClass("ocw-purchase-modal ocw-manual-document-modal");
+    this.addManualDocumentBatchParseButton(batch, dialog);
+    dialog.$wrapper
+      .off("click.ocwManualDocuments")
+      .on("click.ocwManualDocuments", "[data-action='manual-doc-logistics']", (event) => {
+        const nextType = $(event.currentTarget).attr("data-logistics-type");
+        this.loadManualDocumentAttachments(batch, dialog, nextType).catch((error) => this.showError(error));
+      })
+      .on("click.ocwManualDocuments", "[data-action='upload-manual-document']", (event) => {
+        const $button = $(event.currentTarget);
+        const slot = {
+          code: $button.attr("data-slot-code"),
+          label: $button.attr("data-slot-label"),
+          attachmentType: $button.attr("data-attachment-type"),
+          required: $button.attr("data-required") === "1",
+        };
+        const activeType = $button.attr("data-logistics-type");
+        this.openManualDocumentUploader(batch, dialog, activeType, slot);
+      })
+      .on("click.ocwManualDocuments", "[data-action='preview-manual-document']", (event) => {
+        const $button = $(event.currentTarget);
+        this.openOaAttachmentFilePreviewDialog($button.attr("data-file-url"), $button.attr("data-file-name"));
+      })
+      .on("click.ocwManualDocuments", "[data-action='download-manual-document']", (event) => {
+        const $button = $(event.currentTarget);
+        this.downloadFileToLocal($button.attr("data-file-url"), $button.attr("data-file-name"));
+      })
+      .on("click.ocwManualDocuments", "[data-action='delete-manual-document']", (event) => {
+        this.deleteManualDocumentAttachment(
+          batch,
+          dialog,
+          $(event.currentTarget).attr("data-attachment-name"),
+          $(event.currentTarget).attr("data-logistics-type")
+        ).catch((error) => this.showError(error));
+      });
+    this.loadManualDocumentAttachments(batch, dialog, logisticsType).catch((error) => this.showError(error));
+  }
+
+  addManualDocumentBatchParseButton(batch, dialog) {
+    const $footer = dialog.$wrapper.find(".modal-footer");
+    if (!$footer.length || $footer.find("[data-action='manual-doc-batch-parse']").length) return;
+    const $button = $(
+      '<button class="btn btn-secondary btn-sm ocw-manual-batch-parse-btn" type="button" data-action="manual-doc-batch-parse">批量解析</button>'
+    );
+    $button.on("click", () => {
+      this.parseManualDocumentAttachments(batch, dialog, $button).catch((error) => this.showError(error));
+    });
+    const $primary = $footer.find(".btn-primary").last();
+    if ($primary.length) {
+      $button.insertBefore($primary);
+    } else {
+      $footer.append($button);
+    }
+  }
+
+  detectManualDocumentLogisticsType(batch = {}) {
+    const mode = String(batch.transport_mode || "").toUpperCase();
+    if (["AIR", "AIR_FREIGHT"].includes(mode)) return "AIR";
+    if (["EXPRESS", "COURIER", "DOUBLE_CLEAR"].includes(mode)) return "EXPRESS";
+    return "SEA";
+  }
+
+  manualDocumentLogisticsTabs() {
+    return [
+      { value: "SEA", label: "海运" },
+      { value: "AIR", label: "空运" },
+      { value: "EXPRESS", label: "快递" },
+    ];
+  }
+
+  manualDocumentPlans(logisticsType = "SEA") {
+    const plans = {
+      SEA: [
+        { code: "sea_approval_attachment", label: "国际物流审批单附件", required: false, oaSource: true, attachmentType: "Other", purpose: "钉钉审批单会自动读取；缺失时再补传" },
+        { code: "sea_customs_declaration", label: "报关资料", required: true, attachmentType: "Customs Declaration", purpose: "报关单号、海关编码、申报品名、申报数量" },
+        { code: "sea_packing_list", label: "装箱单", required: true, attachmentType: "Packing List", purpose: "物料、数量、重量、体积、箱规" },
+        { code: "sea_commercial_invoice", label: "商业发票", required: true, attachmentType: "Commercial Invoice", purpose: "采购货值、币种、发票金额" },
+        { code: "sea_bill_of_lading", label: "提单/运单", required: true, attachmentType: "Logistics Bill", purpose: "提单号、柜号、船期、承运信息" },
+        { code: "sea_forwarder_bill", label: "货代账单/费用清单", required: true, attachmentType: "Logistics Bill", purpose: "海运费、港杂费、货代服务费、杂费" },
+        { code: "sea_clearance_fee", label: "清关费用资料", required: false, attachmentType: "Other", purpose: "报关费、清关费、预检费等费用依据" },
+        { code: "sea_tax_certificate", label: "完税凭证", required: false, attachmentType: "Tax Certificate", purpose: "正式税费结果，用于和系统预估金额对照" },
+        { code: "sea_other", label: "其他补充资料", required: false, attachmentType: "Other", purpose: "仓储费、滞留罚款、异常说明等补充依据" },
+      ],
+      AIR: [
+        { code: "air_approval_attachment", label: "国际物流审批单附件", required: false, oaSource: true, attachmentType: "Other", purpose: "钉钉审批单会自动读取；缺失时再补传" },
+        { code: "air_waybill", label: "空运运单", required: true, attachmentType: "Logistics Bill", purpose: "主单/分单、航班、重量、承运信息" },
+        { code: "air_packing_list", label: "装箱单", required: true, attachmentType: "Packing List", purpose: "物料、数量、重量、体积、箱规" },
+        { code: "air_commercial_invoice", label: "商业发票", required: true, attachmentType: "Commercial Invoice", purpose: "采购货值、币种、发票金额" },
+        { code: "air_customs_declaration", label: "报关资料", required: true, attachmentType: "Customs Declaration", purpose: "报关单号、海关编码、申报品名" },
+        { code: "air_forwarder_bill", label: "货代账单/费用清单", required: true, attachmentType: "Logistics Bill", purpose: "空运费、燃油附加费、服务费、杂费" },
+        { code: "air_clearance_fee", label: "清关费用资料", required: false, attachmentType: "Other", purpose: "清关费、预检费等费用依据" },
+        { code: "air_tax_certificate", label: "完税凭证", required: false, attachmentType: "Tax Certificate", purpose: "正式税费结果，用于和系统预估金额对照" },
+        { code: "air_other", label: "其他补充资料", required: false, attachmentType: "Other", purpose: "仓储费、异常说明等补充依据" },
+      ],
+      EXPRESS: [
+        { code: "express_approval_attachment", label: "国际物流审批单附件", required: false, oaSource: true, attachmentType: "Other", purpose: "钉钉审批单会自动读取；缺失时再补传" },
+        { code: "express_waybill", label: "快递面单/运单", required: true, attachmentType: "Logistics Bill", purpose: "运单号、重量、收发件信息" },
+        { code: "express_goods_list", label: "货品明细/装箱资料", required: true, attachmentType: "Packing List", purpose: "物料、数量、重量、体积" },
+        { code: "express_commercial_invoice", label: "商业发票", required: true, attachmentType: "Commercial Invoice", purpose: "采购货值、币种、发票金额" },
+        { code: "express_bill", label: "快递账单/费用清单", required: true, attachmentType: "Logistics Bill", purpose: "快递费、双清费用、服务费" },
+        { code: "express_clearance_fee", label: "清关费用资料", required: false, attachmentType: "Other", purpose: "快递清关产生的费用依据" },
+        { code: "express_tax_certificate", label: "完税凭证（如有）", required: false, attachmentType: "Tax Certificate", purpose: "有正规进口清关时用于最终税费核对" },
+        { code: "express_payment_voucher", label: "付款/对账凭证", required: false, attachmentType: "Other", purpose: "已付款金额、付款对象、对账依据" },
+        { code: "express_other", label: "其他补充资料", required: false, attachmentType: "Other", purpose: "异常说明、补充截图、沟通记录等" },
+      ],
+    };
+    return plans[logisticsType] || plans.SEA;
+  }
+
+  renderManualDocumentPanel(batch, logisticsType = "SEA", items = []) {
+    const batchLabel = batch.batch_no || batch.waybill_no || batch.name;
+    const tabs = this.manualDocumentLogisticsTabs()
+      .map(
+        (tab) => `
+          <button class="ocw-manual-doc-tab ${tab.value === logisticsType ? "active" : ""}" type="button" data-action="manual-doc-logistics" data-logistics-type="${this.escape(tab.value)}">
+            ${this.escape(tab.label)}
+          </button>
+        `
+      )
+      .join("");
+    const plan = this.manualDocumentPlans(logisticsType);
+    const bySlot = this.latestManualAttachmentBySlot(items);
+    const requiredTotal = plan.filter((slot) => slot.required).length;
+    const uploadedRequired = plan.filter((slot) => slot.required && bySlot[slot.code]).length;
+    const uploadedTotal = plan.filter((slot) => bySlot[slot.code]).length;
+    const missingRequired = Math.max(requiredTotal - uploadedRequired, 0);
+    return `
+      <div class="ocw-manual-documents" data-logistics-type="${this.escape(logisticsType)}">
+        <div class="ocw-purchase-target ocw-manual-document-target">
+          <span>当前批次</span>
+          <strong>${this.escape(batchLabel)}</strong>
+          <em>这里用于补传 OA 没有带出来的资料原件；钉钉已能拉到的不用重复上传。</em>
+        </div>
+        <div class="ocw-manual-doc-tabs">${tabs}</div>
+        <div class="ocw-manual-doc-summary">
+          <span>已补传 ${this.escape(String(uploadedTotal))} / ${this.escape(String(plan.length))}</span>
+          <span>核心资料 ${this.escape(String(uploadedRequired))} / ${this.escape(String(requiredTotal))}</span>
+          <span class="${missingRequired ? "warning" : "done"}">${missingRequired ? `${this.escape(String(missingRequired))} 项核心资料待确认` : "核心资料已补齐"}</span>
+        </div>
+        <div class="ocw-manual-doc-grid">
+          ${this.renderManualDocumentCards(plan, bySlot, logisticsType)}
+        </div>
+      </div>
+    `;
+  }
+
+  renderManualDocumentCards(plan = [], bySlot = {}, logisticsType = "SEA") {
+    return plan
+      .map((slot) => {
+        const attachment = bySlot[slot.code] || null;
+        const status = this.manualDocumentStatusInfo(slot, attachment);
+        const badge = this.manualDocumentBadgeInfo(slot);
+        const fileName = attachment ? attachment.file_name || attachment.file_url || "--" : "";
+        return `
+          <div class="ocw-manual-doc-card ${attachment ? "uploaded" : ""}">
+            <div class="ocw-manual-doc-card-head">
+              <strong>${this.escape(slot.label)}</strong>
+              <span class="ocw-manual-doc-required ${this.escape(badge.className)}">${this.escape(badge.label)}</span>
+            </div>
+            <div class="ocw-manual-doc-purpose">用于：${this.escape(slot.purpose)}</div>
+            <div class="ocw-manual-doc-status">
+              <span class="ocw-manual-doc-status-badge ${this.escape(status.className)}">${this.escape(status.label)}</span>
+              ${attachment ? `<em title="${this.escape(fileName)}">${this.escape(fileName)}</em>` : `<em>${slot.oaSource ? "优先从钉钉读取" : "缺了再补传"}</em>`}
+            </div>
+            <div class="ocw-manual-doc-actions">
+              <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="upload-manual-document" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}">
+                ${attachment ? "重传" : "上传"}
+              </button>
+              ${
+                attachment && attachment.file_url
+                  ? `
+                    <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="preview-manual-document" data-file-url="${this.escape(attachment.file_url)}" data-file-name="${this.escape(fileName)}">预览</button>
+                    <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="download-manual-document" data-file-url="${this.escape(attachment.file_url)}" data-file-name="${this.escape(fileName)}">下载</button>
+                  `
+                  : ""
+              }
+              ${
+                attachment
+                  ? `<button class="ocw-outline-btn ocw-mini-btn danger" type="button" data-action="delete-manual-document" data-attachment-name="${this.escape(attachment.name)}" data-logistics-type="${this.escape(logisticsType)}">删除</button>`
+                  : ""
+              }
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+  }
+
+  latestManualAttachmentBySlot(items = []) {
+    return items.reduce((map, item) => {
+      const slotCode = item.slot_code || "";
+      if (!slotCode) return map;
+      map[slotCode] = item;
+      return map;
+    }, {});
+  }
+
+  manualDocumentStatusInfo(slot, attachment) {
+    if (attachment) return { label: "已补传", className: "uploaded" };
+    if (slot.oaSource) return { label: "OA可取", className: "oa" };
+    if (slot.required) return { label: "待补传", className: "missing" };
+    return { label: "可选补充", className: "optional" };
+  }
+
+  manualDocumentBadgeInfo(slot) {
+    if (slot.oaSource) return { label: "OA可取", className: "oa" };
+    if (slot.required) return { label: "核心资料", className: "core" };
+    return { label: "补充资料", className: "optional" };
+  }
+
+  async loadManualDocumentAttachments(batch, dialog, logisticsType = "SEA") {
+    const result = await this.call(
+      "overseas_costing.api.import_api.list_manual_document_attachments",
+      {
+        batch_name: batch.name,
+        logistics_type: logisticsType,
+        limit: 200,
+      },
+      true
+    );
+    const $target = dialog.$wrapper.find("[data-area='manual-documents']");
+    if (!result || !result.ok) {
+      $target.html(`
+        <div class="ocw-purchase-empty">
+          <strong>资料记录读取失败</strong>
+          <span>${this.escape((result && result.message) || "请稍后重试。")}</span>
+        </div>
+      `);
+      return;
+    }
+    $target.html(this.renderManualDocumentPanel(batch, logisticsType, result.items || []));
+  }
+
+  openManualDocumentUploader(batch, dialog, logisticsType, slot) {
+    if (!slot || !slot.code) {
+      this.showPendingFeature("缺少资料类型，无法上传。");
+      return;
+    }
+    if (!frappe.ui.FileUploader) {
+      this.showPendingFeature("当前页面暂时无法打开文件上传器，请刷新后重试。");
+      return;
+    }
+    new frappe.ui.FileUploader({
+      allow_multiple: false,
+      on_success: (fileDoc) => {
+        const uploaded = Array.isArray(fileDoc) ? fileDoc[0] : fileDoc;
+        this.registerManualDocumentAttachment(batch, dialog, logisticsType, slot, uploaded).catch((error) => this.showError(error));
+      },
+    });
+    [0, 80, 200, 500, 1000, 2000].forEach((delay) => {
+      window.setTimeout(() => this.localizeFrappeFileUploader(slot.label), delay);
+    });
+  }
+
+  localizeFrappeFileUploader(slotLabel = "") {
+    const $modal = $(".modal:visible")
+      .filter((index, element) => {
+        const $element = $(element);
+        const title = $element.find(".modal-title").first().text().trim();
+        return title === "Upload" || title === "上传资料" || $element.find(".file-uploader, .file-upload-area").length > 0;
+      })
+      .last();
+    if (!$modal.length) return;
+
+    $modal.addClass("ocw-file-uploader-zh");
+    this.observeFrappeFileUploader($modal, slotLabel);
+    const title = slotLabel ? `上传资料：${slotLabel}` : "上传资料";
+    $modal.find(".modal-title").first().text(title);
+
+    const replacements = {
+      "Upload": "上传",
+      "Set all private": "全部设为私有",
+      "Drag and drop files here or upload from": "将文件拖到这里，或点击本地文件上传",
+      "My Device": "本地文件",
+      "Library": "文件库",
+      "Link": "链接",
+      "Camera": "摄像头",
+      "Cancel": "取消",
+      "Done": "完成",
+      "Uploading": "上传中",
+      "Upload Complete": "上传完成",
+      "This file is public and can be accessed by anyone, even without logging in. Mark it private to limit access.":
+        "文件已上传。",
+    };
+    $modal
+      .find("*")
+      .addBack()
+      .contents()
+      .filter(function () {
+        return this.nodeType === 3 && String(this.nodeValue || "").trim();
+      })
+      .each(function () {
+        const original = String(this.nodeValue || "");
+        const trimmed = original.trim();
+        const translated = replacements[trimmed];
+        if (!translated) return;
+        this.nodeValue = original.replace(trimmed, translated);
+      });
+    this.simplifyFrappeFileUploader($modal);
+  }
+
+  observeFrappeFileUploader($modal, slotLabel = "") {
+    if (!$modal || !$modal.length || $modal.data("ocwUploaderObserver")) return;
+    if (!window.MutationObserver) return;
+    let timer = null;
+    const observer = new MutationObserver(() => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => this.localizeFrappeFileUploader(slotLabel), 60);
+    });
+    observer.observe($modal.get(0), { childList: true, subtree: true, characterData: true });
+    $modal.data("ocwUploaderObserver", observer);
+    $modal.on("hidden.bs.modal.ocwUploaderObserver", () => {
+      observer.disconnect();
+      window.clearTimeout(timer);
+      $modal.removeData("ocwUploaderObserver");
+    });
+  }
+
+  simplifyFrappeFileUploader($modal) {
+    if (!$modal || !$modal.length) return;
+    const labelsToHide = ["文件库", "链接", "摄像头", "全部设为私有", "Private", "私有", "Public", "公开"];
+    $modal
+      .find("*")
+      .addBack()
+      .contents()
+      .filter(function () {
+        const text = String(this.nodeValue || "").trim();
+        return this.nodeType === 3 && labelsToHide.includes(text);
+      })
+      .each(function () {
+        const label = String(this.nodeValue || "").trim();
+        const $textParent = $(this.parentNode);
+        let $target = $textParent.closest("button, a, [role='button']");
+        if (!$target.length) {
+          let $candidate = $textParent;
+          for (let i = 0; i < 5 && $candidate.length && !$candidate.hasClass("modal"); i += 1) {
+            const compactText = $candidate.text().replace(/\s+/g, "");
+            if (compactText === label) {
+              $target = $candidate;
+            }
+            $candidate = $candidate.parent();
+          }
+        }
+        if (!$target.length) {
+          $target = $textParent;
+        }
+        $target.hide().attr("aria-hidden", "true");
+      });
+    this.hideFrappeFilePrivacyControls($modal);
+  }
+
+  hideFrappeFilePrivacyControls($modal) {
+    const privacyTexts = ["Private", "私有", "Public", "公开"];
+    $modal
+      .find("*")
+      .addBack()
+      .contents()
+      .filter(function () {
+        const text = String(this.nodeValue || "").trim();
+        return this.nodeType === 3 && privacyTexts.includes(text);
+      })
+      .each(function () {
+        const $textParent = $(this.parentNode);
+        const $target = $textParent.closest("label, .checkbox, .form-check, .control-input-wrapper, .file-privacy, .file-private");
+        ($target.length ? $target : $textParent).hide().attr("aria-hidden", "true");
+      });
+
+    const warningPatterns = [
+      "This file is public",
+      "can be accessed by anyone",
+      "Mark it private",
+      "limit access",
+      "文件是公开",
+      "任何人都可以访问",
+      "限制访问",
+    ];
+    $modal
+      .find("*")
+      .addBack()
+      .contents()
+      .filter(function () {
+        const text = String(this.nodeValue || "").replace(/\s+/g, " ").trim();
+        return this.nodeType === 3 && text && warningPatterns.some((pattern) => text.includes(pattern));
+      })
+      .each(function () {
+        const $textParent = $(this.parentNode);
+        const $target = $textParent.closest(".alert, .help-box, .file-public-warning, .file-upload-message, .text-warning, .bg-warning");
+        ($target.length ? $target : $textParent).hide().attr("aria-hidden", "true");
+      });
+  }
+
+  async registerManualDocumentAttachment(batch, dialog, logisticsType, slot, fileDoc = {}) {
+    const fileUrl = fileDoc.file_url || fileDoc.file_url_private || "";
+    if (!fileUrl) {
+      this.showPendingFeature("文件上传成功但没有返回文件地址，请重新上传。");
+      return;
+    }
+    const result = await this.call(
+      "overseas_costing.api.import_api.register_manual_document_attachment",
+      {
+        batch_name: batch.name,
+        version_name: batch.current_version || null,
+        logistics_type: logisticsType,
+        slot_code: slot.code,
+        slot_label: slot.label,
+        attachment_type: slot.attachmentType || "Other",
+        file_url: fileUrl,
+        file_name: fileDoc.file_name || fileDoc.name || "",
+        required: slot.required ? 1 : 0,
+      },
+      true
+    );
+    if (!result || !result.ok) {
+      this.showPendingFeature((result && result.message) || "资料登记失败。");
+      return;
+    }
+    frappe.show_alert({ message: result.message || "资料已上传", indicator: "green" });
+    await this.loadManualDocumentAttachments(batch, dialog, logisticsType);
+  }
+
+  async deleteManualDocumentAttachment(batch, dialog, attachmentName = "", logisticsType = "SEA") {
+    if (!attachmentName) {
+      this.showPendingFeature("缺少资料记录，无法删除。");
+      return;
+    }
+    const confirmed = await new Promise((resolve) => {
+      frappe.confirm(
+        "确认删除这条资料记录吗？删除后资料清单会重新显示为待补传。",
+        () => resolve(true),
+        () => resolve(false)
+      );
+    });
+    if (!confirmed) return;
+    const result = await this.call(
+      "overseas_costing.api.import_api.delete_manual_document_attachment",
+      { attachment_name: attachmentName },
+      true
+    );
+    if (!result || !result.ok) {
+      this.showPendingFeature((result && result.message) || "资料删除失败。");
+      return;
+    }
+    frappe.show_alert({ message: result.message || "资料记录已删除", indicator: "green" });
+    await this.loadManualDocumentAttachments(batch, dialog, logisticsType);
+    await this.refreshBatch(batch.name);
+  }
+
+  async parseManualDocumentAttachments(batch, dialog, $button = null) {
+    if (!batch || this.isParsingManualDocuments) return;
+    const logisticsType =
+      dialog.$wrapper.find(".ocw-manual-documents").first().attr("data-logistics-type") ||
+      this.detectManualDocumentLogisticsType(batch);
+    this.isParsingManualDocuments = true;
+    if ($button && $button.length) {
+      $button.prop("disabled", true).text("解析中");
+    }
+    try {
+      const result = await this.call(
+        "overseas_costing.api.import_api.parse_manual_document_attachments",
+        {
+          batch_name: batch.name,
+          logistics_type: logisticsType,
+          limit: 80,
+          skip_parsed: 1,
+          recalculate: 1,
+        },
+        true
+      );
+      if (!result || !result.ok) {
+        this.showOaAttachmentParseResult(result || { ok: false, message: "当前批次补传资料解析失败。" });
+      } else {
+        frappe.show_alert({ message: result.message || "当前补传资料已解析", indicator: "green" });
+      }
+      await this.loadManualDocumentAttachments(batch, dialog, logisticsType);
+      await this.refreshBatch(batch.name);
+    } finally {
+      this.isParsingManualDocuments = false;
+      if ($button && $button.length) {
+        $button.prop("disabled", false).text("批量解析");
+      }
+    }
   }
 
   openLogisticsQuoteDialog(batchName = "") {
@@ -4039,8 +4552,110 @@ class OverseasCostWorkbench {
       `);
       return;
     }
-    const html = this.auditEvents.map((event) => this.renderAuditEvent(event)).join("");
+    const displayEvents = this.buildAuditSummaryEvents(this.auditEvents);
+    const html = displayEvents.map((event) => this.renderAuditEvent(event)).join("");
     this.$root.find("[data-area='audit-list']").html(html);
+  }
+
+  buildAuditSummaryEvents(events = []) {
+    const orderedGroups = [];
+    const groupMap = new Map();
+    events.forEach((event) => {
+      const key = this.auditSummaryKey(event);
+      if (!key) {
+        orderedGroups.push(event);
+        return;
+      }
+      let group = groupMap.get(key);
+      if (!group) {
+        group = {
+          summary: true,
+          time: event.time || "",
+          actor: event.actor || "",
+          type: event.type || "",
+          sourceLabel: this.auditSummarySourceLabel(event),
+          added: 0,
+          deleted: 0,
+          modified: 0,
+          uploaded: 0,
+          actions: new Set(),
+        };
+        groupMap.set(key, group);
+        orderedGroups.push(group);
+      }
+      this.collectAuditSummaryCount(group, event);
+    });
+    return orderedGroups.map((group) => (group.summary ? this.finalizeAuditSummaryEvent(group) : group));
+  }
+
+  auditSummaryKey(event) {
+    if (!event || event.actionType === "RECALCULATE") return "";
+    if (!event.change && !["IMPORT", "EDIT", "BATCH_EDIT", "WRITEBACK", "UPLOAD_ATTACHMENT"].includes(event.actionType || "")) {
+      return "";
+    }
+    const source = this.auditSummarySourceLabel(event);
+    const remarkKey = this.normalizeAuditRemark(event.remark);
+    return [event.type || "", event.actor || "", source, event.actionType || "", remarkKey].join("|");
+  }
+
+  auditSummarySourceLabel(event) {
+    const remark = event.remark || "";
+    const attachmentMatch = remark.match(/附件[:：]\s*([^；;，,\s]+)/);
+    const fileMatch = remark.match(/(?:文件|资料)[:：]\s*([^；;，,\s]+)/);
+    if (/采购支出/.test(remark)) return "采购支出 OA";
+    if (/国际物流|钉钉|审批/.test(remark)) return "钉钉审批单";
+    if (/补传资料|手动上传|人工上传/.test(remark)) return "补传资料";
+    if (fileMatch && fileMatch[1]) return fileMatch[1];
+    if (attachmentMatch && attachmentMatch[1]) return `附件 ${attachmentMatch[1]}`;
+    return event.batchLabel || "当前表单";
+  }
+
+  normalizeAuditRemark(remark = "") {
+    return String(remark || "")
+      .replace(/附件[:：]\s*[^；;，,\s]+/g, "附件")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  collectAuditSummaryCount(group, event) {
+    if (event.change && event.fieldName === "item") {
+      if (event.rawOldValue && !event.rawNewValue) {
+        group.deleted += 1;
+      } else if (!event.rawOldValue && event.rawNewValue) {
+        group.added += 1;
+      } else {
+        group.modified += 1;
+      }
+      return;
+    }
+    if (event.change) {
+      group.modified += 1;
+      return;
+    }
+    if (event.actionType === "UPLOAD_ATTACHMENT") {
+      group.uploaded += 1;
+      return;
+    }
+    if (event.text || event.actionType) {
+      group.actions.add(event.text || this.auditActionLabel(event.actionType));
+    }
+  }
+
+  finalizeAuditSummaryEvent(group) {
+    const pieces = [];
+    if (group.added) pieces.push(`新增 ${group.added} 条物料`);
+    if (group.deleted) pieces.push(`删除 ${group.deleted} 条物料`);
+    if (group.modified) pieces.push(`修改 ${group.modified} 项字段`);
+    if (group.uploaded) pieces.push(`上传 ${group.uploaded} 个附件`);
+    if (!pieces.length && group.actions.size) pieces.push(Array.from(group.actions).join("，"));
+    return {
+      summary: true,
+      time: group.time,
+      actor: group.actor,
+      type: group.type,
+      sourceLabel: group.sourceLabel,
+      text: pieces.length ? `${group.sourceLabel}：${pieces.join("，")}` : `${group.sourceLabel}：已处理`,
+    };
   }
 
   mapAuditRow(row, batch) {
@@ -4058,6 +4673,14 @@ class OverseasCostWorkbench {
       time: row.creation || "",
       actor: row.operator_name || (row.action_type === "EDIT" || row.action_type === "BATCH_EDIT" ? "人工" : "系统"),
       type: row.action_type === "EDIT" || row.action_type === "BATCH_EDIT" ? "manual" : "system",
+      actionType: row.action_type || "",
+      fieldName,
+      rawOldValue: oldValue,
+      rawNewValue: newValue,
+      remark,
+      batchLabel:
+        (batch && (batch.source_title || batch.source_approval_no || batch.batch_no || batch.waybill_no || batch.customs_no || batch.name)) ||
+        "",
       text: hasChangeValue ? "" : remark || action,
       change: hasChangeValue
         ? {
@@ -4120,6 +4743,15 @@ class OverseasCostWorkbench {
 
   renderAuditEvent(event) {
     const actor = `<b class="ocw-actor ${this.escape(event.type)}">${this.escape(event.actor)}</b>`;
+    if (event.summary) {
+      return `
+        <li class="ocw-audit-summary-row">
+          <span class="ocw-audit-time">${this.escape(event.time)}</span>
+          ${actor}
+          <span class="ocw-audit-text">${this.escape(event.text)}</span>
+        </li>
+      `;
+    }
     if (!event.change) {
       return `
         <li>

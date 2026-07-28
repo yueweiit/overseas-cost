@@ -141,6 +141,78 @@ def upload_attachment(batch_name: str, version_name: str | None = None, file_url
 
 
 @frappe.whitelist()
+def list_manual_document_attachments(
+    batch_name: str,
+    logistics_type: str | None = None,
+    limit: int | None = 200,
+) -> dict:
+    """查询人工上传的资料清单附件。"""
+
+    return import_service.list_manual_document_attachments(
+        batch_name=batch_name,
+        logistics_type=logistics_type,
+        limit=limit,
+    )
+
+
+@frappe.whitelist()
+def register_manual_document_attachment(
+    batch_name: str,
+    logistics_type: str,
+    slot_code: str,
+    slot_label: str,
+    attachment_type: str | None = None,
+    file_url: str | None = None,
+    file_name: str | None = None,
+    version_name: str | None = None,
+    remark: str | None = None,
+    required=0,
+) -> dict:
+    """登记人工上传资料，只做归档和回溯，不触发字段解析。"""
+
+    return import_service.register_manual_document_attachment(
+        batch_name=batch_name,
+        logistics_type=logistics_type,
+        slot_code=slot_code,
+        slot_label=slot_label,
+        attachment_type=attachment_type,
+        file_url=file_url,
+        file_name=file_name,
+        version_name=version_name,
+        remark=remark,
+        required=required,
+    )
+
+
+@frappe.whitelist()
+def delete_manual_document_attachment(attachment_name: str) -> dict:
+    """删除人工上传资料记录。"""
+
+    return import_service.delete_manual_document_attachment(attachment_name=attachment_name)
+
+
+@frappe.whitelist()
+def parse_manual_document_attachments(
+    batch_name: str,
+    logistics_type: str | None = None,
+    limit: int | None = 200,
+    skip_parsed=1,
+    recalculate=1,
+) -> dict:
+    """批量解析人工补传资料；仅可识别内容会写入，其他保留原件复核。"""
+
+    skip_parsed_flag = str(skip_parsed or "").strip().lower() in ("1", "true", "yes", "y")
+    recalculate_flag = str(recalculate or "").strip().lower() in ("1", "true", "yes", "y")
+    return import_service.parse_manual_document_attachments(
+        batch_name=batch_name,
+        logistics_type=logistics_type,
+        limit=limit,
+        skip_parsed=skip_parsed_flag,
+        recalculate=recalculate_flag,
+    )
+
+
+@frappe.whitelist()
 def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
     """查询钉钉发起表单附件记录；评论附件本阶段不纳入。"""
 

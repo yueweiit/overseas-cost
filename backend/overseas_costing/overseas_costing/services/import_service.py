@@ -96,6 +96,7 @@ PACKING_NUMERIC_ZERO_FILLABLE_FIELDS = {
     "unit_price",
     "goods_value",
 }
+ATTACHMENT_ROLLBACK_FIELDS = set(PACKING_WRITEBACK_FIELDS).union(ATTACHMENT_PRICE_PROVENANCE_FIELDS)
 PACKING_FIELD_LABELS = {
     "actual_shipped_qty": "实际发货数量",
     "gross_weight_kg": "毛重 KG",
@@ -496,6 +497,376 @@ def upload_attachment(batch_name: str, version_name: str | None = None, file_url
         "file_url": file_url,
         "message": "附件登记骨架已创建，后续接 OCR / AI 解析。",
     }
+
+
+def list_manual_document_attachments(
+    batch_name: str,
+    logistics_type: str | None = None,
+    limit: int | None = 200,
+) -> dict:
+    """返回人工上传的资料记录，用于资料补齐清单展示。"""
+
+    if frappe is None:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "batch_name": batch_name,
+            "items": [],
+            "total": 0,
+            "message": "当前未连接 Frappe，返回空资料记录。",
+        }
+
+    batch_doc_name = _resolve_batch_name(batch_name)
+    if not batch_doc_name:
+        return {
+            "ok": False,
+            "batch_name": batch_name,
+            "items": [],
+            "total": 0,
+            "message": f"未找到批次：{batch_name}",
+        }
+
+    requested_limit = max(1, min(int(limit or 200), 1000))
+    rows = frappe.get_all(
+        "Overseas Cost Attachment",
+        filters={"batch": batch_doc_name, "source_type": "Manual"},
+        fields=[
+            "name",
+            "batch",
+            "version",
+            "source_type",
+            "attachment_type",
+            "source_doc_no",
+            "file_name",
+            "file_url",
+            "parse_status",
+            "parse_result_json",
+            "mapped_result_json",
+            "remark",
+            "creation",
+            "modified",
+        ],
+        order_by="creation asc",
+        limit_page_length=requested_limit,
+    )
+
+    logistics_filter = str(logistics_type or "").strip().upper()
+    items = []
+    for row in rows:
+        parse_result = _json_loads_dict(row.get("parse_result_json"))
+        manual_meta = parse_result.get("manual_document") if isinstance(parse_result.get("manual_document"), dict) else {}
+        row_logistics_type = str(manual_meta.get("logistics_type") or "").strip().upper()
+        if logistics_filter and row_logistics_type and row_logistics_type != logistics_filter:
+            continue
+        items.append(
+            {
+                "name": row.get("name"),
+                "batch": row.get("batch"),
+                "version": row.get("version"),
+                "source_type": row.get("source_type"),
+                "attachment_type": row.get("attachment_type") or "Other",
+                "source_doc_no": row.get("source_doc_no") or "",
+                "file_name": row.get("file_name") or "",
+                "file_url": row.get("file_url") or "",
+                "parse_status": row.get("parse_status") or "",
+                "slot_code": manual_meta.get("slot_code") or "",
+                "slot_label": manual_meta.get("slot_label") or row.get("source_doc_no") or "",
+                "logistics_type": row_logistics_type,
+                "required": bool(manual_meta.get("required")),
+                "remark": row.get("remark") or "",
+                "creation": row.get("creation"),
+                "modified": row.get("modified"),
+            }
+        )
+
+    return {
+        "ok": True,
+        "batch_name": batch_name,
+        "batch_doc_name": batch_doc_name,
+        "logistics_type": logistics_filter,
+        "items": items,
+        "total": len(items),
+        "message": "人工上传资料记录已返回。",
+    }
+
+
+def register_manual_document_attachment(
+    batch_name: str,
+    logistics_type: str,
+    slot_code: str,
+    slot_label: str,
+    attachment_type: str | None = None,
+    file_url: str | None = None,
+    file_name: str | None = None,
+    version_name: str | None = None,
+    remark: str | None = None,
+    required=0,
+) -> dict:
+    """登记人工上传资料，只保留来源，不参与自动解析写入。"""
+
+    resolved_file_url = str(file_url or "").strip()
+    resolved_slot_code = str(slot_code or "").strip()
+    resolved_slot_label = str(slot_label or "").strip() or resolved_slot_code
+    resolved_logistics_type = str(logistics_type or "").strip().upper()
+    if not resolved_file_url:
+        return {"ok": False, "message": "缺少文件地址，请先上传文件。"}
+    if not resolved_slot_code:
+        return {"ok": False, "message": "缺少资料类型，请重新选择上传位置。"}
+    if not resolved_logistics_type:
+        return {"ok": False, "message": "缺少物流类型，请选择海运、空运或快递。"}
+
+    if frappe is None:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "batch_name": batch_name,
+            "file_url": resolved_file_url,
+            "message": "当前未连接 Frappe，仅返回上传登记预览。",
+        }
+
+    batch_doc_name = _resolve_batch_name(batch_name)
+    if not batch_doc_name:
+        return {"ok": False, "batch_name": batch_name, "message": f"未找到批次：{batch_name}"}
+
+    resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
+    resolved_file_name = str(file_name or "").strip() or Path(resolved_file_url.split("?")[0]).name or resolved_slot_label
+    safe_attachment_type = str(attachment_type or "").strip() or "Other"
+    is_required = to_bool(required)
+    manual_meta = {
+        "manual_document": {
+            "slot_code": resolved_slot_code,
+            "slot_label": resolved_slot_label,
+            "logistics_type": resolved_logistics_type,
+            "required": is_required,
+            "registered_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    }
+    doc = frappe.get_doc(
+        {
+            "doctype": "Overseas Cost Attachment",
+            "batch": batch_doc_name,
+            "version": resolved_version_name,
+            "source_type": "Manual",
+            "attachment_type": safe_attachment_type,
+            "source_doc_no": resolved_slot_label,
+            "file_name": resolved_file_name,
+            "file_url": resolved_file_url,
+            "parse_status": "Draft",
+            "parse_result_json": _json_dumps(manual_meta),
+            "remark": str(remark or "").strip(),
+        }
+    ).insert(ignore_permissions=True)
+    _attach_existing_file_to_attachment(resolved_file_url, doc.name)
+    frappe.db.commit()
+    return {
+        "ok": True,
+        "attachment": {
+            "name": doc.name,
+            "batch": batch_doc_name,
+            "version": resolved_version_name,
+            "attachment_type": safe_attachment_type,
+            "slot_code": resolved_slot_code,
+            "slot_label": resolved_slot_label,
+            "logistics_type": resolved_logistics_type,
+            "file_name": resolved_file_name,
+            "file_url": resolved_file_url,
+            "required": is_required,
+        },
+        "message": "资料已上传并登记。",
+    }
+
+
+def delete_manual_document_attachment(attachment_name: str) -> dict:
+    resolved_attachment_name = str(attachment_name or "").strip()
+    if not resolved_attachment_name:
+        return {"ok": False, "message": "缺少资料记录名称。"}
+
+    if frappe is None:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "attachment_name": resolved_attachment_name,
+            "message": "当前未连接 Frappe，仅模拟删除资料记录。",
+        }
+
+    try:
+        attachment_doc = frappe.get_doc("Overseas Cost Attachment", resolved_attachment_name)
+    except Exception as exc:
+        return {"ok": False, "attachment_name": resolved_attachment_name, "message": f"未找到资料记录：{exc}"}
+
+    if getattr(attachment_doc, "source_type", "") != "Manual":
+        return {"ok": False, "attachment_name": resolved_attachment_name, "message": "只能删除人工上传资料记录。"}
+
+    rollback_result = _rollback_manual_document_attachment_parse_effects(attachment_doc)
+    frappe.delete_doc("Overseas Cost Attachment", resolved_attachment_name, ignore_permissions=True)
+    frappe.db.commit()
+    rollback_message = ""
+    if rollback_result.get("rolled_back_field_count") or rollback_result.get("deleted_item_count"):
+        rollback_message = (
+            f" 已撤销 {rollback_result.get('rolled_back_field_count', 0)} 个解析字段，"
+            f"删除 {rollback_result.get('deleted_item_count', 0)} 条由该附件新增的物料。"
+        )
+    elif rollback_result.get("skipped_count"):
+        rollback_message = " 该附件已有解析记录，但相关数据后续被改动过，未自动覆盖回退。"
+    return {
+        "ok": True,
+        "attachment_name": resolved_attachment_name,
+        "rollback": rollback_result,
+        "message": f"资料记录已删除。{rollback_message}".strip(),
+    }
+
+
+def _rollback_manual_document_attachment_parse_effects(attachment_doc) -> dict:
+    """删除人工补传附件前，撤销该附件解析写入的数据。"""
+
+    attachment_name = str(getattr(attachment_doc, "name", "") or "").strip()
+    batch_doc_name = str(getattr(attachment_doc, "batch", "") or "").strip()
+    version_name = str(getattr(attachment_doc, "version", "") or "").strip() or None
+    mapped_result = _json_loads_dict(getattr(attachment_doc, "mapped_result_json", ""))
+    applied_rows = mapped_result.get("applied_rows") if isinstance(mapped_result.get("applied_rows"), list) else []
+    created_rows = mapped_result.get("created_rows") if isinstance(mapped_result.get("created_rows"), list) else []
+
+    result = {
+        "attachment_name": attachment_name,
+        "rolled_back_row_count": 0,
+        "rolled_back_field_count": 0,
+        "deleted_item_count": 0,
+        "skipped_count": 0,
+        "skipped_rows": [],
+    }
+    if frappe is None or not attachment_name:
+        return result
+
+    for row in applied_rows:
+        if not isinstance(row, dict):
+            continue
+        item_name = str(row.get("target_item_name") or "").strip()
+        if not item_name:
+            result["skipped_count"] += 1
+            result["skipped_rows"].append({"reason": "缺少目标物料行"})
+            continue
+        exists = getattr(getattr(frappe, "db", None), "exists", None)
+        if callable(exists) and not exists("Overseas Cost Item", item_name):
+            result["skipped_count"] += 1
+            result["skipped_rows"].append({"item_name": item_name, "reason": "物料行已不存在"})
+            continue
+
+        try:
+            item_doc = frappe.get_doc("Overseas Cost Item", item_name)
+        except Exception as exc:
+            result["skipped_count"] += 1
+            result["skipped_rows"].append({"item_name": item_name, "reason": f"物料行读取失败：{exc}"})
+            continue
+
+        rollback_updates = {}
+        skipped_fields = []
+        for change in row.get("changed_fields") or []:
+            if not isinstance(change, dict):
+                continue
+            field_name = str(change.get("field_name") or "").strip()
+            if field_name not in ATTACHMENT_ROLLBACK_FIELDS:
+                continue
+            current_value = getattr(item_doc, field_name, None)
+            written_value = change.get("new_value")
+            if not _values_equal_for_import(current_value, written_value):
+                skipped_fields.append(field_name)
+                continue
+            rollback_updates[field_name] = change.get("old_value")
+
+        if not rollback_updates:
+            result["skipped_count"] += 1
+            result["skipped_rows"].append(
+                {
+                    "item_name": item_name,
+                    "row_no": row.get("target_row_no"),
+                    "reason": "没有可安全撤销的字段" if not skipped_fields else f"字段已被后续修改：{', '.join(skipped_fields)}",
+                }
+            )
+            continue
+
+        changed_fields = _update_item_fields(
+            item_name=item_name,
+            batch_doc_name=batch_doc_name or str(getattr(item_doc, "batch", "") or ""),
+            version_name=version_name or str(getattr(item_doc, "version", "") or "") or None,
+            row_no=row.get("target_row_no") or getattr(item_doc, "row_no", None),
+            field_updates=rollback_updates,
+            action_remark=f"删除补传资料后撤销附件解析写入；附件：{attachment_name}",
+        )
+        if changed_fields:
+            result["rolled_back_row_count"] += 1
+            result["rolled_back_field_count"] += len(changed_fields)
+
+    for row in created_rows:
+        if not isinstance(row, dict):
+            continue
+        item_name = str(row.get("item_name") or "").strip()
+        if not item_name:
+            result["skipped_count"] += 1
+            result["skipped_rows"].append({"reason": "缺少自动新增物料名称"})
+            continue
+        exists = getattr(getattr(frappe, "db", None), "exists", None)
+        if callable(exists) and not exists("Overseas Cost Item", item_name):
+            continue
+        try:
+            item_doc = frappe.get_doc("Overseas Cost Item", item_name)
+        except Exception as exc:
+            result["skipped_count"] += 1
+            result["skipped_rows"].append({"item_name": item_name, "reason": f"自动新增物料读取失败：{exc}"})
+            continue
+
+        item_source_attachment = str(getattr(item_doc, "source_attachment_id", "") or "").strip()
+        if item_source_attachment and item_source_attachment != attachment_name:
+            result["skipped_count"] += 1
+            result["skipped_rows"].append({"item_name": item_name, "reason": "物料来源附件已变化，未删除"})
+            continue
+
+        row_no = getattr(item_doc, "row_no", None)
+        old_snapshot = {
+            "item_name": item_name,
+            "row_no": row_no,
+            "material_code": getattr(item_doc, "material_code", ""),
+            "product_name": getattr(item_doc, "product_name", ""),
+            "spec_model": getattr(item_doc, "spec_model", ""),
+        }
+        frappe.delete_doc("Overseas Cost Item", item_name, ignore_permissions=True)
+        _create_audit_log(
+            batch_doc_name=batch_doc_name or str(getattr(item_doc, "batch", "") or ""),
+            version_name=version_name or str(getattr(item_doc, "version", "") or "") or None,
+            row_no=row_no,
+            field_name="item",
+            old_value=_json_dumps(old_snapshot),
+            new_value=None,
+            action_remark=f"删除补传资料后移除该附件自动新增物料；附件：{attachment_name}",
+        )
+        result["deleted_item_count"] += 1
+
+    if result["rolled_back_field_count"] or result["deleted_item_count"]:
+        if batch_doc_name:
+            _mark_batch_dirty(batch_doc_name)
+        result["recalculate_result"] = _recalculate_after_writeback(
+            batch_doc_name=batch_doc_name,
+            version_name=version_name,
+            enabled=True,
+        )
+    else:
+        result["recalculate_result"] = {"action": "skipped", "reason": "没有需要撤销的解析写入。"}
+
+    return result
+
+
+def _attach_existing_file_to_attachment(file_url: str, attachment_name: str) -> None:
+    if frappe is None or not file_url or not attachment_name:
+        return
+    try:
+        file_doc_name = frappe.db.get_value("File", {"file_url": file_url}, "name")
+        if not file_doc_name:
+            return
+        file_doc = frappe.get_doc("File", file_doc_name)
+        file_doc.attached_to_doctype = "Overseas Cost Attachment"
+        file_doc.attached_to_name = attachment_name
+        file_doc.save(ignore_permissions=True)
+    except Exception:
+        return
 
 
 def list_oa_form_attachments(batch_name: str, limit: int | None = 50) -> dict:
@@ -2839,6 +3210,9 @@ def _mark_attachment_parsed(attachment_name: str | None, summary: dict) -> bool:
     parse_targets = summary.get("parse_targets")
     if parse_targets:
         snapshot["parse_targets"] = parse_targets
+    for key in ("applied_rows", "created_rows"):
+        if isinstance(summary.get(key), list):
+            snapshot[key] = summary[key]
     try:
         frappe.db.set_value("Overseas Cost Attachment", attachment_name, "parse_status", "Parsed", update_modified=True)
         frappe.db.set_value(
@@ -4040,6 +4414,8 @@ def apply_packing_list_fillable_fields(
                 "unmatched_count": writeback_preview.get("unmatched_count", 0),
                 "ambiguous_count": writeback_preview.get("ambiguous_count", 0),
                 "parse_targets": list(PACKING_WRITEBACK_FIELDS),
+                "applied_rows": applied_rows,
+                "created_rows": created_rows,
             },
         )
         commit = getattr(getattr(frappe, "db", None), "commit", None)
@@ -4726,6 +5102,58 @@ def _query_oa_attachment_rows(batch_name: str | None = None, limit: int | None =
     return resolved_batch_name, rows
 
 
+def _query_manual_document_attachment_rows(batch_name: str | None = None, limit: int | None = 200) -> tuple[str, list[dict]]:
+    resolved_batch_name = _resolve_batch_name(batch_name) if batch_name else ""
+    filters = {"source_type": "Manual"}
+    if batch_name:
+        if not resolved_batch_name:
+            return "", []
+        filters["batch"] = resolved_batch_name
+
+    rows = frappe.get_all(
+        "Overseas Cost Attachment",
+        filters=filters,
+        fields=[
+            "name",
+            "batch",
+            "version",
+            "source_type",
+            "attachment_type",
+            "source_doc_no",
+            "file_name",
+            "file_url",
+            "parse_status",
+            "parse_result_json",
+            "mapped_result_json",
+            "creation",
+        ],
+        order_by="creation asc",
+        limit_page_length=max(1, min(int(limit or 200), 1000)),
+    )
+    return resolved_batch_name, rows
+
+
+def _filter_latest_manual_document_rows(rows: list[dict], logistics_type: str | None = None) -> list[dict]:
+    logistics_filter = str(logistics_type or "").strip().upper()
+    latest_by_slot: dict[str, dict] = {}
+    passthrough_rows: list[dict] = []
+
+    for row in rows:
+        parse_result = _json_loads_dict(row.get("parse_result_json"))
+        manual_meta = parse_result.get("manual_document") if isinstance(parse_result.get("manual_document"), dict) else {}
+        row_logistics_type = str(manual_meta.get("logistics_type") or "").strip().upper()
+        if logistics_filter and row_logistics_type and row_logistics_type != logistics_filter:
+            continue
+
+        slot_code = str(manual_meta.get("slot_code") or "").strip()
+        if slot_code:
+            latest_by_slot[slot_code] = row
+        else:
+            passthrough_rows.append(row)
+
+    return [*latest_by_slot.values(), *passthrough_rows]
+
+
 def _compact_download_result(result: dict) -> dict:
     return {
         "ok": result.get("ok"),
@@ -4851,6 +5279,7 @@ def _build_oa_packing_parse_message(
 
 def _build_oa_source_attachment_parse_message(
     *,
+    source_label: str = "OA 发起附件",
     scanned_count: int,
     downloaded_count: int,
     packing_parsed_count: int,
@@ -4865,7 +5294,7 @@ def _build_oa_source_attachment_parse_message(
     permission_scopes: list[str],
 ) -> str:
     base = (
-        f"已扫描 {scanned_count} 个 OA 发起附件，自动下载 {downloaded_count} 个；"
+        f"已扫描 {scanned_count} 个{source_label}，自动下载 {downloaded_count} 个；"
         f"解析 Excel 装箱单 {packing_parsed_count} 个，识别图片/PDF/Word/TXT {source_recognized_count} 个；"
         f"更新 {updated_count} 行、自动新增 {created_count} 条物料、写入 {changed_field_count} 个字段；"
         f"跳过 {skipped_count} 个，失败 {failed_count} 个。"
@@ -5322,6 +5751,183 @@ def parse_oa_source_attachments(
             permission_blocked_count=permission_blocked_count,
             file_access_blocked_count=file_access_blocked_count,
             permission_scopes=permission_scopes,
+        ),
+    }
+
+
+def parse_manual_document_attachments(
+    *,
+    batch_name: str | None = None,
+    logistics_type: str | None = None,
+    limit: int | None = 200,
+    skip_parsed: bool = True,
+    recalculate: bool = True,
+) -> dict:
+    """批量解析人工补传资料。
+
+    只处理资料补齐弹窗里每个资料格子的最新附件。Excel 装箱单可回填可补字段；
+    图片、PDF、Word、TXT 仅保存识别快照，供人工复核，不直接改写金额字段。
+    """
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，不能批量解析人工补传资料。",
+        }
+
+    resolved_batch_name, all_rows = _query_manual_document_attachment_rows(batch_name=batch_name, limit=limit)
+    if batch_name and not resolved_batch_name:
+        return {
+            "ok": False,
+            "batch_name": batch_name,
+            "message": f"未找到批次：{batch_name}",
+            "items": [],
+        }
+    rows = _filter_latest_manual_document_rows(all_rows, logistics_type=logistics_type)
+
+    processed_items: list[dict] = []
+    parsed_batch_versions: dict[str, str] = {}
+    packing_parsed_count = 0
+    source_recognized_count = 0
+    updated_count = 0
+    created_count = 0
+    changed_field_count = 0
+    skipped_count = 0
+    failed_count = 0
+
+    for row in rows:
+        item = {
+            "attachment_name": row.get("name"),
+            "batch_name": row.get("batch"),
+            "version_name": row.get("version"),
+            "file_name": row.get("file_name") or "",
+            "attachment_type": row.get("attachment_type") or "Other",
+            "parse_status": row.get("parse_status") or "",
+            "file_ext": _attachment_ext_from_row(row),
+        }
+        if skip_parsed and str(row.get("parse_status") or "").strip().lower() == "parsed":
+            item["action"] = "skipped"
+            item["reason"] = "资料已解析"
+            skipped_count += 1
+            processed_items.append(item)
+            continue
+
+        file_url = str(row.get("file_url") or "").strip()
+        if not file_url:
+            item["action"] = "failed"
+            item["reason"] = "资料没有系统文件地址，请重新上传后再批量解析。"
+            failed_count += 1
+            processed_items.append(item)
+            continue
+
+        row_for_parse = {**row, "file_url": file_url}
+        item["file_url"] = file_url
+        item["file_ext"] = _attachment_ext_from_row(row_for_parse)
+
+        if _is_excel_packing_attachment(row_for_parse):
+            try:
+                parse_result = apply_packing_list_fillable_fields(
+                    batch_name=row.get("batch"),
+                    version_name=row.get("version"),
+                    attachment_name=row.get("name"),
+                    file_url=file_url,
+                    recalculate_after_writeback=False,
+                    auto_create_unmatched_items=True,
+                )
+            except Exception as exc:
+                item["action"] = "failed"
+                item["reason"] = f"装箱单解析失败：{exc}"
+                failed_count += 1
+                processed_items.append(item)
+                continue
+
+            item["parse_mode"] = "packing_list"
+            item["parse"] = _compact_packing_apply_result(parse_result)
+            if not parse_result.get("ok"):
+                item["action"] = "failed"
+                item["reason"] = parse_result.get("message") or "装箱单解析失败"
+                failed_count += 1
+                processed_items.append(item)
+                continue
+
+            item["action"] = "parsed"
+            packing_parsed_count += 1
+            row_updated_count = int(parse_result.get("updated_count") or 0)
+            row_created_count = int(parse_result.get("created_count") or 0)
+            row_changed_field_count = int(parse_result.get("changed_field_count") or 0)
+            updated_count += row_updated_count
+            created_count += row_created_count
+            changed_field_count += row_changed_field_count
+            if row_updated_count or row_created_count:
+                parsed_batch_versions[parse_result.get("batch_doc_name") or row.get("batch")] = (
+                    parse_result.get("version_name") or row.get("version") or ""
+                )
+            processed_items.append(item)
+            continue
+
+        if _is_source_document_attachment(row_for_parse):
+            preview_result = preview_oa_source_attachment(str(row.get("name") or ""))
+            item["parse_mode"] = "source_document"
+            item["preview"] = _compact_source_document_preview_result(preview_result)
+            if not preview_result.get("ok"):
+                item["action"] = "failed"
+                item["reason"] = preview_result.get("message") or "资料内容识别失败"
+                failed_count += 1
+                processed_items.append(item)
+                continue
+
+            classification = preview_result.get("classification") if isinstance(preview_result.get("classification"), dict) else {}
+            item["action"] = "parsed"
+            item["recognized_type"] = classification.get("code") or ""
+            item["recognized_type_label"] = classification.get("label") or ""
+            item["reason"] = preview_result.get("message") or "资料内容识别完成"
+            source_recognized_count += 1
+            processed_items.append(item)
+            continue
+
+        item["action"] = "skipped"
+        item["reason"] = f"暂不支持自动识别 {item['file_ext'] or '未知'} 格式资料。"
+        skipped_count += 1
+        processed_items.append(item)
+
+    recalculate_results = _recalculate_batches_after_attachment_parse(parsed_batch_versions) if recalculate else []
+    parsed_count = packing_parsed_count + source_recognized_count
+
+    return {
+        "ok": failed_count == 0,
+        "batch_name": batch_name or "",
+        "resolved_batch_name": resolved_batch_name,
+        "logistics_type": str(logistics_type or "").strip().upper(),
+        "scanned_count": len(rows),
+        "downloaded_count": 0,
+        "parsed_count": parsed_count,
+        "packing_parsed_count": packing_parsed_count,
+        "source_recognized_count": source_recognized_count,
+        "updated_count": updated_count,
+        "created_count": created_count,
+        "changed_field_count": changed_field_count,
+        "skipped_count": skipped_count,
+        "failed_count": failed_count,
+        "permission_blocked_count": 0,
+        "file_access_blocked_count": 0,
+        "permission_scopes": [],
+        "recalculate_results": recalculate_results,
+        "items": processed_items,
+        "message": _build_oa_source_attachment_parse_message(
+            source_label="人工补传资料",
+            scanned_count=len(rows),
+            downloaded_count=0,
+            packing_parsed_count=packing_parsed_count,
+            source_recognized_count=source_recognized_count,
+            updated_count=updated_count,
+            created_count=created_count,
+            changed_field_count=changed_field_count,
+            skipped_count=skipped_count,
+            failed_count=failed_count,
+            permission_blocked_count=0,
+            file_access_blocked_count=0,
+            permission_scopes=[],
         ),
     }
 

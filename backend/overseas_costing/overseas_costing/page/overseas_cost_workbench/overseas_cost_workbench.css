@@ -1302,6 +1302,11 @@
   white-space: nowrap;
 }
 
+.ocw-audit-summary-row .ocw-audit-text {
+  color: var(--ocw-ink);
+  font-weight: 800;
+}
+
 .ocw-audit-change-row {
   align-items: flex-start;
 }
@@ -2873,11 +2878,13 @@
 }
 
 .ocw-purchase-modal .modal-dialog {
-  width: min(1180px, calc(100vw - 56px));
+  margin: 12px auto;
+  max-width: min(1360px, calc(100vw - 24px));
+  width: min(1360px, calc(100vw - 24px));
 }
 
 .ocw-purchase-modal .modal-body {
-  max-height: calc(100vh - 180px);
+  max-height: calc(100vh - 136px);
   overflow: auto;
 }
 
@@ -2902,7 +2909,8 @@
 }
 
 .ocw-quick-modal .modal-dialog {
-  width: min(520px, calc(100vw - 32px));
+  margin: 12px auto;
+  width: min(860px, calc(100vw - 24px));
 }
 
 .ocw-quick-panel {
@@ -3202,6 +3210,8 @@
 .ocw-attachment-file-preview {
   display: grid;
   gap: 10px;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-height: 100%;
 }
 
 .ocw-attachment-file-preview-actions {
@@ -3210,10 +3220,13 @@
 }
 
 .ocw-attachment-file-preview-body {
-  min-height: min(68vh, 620px);
+  align-items: center;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   background: #f8fafc;
+  display: flex;
+  justify-content: center;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -3221,7 +3234,7 @@
   display: block;
   width: auto;
   max-width: 100%;
-  max-height: min(68vh, 620px);
+  max-height: calc(100vh - 230px);
   margin: 0 auto;
   object-fit: contain;
 }
@@ -3229,7 +3242,8 @@
 .ocw-attachment-file-preview-frame {
   display: block;
   width: 100%;
-  height: min(68vh, 620px);
+  height: 100%;
+  min-height: 420px;
   border: 0;
   background: #fff;
 }
@@ -3633,6 +3647,232 @@
   }
 }
 
+.ocw-manual-document-modal .modal-dialog,
+.ocw-attachment-file-preview-modal .modal-dialog {
+  margin: 10px auto;
+  max-width: min(1420px, calc(100vw - 20px));
+  width: min(1420px, calc(100vw - 20px));
+}
+
+.ocw-manual-document-modal .modal-content,
+.ocw-attachment-file-preview-modal .modal-content {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 20px);
+  max-height: calc(100vh - 20px);
+}
+
+.ocw-manual-document-modal .modal-body,
+.ocw-attachment-file-preview-modal .modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding-bottom: 12px;
+  padding-top: 12px;
+}
+
+.ocw-manual-document-modal .modal-footer {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.ocw-manual-batch-parse-btn {
+  min-width: 84px;
+}
+
+.ocw-manual-documents {
+  display: grid;
+  gap: 9px;
+}
+
+.ocw-manual-document-target {
+  align-items: center;
+}
+
+.ocw-manual-doc-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ocw-manual-doc-tab {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid #d9e2ec;
+  border-radius: 6px;
+  color: #334155;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 600;
+  height: 30px;
+  justify-content: center;
+  min-width: 74px;
+  padding: 0 12px;
+}
+
+.ocw-manual-doc-tab.active {
+  background: #e8f1ff;
+  border-color: #7aa7e8;
+  color: #174ea6;
+}
+
+.ocw-manual-doc-summary {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 7px 9px;
+}
+
+.ocw-manual-doc-summary span {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 6px 9px;
+}
+
+.ocw-manual-doc-summary span.done {
+  background: #ecfdf5;
+  border-color: #bbf7d0;
+  color: #047857;
+}
+
+.ocw-manual-doc-summary span.warning {
+  background: #fff7ed;
+  border-color: #fed7aa;
+  color: #c2410c;
+}
+
+.ocw-manual-doc-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.ocw-manual-doc-card {
+  background: #fff;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  min-height: 132px;
+  padding: 10px;
+}
+
+.ocw-manual-doc-card.uploaded {
+  border-color: #9ed0b2;
+}
+
+.ocw-manual-doc-card-head,
+.ocw-manual-doc-status,
+.ocw-manual-doc-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.ocw-manual-doc-card-head {
+  justify-content: space-between;
+}
+
+.ocw-manual-doc-card-head strong {
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.ocw-manual-doc-required,
+.ocw-manual-doc-status-badge {
+  border-radius: 999px;
+  flex: none;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 4px 7px;
+}
+
+.ocw-manual-doc-required.required,
+.ocw-manual-doc-required.core {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.ocw-manual-doc-required.optional {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+.ocw-manual-doc-required.oa {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+.ocw-manual-doc-purpose {
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.35;
+  min-height: 0;
+}
+
+.ocw-manual-doc-status {
+  min-width: 0;
+}
+
+.ocw-manual-doc-status em {
+  color: #64748b;
+  flex: 1;
+  font-size: 12px;
+  font-style: normal;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocw-manual-doc-status-badge.uploaded {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.ocw-manual-doc-status-badge.oa {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+.ocw-manual-doc-status-badge.missing {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.ocw-manual-doc-status-badge.optional {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.ocw-manual-doc-actions {
+  align-self: end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ocw-manual-doc-actions .ocw-mini-btn {
+  min-width: 54px;
+}
+
+.ocw-manual-doc-actions .ocw-mini-btn.danger {
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
 @media (max-width: 760px) {
   .ocw-desk-fullwidth .page-head .container,
   .ocw-desk-fullwidth .page-body {
@@ -3680,6 +3920,14 @@
   .ocw-purchase-order-footer {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .ocw-manual-doc-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ocw-manual-doc-card {
+    min-height: auto;
   }
 
   .ocw-packing-conflict-value {

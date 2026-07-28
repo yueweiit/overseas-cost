@@ -22,6 +22,7 @@ from overseas_costing.services.import_service import (
     apply_linked_purchase_expense_fillable_fields,
     confirm_oa_source_attachment_type,
     confirm_logistics_quote_candidate,
+    delete_manual_document_attachment,
     _coerce_item_numeric_defaults,
     _ensure_supported_excel_path,
     _get_linked_purchase_approvals_from_extra,
@@ -34,6 +35,7 @@ from overseas_costing.services.import_service import (
     list_oa_form_attachments,
     list_tax_certificate_parse_records,
     parse_packing_list_attachment,
+    parse_manual_document_attachments,
     parse_oa_packing_list_attachments,
     parse_oa_source_attachments,
     preview_packing_list_attachment,
@@ -1403,6 +1405,230 @@ def test_parse_oa_source_attachments_downloads_excel_and_recognizes_image(monkey
     assert parse_calls[0]["attachment_name"] == "ATTACH-XLSX"
     assert preview_calls == ["ATTACH-PNG"]
     assert result["items"][1]["recognized_type_label"] == "物流报价"
+
+
+def test_parse_manual_document_attachments_uses_latest_slot_without_dingtalk_download(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    rows = [
+        {
+            "name": "MANUAL-OLD",
+            "batch": "BATCH-DOC",
+            "version": "VER-DOC",
+            "source_type": "Manual",
+            "attachment_type": "Packing List",
+            "source_doc_no": "装箱单",
+            "file_name": "old.xlsx",
+            "file_url": "/private/files/old.xlsx",
+            "parse_status": "Draft",
+            "parse_result_json": json.dumps(
+                {"manual_document": {"slot_code": "sea_packing_list", "logistics_type": "SEA"}},
+                ensure_ascii=False,
+            ),
+            "mapped_result_json": "{}",
+        },
+        {
+            "name": "MANUAL-NEW",
+            "batch": "BATCH-DOC",
+            "version": "VER-DOC",
+            "source_type": "Manual",
+            "attachment_type": "Packing List",
+            "source_doc_no": "装箱单",
+            "file_name": "new.xlsx",
+            "file_url": "/private/files/new.xlsx",
+            "parse_status": "Draft",
+            "parse_result_json": json.dumps(
+                {"manual_document": {"slot_code": "sea_packing_list", "logistics_type": "SEA"}},
+                ensure_ascii=False,
+            ),
+            "mapped_result_json": "{}",
+        },
+        {
+            "name": "MANUAL-PNG",
+            "batch": "BATCH-DOC",
+            "version": "VER-DOC",
+            "source_type": "Manual",
+            "attachment_type": "Other",
+            "source_doc_no": "物流报价",
+            "file_name": "quote.png",
+            "file_url": "/private/files/quote.png",
+            "parse_status": "Draft",
+            "parse_result_json": json.dumps(
+                {"manual_document": {"slot_code": "sea_other", "logistics_type": "SEA"}},
+                ensure_ascii=False,
+            ),
+            "mapped_result_json": "{}",
+        },
+    ]
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            assert doctype == "Overseas Cost Attachment"
+            return rows
+
+    parse_calls: list[dict] = []
+    preview_calls: list[str] = []
+
+    def fake_download(*_args, **_kwargs):
+        raise AssertionError("人工补传资料不应调用钉钉附件下载")
+
+    def fake_apply(**kwargs):
+        parse_calls.append(kwargs)
+        return {
+            "ok": True,
+            "batch_doc_name": kwargs["batch_name"],
+            "version_name": kwargs["version_name"],
+            "updated_count": 1,
+            "created_count": 0,
+            "changed_field_count": 2,
+            "skipped_count": 0,
+            "conflict_row_count": 0,
+            "unmatched_count": 0,
+            "ambiguous_count": 0,
+            "attachment_marked_parsed": True,
+            "message": "已解析",
+        }
+
+    def fake_preview(attachment_name):
+        preview_calls.append(attachment_name)
+        return {
+            "ok": True,
+            "classification": {"code": "logistics_quote", "label": "物流报价"},
+            "extraction_method": "ocr_image",
+            "text_length": 80,
+            "purchase_order": {},
+            "can_write_purchase_price": False,
+            "message": "资料内容识别预览已生成。",
+        }
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_service, "download_oa_form_attachment", fake_download)
+    monkeypatch.setattr(import_service, "apply_packing_list_fillable_fields", fake_apply)
+    monkeypatch.setattr(import_service, "preview_oa_source_attachment", fake_preview)
+
+    result = parse_manual_document_attachments(logistics_type="SEA", recalculate=False)
+
+    assert result["ok"] is True
+    assert result["scanned_count"] == 2
+    assert result["downloaded_count"] == 0
+    assert result["packing_parsed_count"] == 1
+    assert result["source_recognized_count"] == 1
+    assert result["changed_field_count"] == 2
+    assert parse_calls[0]["attachment_name"] == "MANUAL-NEW"
+    assert preview_calls == ["MANUAL-PNG"]
+
+
+def test_delete_manual_document_attachment_rolls_back_parse_snapshot(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class FakeDoc:
+        def __init__(self, doctype=None, name=None, **values):
+            self.doctype = doctype
+            self.name = name
+            for key, value in values.items():
+                setattr(self, key, value)
+
+        def save(self, **_kwargs):
+            return self
+
+        def insert(self, **_kwargs):
+            FakeFrappe.audit_logs.append(self)
+            return self
+
+    attachment = FakeDoc(
+        "Overseas Cost Attachment",
+        "MANUAL-PARSED",
+        source_type="Manual",
+        batch="BATCH-DOC",
+        version="VER-DOC",
+        mapped_result_json=json.dumps(
+            {
+                "applied_rows": [
+                    {
+                        "target_item_name": "ITEM-1",
+                        "target_row_no": 1,
+                        "changed_fields": [
+                            {"field_name": "actual_shipped_qty", "old_value": 0, "new_value": 12},
+                            {"field_name": "gross_weight_kg", "old_value": 0, "new_value": 5.5},
+                        ],
+                    }
+                ],
+                "created_rows": [{"item_name": "ITEM-NEW", "row_no": 2}],
+            },
+            ensure_ascii=False,
+        ),
+    )
+    item_existing = FakeDoc(
+        "Overseas Cost Item",
+        "ITEM-1",
+        batch="BATCH-DOC",
+        version="VER-DOC",
+        row_no=1,
+        actual_shipped_qty=12,
+        gross_weight_kg=5.5,
+        volume_m3=0,
+    )
+    item_created = FakeDoc(
+        "Overseas Cost Item",
+        "ITEM-NEW",
+        batch="BATCH-DOC",
+        version="VER-DOC",
+        row_no=2,
+        material_code="SKU-NEW",
+        product_name="新增物料",
+        spec_model="",
+        source_attachment_id="MANUAL-PARSED",
+    )
+
+    class FakeDB:
+        @staticmethod
+        def exists(doctype, name):
+            return name in FakeFrappe.docs.get(doctype, {})
+
+        @staticmethod
+        def set_value(*_args, **_kwargs):
+            return None
+
+        @staticmethod
+        def commit():
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+        session = type("Session", (), {"user": "tester@example.com"})()
+        docs = {
+            "Overseas Cost Attachment": {"MANUAL-PARSED": attachment},
+            "Overseas Cost Item": {"ITEM-1": item_existing, "ITEM-NEW": item_created},
+        }
+        audit_logs: list[FakeDoc] = []
+
+        @staticmethod
+        def get_doc(doctype, name=None):
+            if isinstance(doctype, dict):
+                return FakeDoc(**doctype)
+            return FakeFrappe.docs[doctype][name]
+
+        @staticmethod
+        def delete_doc(doctype, name, **_kwargs):
+            FakeFrappe.docs.get(doctype, {}).pop(name, None)
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(
+        import_service,
+        "_recalculate_after_writeback",
+        lambda **_kwargs: {"ok": True, "action": "recalculated", "message": "已重算"},
+    )
+
+    result = delete_manual_document_attachment("MANUAL-PARSED")
+
+    assert result["ok"] is True
+    assert item_existing.actual_shipped_qty == 0
+    assert item_existing.gross_weight_kg == 0
+    assert "ITEM-NEW" not in FakeFrappe.docs["Overseas Cost Item"]
+    assert "MANUAL-PARSED" not in FakeFrappe.docs["Overseas Cost Attachment"]
+    assert result["rollback"]["rolled_back_field_count"] == 2
+    assert result["rollback"]["deleted_item_count"] == 1
 
 
 def test_parse_oa_packing_list_attachments_summarizes_dingtalk_permission_error(monkeypatch) -> None:
