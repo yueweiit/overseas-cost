@@ -2123,34 +2123,34 @@ class OverseasCostWorkbench {
   manualDocumentPlans(logisticsType = "SEA") {
     const plans = {
       SEA: [
-        { code: "sea_approval_attachment", label: "国际物流审批单附件", required: false, oaSource: true, attachmentType: "Other", purpose: "钉钉审批单会自动读取；缺失时再补传" },
+        { code: "sea_approval_attachment", label: "国际物流 OA 附件", required: false, oaSource: true, attachmentType: "Other", purpose: "系统优先从钉钉读取；缺失或需复核时再补传" },
         { code: "sea_customs_declaration", label: "报关资料", required: true, attachmentType: "Customs Declaration", purpose: "报关单号、海关编码、申报品名、申报数量" },
         { code: "sea_packing_list", label: "装箱单", required: true, attachmentType: "Packing List", purpose: "物料、数量、重量、体积、箱规" },
-        { code: "sea_commercial_invoice", label: "商业发票", required: true, attachmentType: "Commercial Invoice", purpose: "采购货值、币种、发票金额" },
+        { code: "sea_commercial_invoice", label: "商业发票", required: true, attachmentType: "Commercial Invoice", purpose: "货值、币种、发票金额，用于和采购支出 OA 核对" },
         { code: "sea_bill_of_lading", label: "提单/运单", required: true, attachmentType: "Logistics Bill", purpose: "提单号、柜号、船期、承运信息" },
         { code: "sea_forwarder_bill", label: "货代账单/费用清单", required: true, attachmentType: "Logistics Bill", purpose: "海运费、港杂费、货代服务费、杂费" },
-        { code: "sea_clearance_fee", label: "清关费用资料", required: false, attachmentType: "Other", purpose: "报关费、清关费、预检费等费用依据" },
-        { code: "sea_tax_certificate", label: "完税凭证", required: false, attachmentType: "Tax Certificate", purpose: "正式税费结果，用于和系统预估金额对照" },
+        { code: "sea_clearance_fee", label: "清关费用资料（如有）", required: false, attachmentType: "Other", purpose: "报关费、清关费、预检费等费用依据" },
+        { code: "sea_tax_certificate", label: "完税凭证（最终核对）", required: false, attachmentType: "Tax Certificate", purpose: "正式税费结果，用于和系统预估金额对照" },
         { code: "sea_other", label: "其他补充资料", required: false, attachmentType: "Other", purpose: "仓储费、滞留罚款、异常说明等补充依据" },
       ],
       AIR: [
-        { code: "air_approval_attachment", label: "国际物流审批单附件", required: false, oaSource: true, attachmentType: "Other", purpose: "钉钉审批单会自动读取；缺失时再补传" },
-        { code: "air_waybill", label: "空运运单", required: true, attachmentType: "Logistics Bill", purpose: "主单/分单、航班、重量、承运信息" },
+        { code: "air_approval_attachment", label: "国际物流 OA 附件", required: false, oaSource: true, attachmentType: "Other", purpose: "系统优先从钉钉读取；缺失或需复核时再补传" },
+        { code: "air_waybill", label: "空运运单", required: true, attachmentType: "Logistics Bill", purpose: "主单/分单、航班、实际重量、计费重量" },
         { code: "air_packing_list", label: "装箱单", required: true, attachmentType: "Packing List", purpose: "物料、数量、重量、体积、箱规" },
-        { code: "air_commercial_invoice", label: "商业发票", required: true, attachmentType: "Commercial Invoice", purpose: "采购货值、币种、发票金额" },
+        { code: "air_commercial_invoice", label: "商业发票", required: true, attachmentType: "Commercial Invoice", purpose: "货值、币种、发票金额，用于和采购支出 OA 核对" },
         { code: "air_customs_declaration", label: "报关资料", required: true, attachmentType: "Customs Declaration", purpose: "报关单号、海关编码、申报品名" },
         { code: "air_forwarder_bill", label: "货代账单/费用清单", required: true, attachmentType: "Logistics Bill", purpose: "空运费、燃油附加费、服务费、杂费" },
-        { code: "air_clearance_fee", label: "清关费用资料", required: false, attachmentType: "Other", purpose: "清关费、预检费等费用依据" },
-        { code: "air_tax_certificate", label: "完税凭证", required: false, attachmentType: "Tax Certificate", purpose: "正式税费结果，用于和系统预估金额对照" },
+        { code: "air_clearance_fee", label: "清关费用资料（如有）", required: false, attachmentType: "Other", purpose: "清关费、预检费等费用依据" },
+        { code: "air_tax_certificate", label: "完税凭证（最终核对）", required: false, attachmentType: "Tax Certificate", purpose: "正式税费结果，用于和系统预估金额对照" },
         { code: "air_other", label: "其他补充资料", required: false, attachmentType: "Other", purpose: "仓储费、异常说明等补充依据" },
       ],
       EXPRESS: [
-        { code: "express_approval_attachment", label: "国际物流审批单附件", required: false, oaSource: true, attachmentType: "Other", purpose: "钉钉审批单会自动读取；缺失时再补传" },
+        { code: "express_approval_attachment", label: "国际物流 OA 附件", required: false, oaSource: true, attachmentType: "Other", purpose: "系统优先从钉钉读取；缺失或需复核时再补传" },
         { code: "express_waybill", label: "快递面单/运单", required: true, attachmentType: "Logistics Bill", purpose: "运单号、重量、收发件信息" },
         { code: "express_goods_list", label: "货品明细/装箱资料", required: true, attachmentType: "Packing List", purpose: "物料、数量、重量、体积" },
-        { code: "express_commercial_invoice", label: "商业发票", required: true, attachmentType: "Commercial Invoice", purpose: "采购货值、币种、发票金额" },
+        { code: "express_commercial_invoice", label: "商业发票", required: true, attachmentType: "Commercial Invoice", purpose: "货值、币种、发票金额，用于和采购支出 OA 核对" },
         { code: "express_bill", label: "快递账单/费用清单", required: true, attachmentType: "Logistics Bill", purpose: "快递费、双清费用、服务费" },
-        { code: "express_clearance_fee", label: "清关费用资料", required: false, attachmentType: "Other", purpose: "快递清关产生的费用依据" },
+        { code: "express_clearance_fee", label: "清关费用资料（如有）", required: false, attachmentType: "Other", purpose: "快递或双清产生清关费用时提供" },
         { code: "express_tax_certificate", label: "完税凭证（如有）", required: false, attachmentType: "Tax Certificate", purpose: "有正规进口清关时用于最终税费核对" },
         { code: "express_payment_voucher", label: "付款/对账凭证", required: false, attachmentType: "Other", purpose: "已付款金额、付款对象、对账依据" },
         { code: "express_other", label: "其他补充资料", required: false, attachmentType: "Other", purpose: "异常说明、补充截图、沟通记录等" },
@@ -2181,13 +2181,18 @@ class OverseasCostWorkbench {
         <div class="ocw-purchase-target ocw-manual-document-target">
           <span>当前批次</span>
           <strong>${this.escape(batchLabel)}</strong>
-          <em>这里用于补传 OA 没有带出来的资料原件；钉钉已能拉到的不用重复上传。</em>
+          <em>这里用于补传缺失资料或给财务复核原件；钉钉已能拉到的不用重复上传。</em>
+        </div>
+        <div class="ocw-manual-doc-source-note">
+          <span>基础信息来自国际物流 OA</span>
+          <span>单价/币种来自采购支出 OA</span>
+          <span>税费以报关/完税资料最终核对</span>
         </div>
         <div class="ocw-manual-doc-tabs">${tabs}</div>
         <div class="ocw-manual-doc-summary">
           <span>已补传 ${this.escape(String(uploadedTotal))} / ${this.escape(String(plan.length))}</span>
-          <span>核心资料 ${this.escape(String(uploadedRequired))} / ${this.escape(String(requiredTotal))}</span>
-          <span class="${missingRequired ? "warning" : "done"}">${missingRequired ? `${this.escape(String(missingRequired))} 项核心资料待确认` : "核心资料已补齐"}</span>
+          <span>核算资料 ${this.escape(String(uploadedRequired))} / ${this.escape(String(requiredTotal))}</span>
+          <span class="${missingRequired ? "warning" : "done"}">${missingRequired ? `${this.escape(String(missingRequired))} 项核算资料待确认` : "核算资料已补齐"}</span>
         </div>
         <div class="ocw-manual-doc-grid">
           ${this.renderManualDocumentCards(plan, bySlot, logisticsType)}
@@ -2249,15 +2254,15 @@ class OverseasCostWorkbench {
 
   manualDocumentStatusInfo(slot, attachment) {
     if (attachment) return { label: "已补传", className: "uploaded" };
-    if (slot.oaSource) return { label: "OA可取", className: "oa" };
-    if (slot.required) return { label: "待补传", className: "missing" };
+    if (slot.oaSource) return { label: "OA拉取", className: "oa" };
+    if (slot.required) return { label: "待确认", className: "missing" };
     return { label: "可选补充", className: "optional" };
   }
 
   manualDocumentBadgeInfo(slot) {
-    if (slot.oaSource) return { label: "OA可取", className: "oa" };
-    if (slot.required) return { label: "核心资料", className: "core" };
-    return { label: "补充资料", className: "optional" };
+    if (slot.oaSource) return { label: "OA拉取", className: "oa" };
+    if (slot.required) return { label: "核算资料", className: "core" };
+    return { label: "可选资料", className: "optional" };
   }
 
   async loadManualDocumentAttachments(batch, dialog, logisticsType = "SEA") {

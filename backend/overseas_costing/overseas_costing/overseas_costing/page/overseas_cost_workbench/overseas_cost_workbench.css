@@ -3756,6 +3756,28 @@
   gap: 8px;
 }
 
+.ocw-manual-doc-source-note {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  color: #475569;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 6px;
+  line-height: 1.35;
+  padding: 7px 9px;
+}
+
+.ocw-manual-doc-source-note span {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  padding: 4px 8px;
+}
+
 .ocw-manual-doc-tab {
   align-items: center;
   background: #f8fafc;
@@ -3861,8 +3883,8 @@
 
 .ocw-manual-doc-required.required,
 .ocw-manual-doc-required.core {
-  background: #fee2e2;
-  color: #b91c1c;
+  background: #fef3c7;
+  color: #92400e;
 }
 
 .ocw-manual-doc-required.optional {
