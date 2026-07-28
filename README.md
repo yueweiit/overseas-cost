@@ -1,59 +1,131 @@
-# overseas-cost
+# 海外采购综合成本核算
 
-海外采购综合成本核算模块统一开发目录。
+本仓库用于开发海外采购综合成本核算模块。当前模块落在 Frappe/ERPNext 中，目标是把钉钉 OA、Excel、完税凭证等资料归集到同一批次下，完成采购货值、物流费用、税费、分摊金额和综合单价的核算，并保留可回溯的资料来源。
 
-后续开发路径统一放在这里，不再分散到 `TEST独立版`、`backend`、`方案文档` 等多个并行目录中。
+## 当前定位
 
-## 先看哪份
+一期先做最小可用闭环：
 
-1. `00_目录与文件中文说明.md`
-   整个项目目录的中文名、用途、维护建议总览
+1. 从钉钉国际物流 OA 拉取报关/来源单批次。
+2. 从钉钉采购支出 OA 或稳定附件补入采购单价、币种、采购金额等字段。
+3. 对 Excel、结构化文本等规则清楚的数据做导入或字段补齐。
+4. 对图片、截图、合同、聊天记录、杂乱 PDF 等发起附件，只做归集、预览、下载和人工复核，不自动写入成本字段。
+5. 按采购货值、重量等规则分摊费用，生成综合成本和综合物品单价。
+6. 后续用完税凭证做最终核对，处理多退少补差异，并保留人工处理记录。
 
-2. `docs/00_开发阅读顺序.md`
-   开发时应该先看哪些文档、按什么顺序读
+核心原则：能结构化拉取的自动拉取；不确定的附件保留原件给财务复核；金额类字段不靠不稳定 OCR 自动覆盖。
 
-3. `docs/01_PRD_海外采购综合成本核算模块_海运一期_v1.0.md`
-   当前一期最终需求口径，以这份为准
+## 当前已实现
 
-## 顶层目录说明
+- Frappe 工作台页面：`/app/overseas-cost-workbench`
+- 报关/来源单层级列表，支持展开 SKU 明细。
+- 钉钉审批单跳转，可回到对应钉钉原单。
+- 钉钉国际物流 OA 拉取，已撤销审批单不展示。
+- 发起附件清单、附件下载到本地、附件预览。
+- 采购支出 OA 关联预览和字段写入逻辑。
+- Excel 导入和文件解析预览入口。
+- 采购货值、费用池、分摊金额、综合单价等试算逻辑。
+- 完税凭证解析记录、系统金额对比、人工差异处理记录。
+- 修改记录，支持查看字段从旧值改为新值。
 
-| 英文目录名 | 中文名 | 用途 |
-| --- | --- | --- |
-| `frontend-demo` | 前端原型目录 | 当前整表 Demo 页面、样式、脚本、导入数据 |
-| `backend` | 后端开发目录 | 后续 Frappe / Python / API / 计算服务正式代码 |
-| `docs` | 核心文档目录 | PRD、架构、数据库、计算逻辑、OA 映射表 |
-| `data` | 数据样例目录 | Excel 样例、OA 样例、字段映射中间数据、测试数据 |
-| `archive` | 归档目录 | 废弃页面、旧脚本、旧字段稿、阶段性历史版本 |
+## 明确不做的内容
 
-## 当前约定
+当前不做“杂乱附件全自动解析并入库”。
 
-1. 前端原型以后优先在 `frontend-demo` 下继续调整。
-2. 后端框架正式开始后，统一在 `backend` 下落代码。
-3. 文档以 `docs` 下的核心文档为准。
-4. 数据样例和导入实验文件统一放 `data`。
-5. 废弃内容不要直接删除，优先挪到 `archive`。
+原因是国际物流 OA 下的发起附件格式差异很大，可能包含微信截图、合同、报关资料、报价对比、图片、扫描件等。OCR 即使识别出文字，也无法稳定判断哪些字段应进入成本表。强行写入会污染核算数据，最后仍需人工复核。
 
-## 文件命名建议
+当前处理方式是：系统自动归集资料，财务在系统内预览原件、下载原件、核对字段，确认后再用于成本核算。
 
-1. 代码文件保留英文名，便于框架和工具识别。
-2. 说明文档尽量使用中文名，便于业务和开发共同查看。
-3. 每个目录至少保留 1 份 `README` 或“目录说明”文件。
-4. 新增脚本时建议采用：`动作-对象-用途` 的英文名，例如 `import-oa-logistics.py`。
-5. 新增文档时建议采用：`序号_中文主题_v版本.md`。
+## 目录说明
 
-## 当前重点文档
+| 目录 | 用途 |
+| --- | --- |
+| `backend` | Frappe / Python / API / DocType / 计算服务正式代码 |
+| `frontend-demo` | 早期独立版前端 Demo，主要用于对照交互和布局 |
+| `docs` | PRD、字段口径、架构设计、计算逻辑、OA 映射等文档 |
+| `data` | 测试样例、Excel 样例、导入实验数据 |
+| `archive` | 旧页面、旧脚本、阶段性历史版本归档 |
 
-1. `docs/00_开发阅读顺序.md`
-2. `docs/01_PRD_海外采购综合成本核算模块_海运一期_v1.0.md`
-3. `docs/03_DocType与MariaDB设计_海外采购综合成本核算模块_v1.0.md`
-4. `docs/04_API与重算流程设计_海外采购综合成本核算模块_v1.0.md`
-5. `docs/05_核算系统计算逻辑与字段分析_v1.0.md`
-6. `docs/07_OA国际物流单_系统字段映射表_v1.0.md`
+## 运行环境
 
-## 下一步开发建议
+本地代码路径：
 
-1. 在 `backend` 下初始化 Frappe 自定义 app 结构
-2. 先建 DocType
-3. 再做 Excel / OA 数据导入
-4. 再做成本重算服务
-5. 最后接前端整表页面
+```text
+E:\Yuewei开发\海外采购综合成本核算项目\overseas-cost
+```
+
+WSL 运行副本：
+
+```text
+/home/frappe/frappe-bench/apps/overseas_costing
+```
+
+Frappe bench：
+
+```text
+/home/frappe/frappe-bench
+```
+
+开发站点：
+
+```text
+http://development.localhost:8000/app/overseas-cost-workbench
+```
+
+## 常用操作
+
+前端或后端代码改完后，需要同步到 WSL 的 Frappe app，再构建并清缓存：
+
+```bash
+rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
+  /mnt/e/Yuewei开发/海外采购综合成本核算项目/overseas-cost/backend/overseas_costing/ \
+  /home/frappe/frappe-bench/apps/overseas_costing/
+
+cd /home/frappe/frappe-bench
+bench build --app overseas_costing
+bench --site development.localhost clear-cache
+```
+
+如果 DocType 字段有变化，除 `bench migrate` 外，必要时需要 reload-doc：
+
+```bash
+bench --site development.localhost reload-doc overseas_costing doctype overseas_cost_batch
+bench --site development.localhost reload-doc overseas_costing doctype overseas_cost_item
+bench --site development.localhost migrate
+```
+
+## 验证命令
+
+前端语法检查：
+
+```bash
+node --check backend/overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js
+node --check backend/overseas_costing/overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js
+```
+
+后端相关测试：
+
+```bash
+python -m pytest backend/overseas_costing/overseas_costing/tests/test_dingtalk.py backend/overseas_costing/overseas_costing/tests/test_import_service.py
+```
+
+## 开发注意事项
+
+1. 页面文件有两份，需要同步修改：
+   - `backend/overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js`
+   - `backend/overseas_costing/overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js`
+   - CSS 同理也有两份。
+2. 本地改完不代表 Frappe 页面已更新，必须同步到 WSL 并执行 build/clear-cache。
+3. 提交信息统一使用中文。
+4. 不要把测试假数据当成正式数据长期保留。
+5. 不要把杂乱附件 OCR 结果直接写入金额字段，除非业务确认附件格式稳定且字段口径明确。
+
+## 当前下一步
+
+建议继续围绕 MVP 收口：
+
+1. 稳定钉钉 OA 批次拉取和采购字段写入。
+2. 补齐关键核算字段的来源说明和空值检查。
+3. 保持附件原件可预览、可下载、可回溯。
+4. 完善费用分摊和综合单价展示。
+5. 用真实完税凭证做最终金额对比和人工差异处理。
