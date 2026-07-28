@@ -372,31 +372,7 @@
   line-height: 1.24;
 }
 
-.ocw-sidebar-alert {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  width: 100%;
-  padding: 9px 10px;
-  text-align: left;
-  color: #8a3417;
-  border: 1px solid rgba(255, 107, 53, 0.3);
-  border-radius: 8px;
-  background: linear-gradient(180deg, #fff6f1, var(--ocw-accent-soft));
-}
-
-.ocw-sidebar-alert strong,
-.ocw-scope-panel strong {
-  font-size: 12px;
-}
-
-.ocw-sidebar-alert span,
-.ocw-scope-panel p {
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.ocw-scope-panel,
+.ocw-logistics-panel,
 .ocw-batch-panel {
   padding: 10px;
   border: 1px solid var(--ocw-line);
@@ -404,21 +380,104 @@
   background: rgba(255, 255, 255, 0.76);
 }
 
-.ocw-scope-panel span,
+.ocw-logistics-panel-head span,
 .ocw-batch-panel-head span {
   color: var(--ocw-brand);
   font-size: 11px;
   font-weight: 900;
 }
 
-.ocw-scope-panel strong {
-  display: block;
-  margin-top: 3px;
+.ocw-logistics-panel {
+  display: grid;
+  gap: 8px;
 }
 
-.ocw-scope-panel p {
-  margin: 5px 0 0;
+.ocw-logistics-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ocw-text-btn {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ocw-brand);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.ocw-text-btn:hover,
+.ocw-text-btn.active {
+  border-color: rgba(13, 115, 119, 0.18);
+  background: var(--ocw-brand-soft);
+}
+
+.ocw-logistics-list {
+  display: grid;
+  gap: 6px;
+}
+
+.ocw-logistics-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  width: 100%;
+  padding: 8px;
+  text-align: left;
+  border: 1px solid #d7e2df;
+  border-radius: 7px;
+  background: #fff;
+  color: var(--ocw-ink);
+}
+
+.ocw-logistics-card:hover,
+.ocw-logistics-card.active {
+  border-color: rgba(13, 115, 119, 0.45);
+  background: #f6fbfa;
+}
+
+.ocw-logistics-card.active {
+  box-shadow: inset 3px 0 0 var(--ocw-brand);
+}
+
+.ocw-logistics-card span,
+.ocw-logistics-card strong,
+.ocw-logistics-card em,
+.ocw-logistics-card small {
+  min-width: 0;
+}
+
+.ocw-logistics-card span {
+  display: grid;
+  gap: 2px;
+}
+
+.ocw-logistics-card strong {
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.ocw-logistics-card em,
+.ocw-logistics-card small {
   color: var(--ocw-muted);
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1.2;
+}
+
+.ocw-logistics-card b {
+  align-self: start;
+  color: var(--ocw-brand);
+  font-family: var(--ocw-mono);
+  font-size: 14px;
+}
+
+.ocw-logistics-card small {
+  grid-column: 1 / -1;
 }
 
 .ocw-batch-panel {

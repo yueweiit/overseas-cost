@@ -33,6 +33,7 @@ class OverseasCostWorkbench {
       import_name: "",
       hs_code: "",
       category: "",
+      transport_mode: "",
     };
     this.readonlyCalcFields = new Set(["goods_value_ratio", "freight_alloc_rmb", "freight_alloc_mxn", "total_logistics_mxn"]);
     this.specialOverrideFields = new Set(["weight_ratio", "alloc_price_mxn", "total_cost_rmb", "total_unit_rmb"]);
@@ -104,14 +105,12 @@ class OverseasCostWorkbench {
                 <h1>海外采购综合成本核算</h1>
               </div>
             </div>
-            <button class="ocw-sidebar-alert" data-action="show-scope">
-              <strong>待确认口径</strong>
-              <span>共享费用分摊范围、海运费取数来源待财务确认</span>
-            </button>
-            <section class="ocw-scope-panel">
-              <span>一期范围</span>
-              <strong>先跑数据摘取和试算</strong>
-              <p>海运成本总表、空运/快递审批附件可先入库；费用口径缺失时后续补数。</p>
+            <section class="ocw-logistics-panel">
+              <div class="ocw-logistics-panel-head">
+                <span>运输方式</span>
+                <button class="ocw-text-btn" type="button" data-action="set-transport-filter" data-transport-mode="">全部</button>
+              </div>
+              <div class="ocw-logistics-list" data-area="transport-workbench"></div>
             </section>
           </aside>
 
@@ -221,6 +220,9 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='reload-batches']", () => this.loadBatches());
     this.$root.on("click", "[data-action='apply-filters']", () => this.applyFilters());
     this.$root.on("click", "[data-action='clear-filters']", () => this.clearFilters());
+    this.$root.on("click", "[data-action='set-transport-filter']", (event) =>
+      this.setTransportFilter($(event.currentTarget).attr("data-transport-mode")).catch((error) => this.showError(error))
+    );
     this.$root.on("click", "[data-action='recalculate']", () => this.recalculate());
     this.$root.on("click", "[data-action='open-import']", () => this.openImportDialog());
     this.$root.on("change", "[data-role='data-check-batch-select']", (event) => {
@@ -234,7 +236,6 @@ class OverseasCostWorkbench {
     });
     this.$root.on("click", "[data-action='preview-categories']", () => this.openCategoryPreviewDialog());
     this.$root.on("click", "[data-action='file-parse']", () => this.openFileParseDialog());
-    this.$root.on("click", "[data-action='show-scope']", () => this.showPendingFeature("当前先支持成本总表和国际物流审批附件 Excel 的数据摘取；费用口径不完整时先落基础明细，后续由钉钉/凭证继续补数。"));
     this.$root.on("click", "[data-action='open-dingtalk']", (event) => this.openApprovalSourceDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='preview-purchase']", (event) => this.openPurchasePreviewDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='oa-attachments']", (event) => this.openOaAttachmentDialog($(event.currentTarget).attr("data-batch-name")));
@@ -300,15 +301,17 @@ class OverseasCostWorkbench {
       this.visibleBatches = this.batches.slice();
       this.expandedBatchNames.clear();
       await this.prefetchBatchItems(this.visibleBatches);
+      this.visibleBatches = this.filterBatches();
+      this.renderTransportWorkbench();
       if (this.batches.length) {
-        if (!this.findBatch(this.activeBatchName)) {
-          this.activeBatchName = this.batches[0].name;
+        this.syncActiveSelectionWithVisible();
+        const activeBatch = this.getVisibleActiveBatch();
+        if (activeBatch) {
+          await this.loadAuditLogs(activeBatch.name, activeBatch.current_version);
+        } else {
+          this.auditEvents = [];
+          this.renderAuditList();
         }
-        if (!this.findBatch(this.dataCheckBatchName)) {
-          this.dataCheckBatchName = this.activeBatchName;
-        }
-        const activeBatch = this.getActiveBatch();
-        await this.loadAuditLogs(activeBatch.name, activeBatch.current_version);
         this.renderTable();
         this.updateSearchResult();
         this.updateRecalculateAction();
@@ -375,9 +378,8 @@ class OverseasCostWorkbench {
       this.batchItems = {};
       await this.prefetchBatchItems(this.batches);
       this.visibleBatches = this.filterBatches();
-      if (this.visibleBatches.length && !this.visibleBatches.some((batch) => batch.name === this.dataCheckBatchName)) {
-        this.dataCheckBatchName = this.visibleBatches[0].name;
-      }
+      this.renderTransportWorkbench();
+      this.syncActiveSelectionWithVisible();
       if (this.hasActiveFilters()) {
         this.expandedBatchNames = new Set(this.visibleBatches.map((batch) => batch.name));
       }
@@ -391,6 +393,41 @@ class OverseasCostWorkbench {
   clearFilters() {
     this.resetFilterValues();
     this.applyFilters();
+  }
+
+  async setTransportFilter(mode = "") {
+    this.filters.transport_mode = this.normalizeTransportMode(mode);
+    if (!this.batches.length) {
+      await this.loadBatches();
+      return;
+    }
+    await this.prefetchBatchItems(this.batches);
+    this.visibleBatches = this.filterBatches();
+    this.syncActiveSelectionWithVisible();
+    if (!this.visibleBatches.length) {
+      this.auditEvents = [];
+      this.renderAuditList();
+    } else {
+      const activeBatch = this.getVisibleActiveBatch();
+      if (activeBatch) await this.loadAuditLogs(activeBatch.name, activeBatch.current_version);
+    }
+    this.renderTransportWorkbench();
+    this.renderTable();
+    this.updateSearchResult();
+  }
+
+  syncActiveSelectionWithVisible() {
+    if (!this.visibleBatches.length) {
+      this.activeBatchName = "";
+      this.dataCheckBatchName = "";
+      return;
+    }
+    if (!this.visibleBatches.some((batch) => batch.name === this.activeBatchName)) {
+      this.activeBatchName = this.visibleBatches[0].name;
+    }
+    if (!this.visibleBatches.some((batch) => batch.name === this.dataCheckBatchName)) {
+      this.dataCheckBatchName = this.activeBatchName;
+    }
   }
 
   resetFilterValues() {
@@ -4150,6 +4187,7 @@ class OverseasCostWorkbench {
     this.$root.find("[data-area='table']").html(`<div class="ocw-muted ocw-table-empty">暂无明细</div>`);
     this.$root.find("[data-area='table-title']").text("报关/运单层级列表");
     this.$root.find("[data-area='table-count']").text("");
+    this.renderTransportWorkbench();
     this.renderAuditList();
     this.updateSearchResult();
     this.updateRecalculateAction();
@@ -4157,6 +4195,57 @@ class OverseasCostWorkbench {
 
   renderBatchList() {
     this.renderTable();
+  }
+
+  renderTransportWorkbench() {
+    if (!this.$root) return;
+    const modes = this.transportWorkbenchModes();
+    const stats = this.transportWorkbenchStats();
+    const activeMode = this.normalizeTransportMode(this.filters.transport_mode);
+    const totalCount = (this.batches || []).length;
+    this.$root
+      .find("[data-action='set-transport-filter'][data-transport-mode='']")
+      .toggleClass("active", !activeMode)
+      .text(activeMode ? "全部" : `全部 ${totalCount}`);
+    const html = modes
+      .map((mode) => {
+        const row = stats[mode.value] || { batchCount: 0, itemCount: 0 };
+        const isActive = activeMode === mode.value;
+        return `
+          <button class="ocw-logistics-card ${isActive ? "active" : ""}" type="button" data-action="set-transport-filter" data-transport-mode="${this.escape(mode.value)}">
+            <span>
+              <strong>${this.escape(mode.label)}</strong>
+              <em>${this.escape(mode.tip)}</em>
+            </span>
+            <b>${this.escape(String(row.batchCount))}</b>
+            <small>${this.escape(String(row.itemCount))} 行物料</small>
+          </button>
+        `;
+      })
+      .join("");
+    this.$root.find("[data-area='transport-workbench']").html(html);
+  }
+
+  transportWorkbenchModes() {
+    return [
+      { value: "SEA", label: "海运", tip: "主线核算" },
+      { value: "AIR", label: "空运", tip: "运单与计费重量" },
+      { value: "EXPRESS", label: "快递", tip: "面单与费用补齐" },
+    ];
+  }
+
+  transportWorkbenchStats() {
+    const stats = this.transportWorkbenchModes().reduce((map, mode) => {
+      map[mode.value] = { batchCount: 0, itemCount: 0 };
+      return map;
+    }, {});
+    (this.batches || []).forEach((batch) => {
+      const mode = this.batchTransportMode(batch);
+      if (!stats[mode]) return;
+      stats[mode].batchCount += 1;
+      stats[mode].itemCount += Number(batch.item_count || (this.batchItems[batch.name] || []).length || 0);
+    });
+    return stats;
   }
 
   renderSummary(detail) {
@@ -4188,6 +4277,7 @@ class OverseasCostWorkbench {
   }
 
   renderTable() {
+    this.renderTransportWorkbench();
     this.$root.find("[data-area='table-title']").text("报关/来源单层级列表");
     this.$root.find("[data-area='table-count']").text(`${this.visibleBatches.length} 个报关/来源单块`);
     this.updateHierarchySummary();
@@ -4501,10 +4591,14 @@ class OverseasCostWorkbench {
       $result.removeClass("active empty").text("所有输入框均为可选，可单独或组合查询");
       return;
     }
+    const modeLabel = this.filters.transport_mode ? `${this.transportLabel(this.filters.transport_mode)} · ` : "";
     if (this.visibleBatches.length) {
-      $result.removeClass("empty").addClass("active").text(`筛出 ${this.visibleBatches.length} 个报关/运单块 · 共 ${this.countVisibleItems()} 行 SKU（已自动展开）`);
+      $result
+        .removeClass("empty")
+        .addClass("active")
+        .text(`${modeLabel}筛出 ${this.visibleBatches.length} 个报关/运单块 · 共 ${this.countVisibleItems()} 行 SKU（已自动展开）`);
     } else {
-      $result.removeClass("active").addClass("empty").text("未找到匹配的报关/运单块");
+      $result.removeClass("active").addClass("empty").text(`${modeLabel}未找到匹配的报关/运单块`);
     }
   }
 
@@ -4537,8 +4631,9 @@ class OverseasCostWorkbench {
 
   updateHierarchySummary() {
     const batchCount = this.visibleBatches.length;
+    const modeLabel = this.filters.transport_mode ? `${this.transportLabel(this.filters.transport_mode)} · ` : "";
     const label = this.hasActiveFilters()
-      ? `筛出 ${batchCount} 个报关/运单块 · 点击 + 展开 SKU 明细`
+      ? `${modeLabel}筛出 ${batchCount} 个报关/运单块 · 点击 + 展开 SKU 明细`
       : `${batchCount} 个报关/运单块 · 点击 + 展开 SKU 明细`;
     this.$root.find("[data-area='hierarchy-summary']").text(label);
   }
@@ -5463,9 +5558,11 @@ class OverseasCostWorkbench {
   filterBatches() {
     const customs = this.lower(this.filters.customs_no);
     const waybill = this.lower(this.filters.waybill_no);
+    const transportMode = this.normalizeTransportMode(this.filters.transport_mode);
     const itemFilters = ["material_code", "product_name", "import_name", "hs_code", "category"];
     return this.batches.filter((batch) => {
       const items = this.batchItems[batch.name] || [];
+      if (transportMode && this.batchTransportMode(batch, items) !== transportMode) return false;
       const customsMatched = !customs || this.batchMatchesQuery(batch, items, customs, [
         "customs_no",
         "batch_no",
@@ -5527,6 +5624,11 @@ class OverseasCostWorkbench {
     return fields.some((name) => this.lower(item[name]).includes(needle));
   }
 
+  batchTransportMode(batch, items = null) {
+    const rows = items || this.batchItems[batch.name] || [];
+    return this.normalizeTransportMode(batch.transport_mode || (rows[0] || {}).transport_mode);
+  }
+
   countVisibleItems() {
     return this.visibleBatches.reduce((total, batch) => total + (this.batchItems[batch.name] || []).length, 0);
   }
@@ -5560,16 +5662,31 @@ class OverseasCostWorkbench {
       .join("");
   }
 
+  renderVisibleBatchOptions(selectedBatchName = "") {
+    if (!this.visibleBatches.length) return `<option value="">当前筛选无批次</option>`;
+    return this.visibleBatches
+      .map((batch) => {
+        const selected = batch.name === selectedBatchName ? " selected" : "";
+        return `<option value="${this.escape(batch.name)}"${selected}>${this.escape(this.batchReferenceLabel(batch))}</option>`;
+      })
+      .join("");
+  }
+
   getDataCheckBatch() {
-    return this.findBatch(this.dataCheckBatchName) || this.getVisibleActiveBatch() || this.getActiveBatch();
+    if (!this.visibleBatches.length) return null;
+    return (
+      this.visibleBatches.find((batch) => batch.name === this.dataCheckBatchName) ||
+      this.getVisibleActiveBatch() ||
+      null
+    );
   }
 
   renderDataCheckBatchSelector(batch) {
     const $select = this.$root.find("[data-role='data-check-batch-select']");
     if (!$select.length) return;
     const selectedBatchName = batch ? batch.name : "";
-    $select.html(this.renderBatchOptions(selectedBatchName));
-    $select.prop("disabled", !this.batches.length);
+    $select.html(this.renderVisibleBatchOptions(selectedBatchName));
+    $select.prop("disabled", !this.visibleBatches.length);
   }
 
   getActiveBatch() {
@@ -5599,6 +5716,18 @@ class OverseasCostWorkbench {
     return version.version_code || type || "";
   }
 
+  normalizeTransportMode(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    const upper = text.toUpperCase();
+    if (["SEA", "OCEAN", "OCEAN_FREIGHT", "海运"].includes(upper) || text.includes("海运")) return "SEA";
+    if (["AIR", "AIR_FREIGHT", "空运"].includes(upper) || text.includes("空运")) return "AIR";
+    if (["EXPRESS", "COURIER", "DOUBLE_CLEAR", "快递", "双清"].includes(upper) || text.includes("快递") || text.includes("双清")) {
+      return "EXPRESS";
+    }
+    return upper;
+  }
+
   transportLabel(value) {
     if (!value) return "未指定";
     const labels = {
@@ -5606,7 +5735,7 @@ class OverseasCostWorkbench {
       AIR: "空运",
       EXPRESS: "快递",
     };
-    const key = String(value).trim().toUpperCase();
+    const key = this.normalizeTransportMode(value);
     return labels[key] || String(value);
   }
 
