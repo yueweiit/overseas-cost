@@ -4278,8 +4278,9 @@ class OverseasCostWorkbench {
 
   renderTable() {
     this.renderTransportWorkbench();
-    this.$root.find("[data-area='table-title']").text("报关/来源单层级列表");
-    this.$root.find("[data-area='table-count']").text(`${this.visibleBatches.length} 个报关/来源单块`);
+    const labels = this.parentTableLabels();
+    this.$root.find("[data-area='table-title']").text(labels.title);
+    this.$root.find("[data-area='table-count']").text(`${this.visibleBatches.length} 个${labels.blockName}`);
     this.updateHierarchySummary();
 
     if (!this.visibleBatches.length) {
@@ -4304,12 +4305,12 @@ class OverseasCostWorkbench {
         <thead>
           <tr>
             <th></th>
-            <th>报关/来源单号</th>
-            <th>运单/物流单号</th>
+            <th>${this.escape(labels.sourceNo)}</th>
+            <th>${this.escape(labels.logisticsNo)}</th>
             <th>SKU数</th>
-            <th>中国杂费 RMB</th>
-            <th>折合 MXN</th>
-            <th>中国海运 USD</th>
+            <th>${this.escape(labels.miscRmb)}</th>
+            <th>${this.escape(labels.miscMxn)}</th>
+            <th>${this.escape(labels.mainFreight)}</th>
             <th>采购货值</th>
             <th>操作</th>
           </tr>
@@ -4323,6 +4324,49 @@ class OverseasCostWorkbench {
     this.bindHierarchyScrollbars();
     this.renderDiffPanel();
     this.updateRecalculateAction();
+  }
+
+  parentTableLabels() {
+    const mode = this.normalizeTransportMode(this.filters.transport_mode);
+    const defaults = {
+      title: "报关/来源单层级列表",
+      sourceNo: "报关/来源单号",
+      logisticsNo: "运单/物流单号",
+      miscRmb: "物流杂费 RMB",
+      miscMxn: "折合 MXN",
+      mainFreight: "国际运费/报价",
+      blockName: "报关/来源单块",
+    };
+    const byMode = {
+      SEA: {
+        title: "海运报关/来源单层级列表",
+        sourceNo: "报关/来源单号",
+        logisticsNo: "运单/柜号",
+        miscRmb: "中国杂费 RMB",
+        miscMxn: "折合 MXN",
+        mainFreight: "海运费 USD",
+        blockName: "海运单块",
+      },
+      AIR: {
+        title: "空运来源单层级列表",
+        sourceNo: "来源单号",
+        logisticsNo: "空运运单号",
+        miscRmb: "空运杂费 RMB",
+        miscMxn: "折合 MXN",
+        mainFreight: "空运费/报价",
+        blockName: "空运单块",
+      },
+      EXPRESS: {
+        title: "快递来源单层级列表",
+        sourceNo: "来源单号",
+        logisticsNo: "快递运单号",
+        miscRmb: "快递杂费 RMB",
+        miscMxn: "折合 MXN",
+        mainFreight: "快递/双清费用",
+        blockName: "快递单块",
+      },
+    };
+    return byMode[mode] || defaults;
   }
 
   renderBatchRows(batch) {
