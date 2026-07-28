@@ -794,10 +794,12 @@
 }
 
 .ocw-hierarchy-wrap {
+  position: relative;
   height: calc(100vh - 430px);
   min-height: 350px;
   margin: 0 12px 12px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   border: 1px solid var(--ocw-line);
   border-radius: 0 0 8px 8px;
   background: #fff;
@@ -851,6 +853,8 @@
   display: block;
   font-weight: 900;
   text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .ocw-parent-row small {
@@ -858,6 +862,8 @@
   margin-top: 3px;
   color: var(--ocw-muted);
   font-size: 11px;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .ocw-parent-row .ocw-status {
@@ -912,7 +918,7 @@
 
 .ocw-child-table-shell {
   width: 100%;
-  overflow: auto;
+  overflow: visible;
   border: 1px solid #dce7e5;
   border-radius: 8px;
   background: #fff;
@@ -933,6 +939,9 @@
 }
 
 .ocw-child-table-toolbar {
+  position: sticky;
+  left: 0;
+  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -946,6 +955,46 @@
   color: var(--ocw-muted);
   font-size: 11px;
   font-weight: 900;
+}
+
+.ocw-add-material-sticky {
+  position: sticky;
+  right: 10px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  z-index: 21;
+}
+
+.ocw-child-table-scroll {
+  overflow-x: hidden;
+  overflow-y: visible;
+}
+
+.ocw-hierarchy-x-scroll,
+.ocw-child-table-x-scroll {
+  position: sticky;
+  bottom: 0;
+  left: 0;
+  z-index: 18;
+  height: 18px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-top: 1px solid #dce7e5;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), #fff);
+}
+
+.ocw-hierarchy-x-scroll {
+  z-index: 22;
+}
+
+.ocw-hierarchy-x-scroll.is-hidden,
+.ocw-child-table-x-scroll.is-hidden {
+  display: none;
+}
+
+.ocw-hierarchy-x-scroll-spacer,
+.ocw-child-table-x-scroll-spacer {
+  height: 1px;
 }
 
 .ocw-child-sku-table {
@@ -977,10 +1026,23 @@
 }
 
 .ocw-child-sku-table td {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.ocw-child-sku-table td.is-right {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: center;
+}
+
+.ocw-table-display {
+  display: block;
+  min-width: 0;
 }
 
 .ocw-child-sku-table tr:hover td {
@@ -1085,9 +1147,9 @@
 }
 
 .ocw-col-code { width: 148px; }
-.ocw-col-product { width: 260px; }
-.ocw-col-long { width: 280px; }
-.ocw-col-short { width: 120px; }
+.ocw-col-product { width: 300px; }
+.ocw-col-long { width: 340px; }
+.ocw-col-short { width: 145px; }
 .ocw-col-number { width: 132px; }
 
 .ocw-sticky-head,

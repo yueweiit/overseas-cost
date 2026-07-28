@@ -2176,13 +2176,6 @@ class OverseasCostWorkbench {
       .on("click.ocwOaAttachments", "[data-action='open-generic-link']", (event) => {
         this.openDingtalkLink($(event.currentTarget).attr("data-open-url"));
       })
-      .on("click.ocwOaAttachments", "[data-action='preview-packing-list']", (event) => {
-        this.openPackingListPreviewDialog(
-          batch.name,
-          $(event.currentTarget).attr("data-attachment-name"),
-          $(event.currentTarget).attr("data-file-url")
-        );
-      })
       .on("click.ocwOaAttachments", "[data-action='download-oa-attachment']", (event) => {
         this.downloadOaFormAttachment(
           batch,
@@ -2201,13 +2194,6 @@ class OverseasCostWorkbench {
           $(event.currentTarget).attr("data-file-name"),
           $(event.currentTarget)
         ).catch((error) => this.showError(error));
-      })
-      .on("click.ocwOaAttachments", "[data-action='preview-source-document']", (event) => {
-        this.openOaSourceAttachmentPreview(
-          $(event.currentTarget).attr("data-attachment-name"),
-          batch,
-          dialog
-        );
       });
     this.loadOaFormAttachments(batch, dialog).catch((error) => {
       dialog.$wrapper.find("[data-area='oa-attachment-list']").html(`
@@ -2383,7 +2369,7 @@ class OverseasCostWorkbench {
 
   openOaSourceAttachmentPreview(attachmentName = "", batch = null, parentDialog = null) {
     if (!attachmentName) {
-      this.showPendingFeature("缺少附件记录，无法识别内容。");
+      this.showPendingFeature("缺少附件记录，无法查看内容。");
       return;
     }
     const dialog = new frappe.ui.Dialog({
@@ -2750,7 +2736,7 @@ class OverseasCostWorkbench {
     } finally {
       this.isParsingOaAttachments = false;
       if ($button && $button.length) {
-        $button.prop("disabled", false).text("自动解析附件");
+        $button.prop("disabled", false).text("附件处理");
       }
     }
   }
@@ -2868,20 +2854,10 @@ class OverseasCostWorkbench {
         const typeLabel = row.confirmed_type_label || recognizedTypeLabel || this.attachmentTypeLabel(row.attachment_type);
         const downloadError = row.last_download_error && row.last_download_error.error_type ? row.last_download_error : null;
         const savedFileRef = row.file_url
-          ? row.recognized_type_label
-            ? `已保存，${recognizedTypeLabel ? `已识别为${recognizedTypeLabel}` : "已完成 OCR"}`
-            : "已保存，可直接下载到本地"
+          ? "已保存，可预览或下载原件"
           : downloadError
             ? this.attachmentDownloadErrorLabel(downloadError)
             : "";
-        const isPackingList =
-          row.attachment_type === "Packing List" || (row.parse_targets || []).some((target) => target === "actual_shipped_qty");
-        const canParsePackingList = isPackingList && this.isExcelFileRef(row.file_url || row.file_name);
-        const canPreviewContent =
-          this.isPdfFileRef(row.file_url || row.file_name) ||
-          this.isImageFileRef(row.file_url || row.file_name) ||
-          this.isWordFileRef(row.file_url || row.file_name) ||
-          this.isTextFileRef(row.file_url || row.file_name);
         const actions = [];
         if (row.file_url) {
           actions.push(`
@@ -2901,23 +2877,6 @@ class OverseasCostWorkbench {
               data-file-name="${this.escape(row.file_name || "")}"
             >附件预览</button>
           `);
-          if (canParsePackingList) {
-            actions.push(`
-              <button
-                class="ocw-link-btn"
-                data-action="preview-packing-list"
-                data-attachment-name="${this.escape(row.name || "")}"
-                data-file-url="${this.escape(row.file_url || "")}"
-              >解析预览</button>
-            `);
-          } else if (isPackingList) {
-            actions.push(`<span class="ocw-purchase-source-disabled">PDF解析待接入</span>`);
-          }
-          if (canPreviewContent) {
-            actions.push(`
-              <button class="ocw-link-btn" data-action="preview-source-document" data-attachment-name="${this.escape(row.name || "")}">识别内容</button>
-            `);
-          }
         } else if (row.can_download || row.file_id) {
           actions.push(`
             <button
@@ -2937,11 +2896,6 @@ class OverseasCostWorkbench {
           `);
           if (downloadError) {
             actions.push(`<span class="ocw-purchase-source-disabled">${this.escape(this.attachmentDownloadActionHint(downloadError))}</span>`);
-          }
-          if (canParsePackingList) {
-            actions.push(`<span class="ocw-purchase-source-disabled">下载后可解析预览</span>`);
-          } else if (isPackingList) {
-            actions.push(`<span class="ocw-purchase-source-disabled">PDF解析待接入</span>`);
           }
         } else {
           actions.push(`<span class="ocw-purchase-source-disabled">待下载</span>`);
@@ -3049,10 +3003,10 @@ class OverseasCostWorkbench {
       return "下载失败";
     }
     const normalized = String(status || "").trim().toLowerCase();
-    if (normalized === "parsed" || normalized === "success") return "已解析";
-    if (normalized === "failed" || normalized === "error") return "解析失败";
-    if (normalized === "queued") return row.file_url ? "待解析" : "待下载";
-    if (!normalized) return row.file_url ? "待解析" : "待下载";
+    if (row.file_url) return "已保存";
+    if (normalized === "failed" || normalized === "error") return "待复核";
+    if (normalized === "queued") return "待下载";
+    if (!normalized) return "待下载";
     return status;
   }
 
@@ -3759,7 +3713,11 @@ class OverseasCostWorkbench {
         </thead>
         <tbody>${rows}</tbody>
       </table>
+      <div class="ocw-hierarchy-x-scroll" data-role="hierarchy-x-scroll" aria-label="层级列表横向滚动条">
+        <div class="ocw-hierarchy-x-scroll-spacer" data-role="hierarchy-x-scroll-spacer"></div>
+      </div>
     `);
+    this.bindHierarchyScrollbars();
     this.renderDiffPanel();
     this.updateRecalculateAction();
   }
@@ -3788,12 +3746,12 @@ class OverseasCostWorkbench {
             ${isExpanded ? "-" : "+"}
           </button>
         </td>
-        <td>
+        <td title="${this.escape(this.formatValue(customsNo || ""))}">
           <strong>${this.renderParentValue(customsNo, "customs_no")}</strong>
           <small>${this.escape(sourceRange)}</small>
           <span class="ocw-status ${this.escape(this.statusClass(batch.status))}">${this.escape(statusInfo.label)}</span>
         </td>
-        <td>
+        <td title="${this.escape(this.formatValue(waybillNo || ""))}">
           <strong>${this.renderParentValue(waybillNo, "waybill_no")}</strong>
           <small>${this.escape(this.transportLabel(batch.transport_mode || firstItem.transport_mode))}</small>
         </td>
@@ -3821,9 +3779,14 @@ class OverseasCostWorkbench {
           <div class="ocw-child-table-shell">
             <div class="ocw-child-table-toolbar">
               <span>SKU 成本分摊明细 / 物料详情 · ${items.length} 行</span>
-              <button class="ocw-outline-btn ocw-mini-btn" data-action="add-material" data-batch-name="${this.escape(batch.name)}">+ 添加新物料</button>
+              <button class="ocw-outline-btn ocw-mini-btn ocw-add-material-sticky" data-action="add-material" data-batch-name="${this.escape(batch.name)}">+ 添加新物料</button>
             </div>
-            ${this.renderChildTable(batch)}
+            <div class="ocw-child-table-scroll" data-role="child-table-scroll" data-batch-name="${this.escape(batch.name)}">
+              ${this.renderChildTable(batch)}
+            </div>
+            <div class="ocw-child-table-x-scroll" data-role="child-table-x-scroll" data-batch-name="${this.escape(batch.name)}" aria-label="SKU 明细横向滚动条">
+              <div class="ocw-child-table-x-scroll-spacer" data-role="child-table-x-scroll-spacer"></div>
+            </div>
           </div>
         </td>
       </tr>
@@ -3874,9 +3837,11 @@ class OverseasCostWorkbench {
             const sticky = index < 2 ? `ocw-sticky-cell ocw-sticky-${index}` : "";
             const editable = this.isEditableColumn(column);
             const rawValue = this.normalizeEditorValue(row[column.fieldname]);
+            const displayValue = this.formatCellValue(row[column.fieldname], column);
             return `
               <td
                 class="${sticky} ${this.escape(this.columnAlignClass(column))} ${editable ? "ocw-editable-cell" : "ocw-readonly-cell"}"
+                title="${this.escape(displayValue || "")}"
                 data-editable-cell="${editable ? "1" : "0"}"
                 data-batch-name="${this.escape(batch.name)}"
                 data-item-name="${this.escape(row.name || "")}"
@@ -3941,6 +3906,48 @@ class OverseasCostWorkbench {
 
   renderParentValue(value, fieldname) {
     return this.highlightText(this.formatValue(value || "--"), this.filterTermsForColumn(fieldname));
+  }
+
+  bindHierarchyScrollbars() {
+    const bindPair = ($source, $bar) => {
+      if (!$source.length || !$bar.length) return;
+      const source = $source.get(0);
+      const bar = $bar.get(0);
+      const $spacer = $bar.find("[data-role$='scroll-spacer']");
+      const update = () => {
+        const width = source.scrollWidth || source.clientWidth;
+        $spacer.css("width", `${width}px`);
+        $bar.toggleClass("is-hidden", width <= source.clientWidth + 1);
+        bar.scrollLeft = source.scrollLeft;
+      };
+      let syncing = false;
+      $source.off("scroll.ocwStickyX").on("scroll.ocwStickyX", () => {
+        if (syncing) return;
+        syncing = true;
+        bar.scrollLeft = source.scrollLeft;
+        syncing = false;
+      });
+      $bar.off("scroll.ocwStickyX").on("scroll.ocwStickyX", () => {
+        if (syncing) return;
+        syncing = true;
+        source.scrollLeft = bar.scrollLeft;
+        syncing = false;
+      });
+      update();
+      window.requestAnimationFrame(update);
+      window.setTimeout(update, 80);
+    };
+
+    bindPair(this.$root.find("[data-area='table']"), this.$root.find("[data-role='hierarchy-x-scroll']"));
+    this.$root.find("[data-role='child-table-scroll']").each((_, element) => {
+      const $source = $(element);
+      bindPair($source, $source.next("[data-role='child-table-x-scroll']"));
+    });
+    $(window)
+      .off("resize.ocwHierarchyScrollbars")
+      .on("resize.ocwHierarchyScrollbars", () => {
+        window.requestAnimationFrame(() => this.bindHierarchyScrollbars());
+      });
   }
 
   splitHeaderLabel(label) {
@@ -4257,7 +4264,6 @@ class OverseasCostWorkbench {
     const missingCostDetail = this.describeProblemRows(loadedItems, (row) => !this.isPositive(row.total_unit_rmb));
     const attachmentCount = Number(sourceStatus.oa_attachment_count || batch.source_attachment_count || 0);
     const packingListCount = Number(sourceStatus.packing_list_count || 0);
-    const parsedPackingListCount = Number(sourceStatus.parsed_packing_list_count || 0);
     const taxCertificateCount = Number(sourceStatus.tax_certificate_count || 0);
     const parsedTaxCertificateCount = Number(sourceStatus.parsed_tax_certificate_count || 0);
     const quoteCandidateCount = Number(sourceStatus.logistics_quote_candidate_count || 0);
@@ -4323,14 +4329,14 @@ class OverseasCostWorkbench {
       },
       {
         label: "装箱单数据",
-        status: !itemCount ? "待物料" : !hasLoadedItems ? "待展开" : badActualQty || badWeight ? "待解析" : `${this.formatNumber(grossWeight)} KG`,
+        status: !itemCount ? "待物料" : !hasLoadedItems ? "待展开" : badActualQty || badWeight ? "待补齐" : `${this.formatNumber(grossWeight)} KG`,
         statusClass: !itemCount || badActualQty || badWeight ? "ocw-check-warn" : "ocw-check-ok",
         suggestion: !itemCount
           ? "先生成物料行"
           : !hasLoadedItems
           ? "展开批次后检查实际数量和毛重"
           : packingListCount && (badActualQty || badWeight)
-          ? `已登记装箱单 ${packingListCount} 个，已解析 ${parsedPackingListCount} 个；实际数量缺 ${badActualQty} 行，毛重缺 ${badWeight} 行；${missingPackingDetail}`
+          ? `已登记装箱单 ${packingListCount} 个；实际数量缺 ${badActualQty} 行，毛重缺 ${badWeight} 行；${missingPackingDetail}`
           : badActualQty || badWeight
           ? `实际数量缺 ${badActualQty} 行，毛重缺 ${badWeight} 行；${missingPackingDetail}`
           : "可用于重量分摊，体积字段后续按口径启用",
