@@ -5045,6 +5045,8 @@ class OverseasCostWorkbench {
     const quoteCandidateCount = Number(sourceStatus.logistics_quote_candidate_count || 0);
     const confirmedQuote = sourceStatus.confirmed_logistics_quote || {};
     const sourceStatusNo = sourceStatus.source_no || sourceNo;
+    const transportMode = this.normalizeTransportMode(batch.transport_mode || this.firstLoadedValue(loadedItems, "transport_mode"));
+    const transportCopy = this.dataCheckTransportCopy(transportMode);
 
     return [
       {
@@ -5095,16 +5097,16 @@ class OverseasCostWorkbench {
           ? `${confirmedQuote.carrier || "已确认报价"}已参与整票物流费用分摊`
           : quoteCandidateCount
           ? "在相关资料中确认最终物流报价后再参与试算"
-          : "等待物流 OA 填写明确费用，或补充物流账单/报价资料",
+          : transportCopy.missingFreightSuggestion,
       },
       {
         label: "发起附件",
         status: attachmentCount ? `${attachmentCount} 个` : "待拉取",
         statusClass: attachmentCount ? "ocw-check-ok" : "ocw-check-warn",
-        suggestion: attachmentCount ? "资料里可查看装箱单、提单、发票等原始附件" : "从国际物流 OA 拉取发起人上传附件",
+        suggestion: attachmentCount ? `资料里可查看${transportCopy.attachmentExamples}` : "从国际物流 OA 拉取发起人上传附件",
       },
       {
-        label: "装箱单数据",
+        label: transportCopy.packingLabel,
         status: !itemCount ? "待物料" : !hasLoadedItems ? "待展开" : badActualQty || badWeight ? "待补齐" : `${this.formatNumber(grossWeight)} KG`,
         statusClass: !itemCount || badActualQty || badWeight ? "ocw-check-warn" : "ocw-check-ok",
         suggestion: !itemCount
@@ -5115,17 +5117,17 @@ class OverseasCostWorkbench {
           ? `已登记装箱单 ${packingListCount} 个；实际数量缺 ${badActualQty} 行，毛重缺 ${badWeight} 行；${missingPackingDetail}`
           : badActualQty || badWeight
           ? `实际数量缺 ${badActualQty} 行，毛重缺 ${badWeight} 行；${missingPackingDetail}`
-          : "可用于重量分摊，体积字段后续按口径启用",
+          : transportCopy.packingReadySuggestion,
       },
       {
         label: "税费凭证",
         status: taxCertificateCount ? `${taxCertificateCount} 份` : rowsWithTax ? `${rowsWithTax} 行` : "待凭证",
         statusClass: taxCertificateCount || rowsWithTax ? "ocw-check-ok" : "ocw-check-warn",
         suggestion: taxCertificateCount
-          ? `已保存 ${parsedTaxCertificateCount || taxCertificateCount} 份凭证解析记录，用于最终多退少补对账`
+          ? `已登记 ${taxCertificateCount} 份凭证${parsedTaxCertificateCount ? `，其中 ${parsedTaxCertificateCount} 份已有记录` : ""}，用于最终多退少补对账`
           : rowsWithTax
           ? `系统已有税费 ${this.formatNumber(taxTotal)} MXN，后续仍需凭证对账`
-          : "完税凭证或清关资料解析后再做最终对账",
+          : "完税凭证或清关资料补齐后再做最终对账",
       },
       {
         label: "试算结果",
@@ -5140,6 +5142,38 @@ class OverseasCostWorkbench {
           : `已生成综合成本，国际运费分摊 ${this.formatNumber(freightAlloc)} RMB`,
       },
     ];
+  }
+
+  dataCheckTransportCopy(mode = "") {
+    const normalized = this.normalizeTransportMode(mode);
+    const copies = {
+      SEA: {
+        attachmentExamples: "装箱单、提单、发票等原始附件",
+        packingLabel: "装箱单数据",
+        packingReadySuggestion: "可用于海运重量分摊，体积按后续口径复核",
+        missingFreightSuggestion: "等待物流 OA 填写海运费，或补充货代账单/报价资料",
+      },
+      AIR: {
+        attachmentExamples: "空运运单、装箱单、发票等原始附件",
+        packingLabel: "空运基础数据",
+        packingReadySuggestion: "已具备实际数量和毛重；空运按现有口径以发货数量计算平均成本",
+        missingFreightSuggestion: "等待物流 OA 填写空运费，或补充空运账单/报价资料",
+      },
+      EXPRESS: {
+        attachmentExamples: "快递面单、货品明细、发票/账单等原始附件",
+        packingLabel: "快递基础数据",
+        packingReadySuggestion: "已具备实际数量和重量；后续按快递账单或双清费用核对",
+        missingFreightSuggestion: "等待物流 OA 填写快递/双清费用，或补充快递账单",
+      },
+    };
+    return (
+      copies[normalized] || {
+        attachmentExamples: "装箱单、运单、发票等原始附件",
+        packingLabel: "发货基础数据",
+        packingReadySuggestion: "已具备实际数量和重量，可继续核对费用分摊",
+        missingFreightSuggestion: "等待物流 OA 填写明确费用，或补充物流账单/报价资料",
+      }
+    );
   }
 
   addAudit(actor, type, textOrChange) {

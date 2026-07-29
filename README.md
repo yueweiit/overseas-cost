@@ -1,80 +1,101 @@
 # 海外采购综合成本核算
 
-本仓库用于开发海外采购综合成本核算模块。当前模块落在 Frappe/ERPNext 中，目标是把钉钉 OA、Excel、完税凭证等资料归集到同一批次下，完成采购货值、物流费用、税费、分摊金额和综合单价的核算，并保留可回溯的资料来源。
+海外采购综合成本核算是一个 Frappe / ERPNext 应用模块，用于归集钉钉国际物流 OA、采购支出 OA、Excel、发起附件、补传资料和完税凭证等来源数据，辅助财务核算采购货值、物流费用、税费、分摊金额、综合成本和综合物品单价。
 
-## 当前定位
+## 功能概览
 
-一期先做最小可用闭环：
+- 国际物流 OA 批次拉取和钉钉原单跳转
+- 报关/来源单层级列表和 SKU 明细展开
+- 海运、空运、快递三种运输方式筛选
+- 发起附件查看、预览、下载和补传资料归集
+- 采购支出 OA 关联和采购单价、币种、货值写入
+- Excel 导入和结构化文件解析预览
+- 采购货值、物流费用、税费和综合单价试算
+- 完税凭证金额对比和人工差异处理记录
+- 字段修改记录和数据来源追溯
 
-1. 从钉钉国际物流 OA 拉取报关/来源单批次。
-2. 从钉钉采购支出 OA 或稳定附件补入采购单价、币种、采购金额等字段。
-3. 对 Excel、结构化文本等规则清楚的数据做导入或字段补齐。
-4. 对图片、截图、合同、聊天记录、杂乱 PDF 等发起附件，只做归集、预览、下载和人工复核，不自动写入成本字段。
-5. 按采购货值、重量等规则分摊费用，生成综合成本和综合物品单价。
-6. 后续用完税凭证做最终核对，处理多退少补差异，并保留人工处理记录。
+## 运输方式
 
-核心原则：能结构化拉取的自动拉取；不确定的附件保留原件给财务复核；金额类字段不靠不稳定 OCR 自动覆盖。
+| 运输方式 | 资料重点 | 当前口径 |
+| --- | --- | --- |
+| 海运 | 装箱单、提单/运单、商业发票、报关资料、货代账单、清关资料、完税凭证 | 主核算场景，支持批次、SKU、费用分摊和综合单价试算 |
+| 空运 | 空运运单、装箱单、商业发票、报关资料、空运账单、清关资料、完税凭证 | 已支持独立筛选、资料清单和数据检查，空运费按单票费用进入核算 |
+| 快递 | 快递面单/运单、货品明细、商业发票、快递账单、双清费用、付款/对账凭证、完税凭证（如有） | 已支持独立筛选、资料清单和数据检查，费用以快递账单、双清费用或 OA 明确费用为准 |
 
-## 当前已实现
+快递、双清类单据不一定都有正式完税凭证；没有可靠来源的数据可以留空，由财务查看原件后人工确认或修改。
 
-- Frappe 工作台页面：`/app/overseas-cost-workbench`
-- 报关/来源单层级列表，支持展开 SKU 明细。
-- 钉钉审批单跳转，可回到对应钉钉原单。
-- 钉钉国际物流 OA 拉取，已撤销审批单不展示。
-- 发起附件清单、附件下载到本地、附件预览。
-- 采购支出 OA 关联预览和字段写入逻辑。
-- Excel 导入和文件解析预览入口。
-- 采购货值、费用池、分摊金额、综合单价等试算逻辑。
-- 完税凭证解析记录、系统金额对比、人工差异处理记录。
-- 修改记录，支持查看字段从旧值改为新值。
+## 技术栈
 
-## 明确不做的内容
+- Frappe / ERPNext
+- Python
+- JavaScript / CSS
+- MariaDB
+- 钉钉 OA OpenAPI
+- openpyxl
 
-当前不做“杂乱附件全自动解析并入库”。
+## 目录结构
 
-原因是国际物流 OA 下的发起附件格式差异很大，可能包含微信截图、合同、报关资料、报价对比、图片、扫描件等。OCR 即使识别出文字，也无法稳定判断哪些字段应进入成本表。强行写入会污染核算数据，最后仍需人工复核。
-
-当前处理方式是：系统自动归集资料，财务在系统内预览原件、下载原件、核对字段，确认后再用于成本核算。
-
-## 目录说明
-
-| 目录 | 用途 |
+| 路径 | 说明 |
 | --- | --- |
-| `backend` | Frappe / Python / API / DocType / 计算服务正式代码 |
-| `frontend-demo` | 早期独立版前端 Demo，主要用于对照交互和布局 |
-| `docs` | PRD、字段口径、架构设计、计算逻辑、OA 映射等文档 |
-| `data` | 测试样例、Excel 样例、导入实验数据 |
-| `archive` | 旧页面、旧脚本、阶段性历史版本归档 |
+| `backend/overseas_costing` | Frappe app 正式代码 |
+| `archive` | 历史归档文件 |
+| `data` | 本地测试样例目录，不提交正式数据 |
+| `docs` | 本地开发文档目录，已加入 `.gitignore`，不上传 GitHub |
+| `frontend-demo` | 本地早期前端 Demo，已加入 `.gitignore`，不作为正式交付代码 |
+| `00_目录与文件中文说明.md` | 本地目录说明 |
 
-## 运行环境
+## 安装
 
-本地代码路径：
+本项目不是独立网站，需要安装到已有 Frappe bench 中。
+
+```bash
+cd ~/frappe-bench
+bench get-app https://github.com/yueweiit/overseas-cost.git
+bench --site 你的站点名 install-app overseas_costing
+bench --site 你的站点名 migrate
+bench build --app overseas_costing
+bench --site 你的站点名 clear-cache
+```
+
+安装后访问：
+
+```text
+/app/overseas-cost-workbench
+```
+
+## 配置
+
+钉钉对接配置不提交到仓库。部署环境需要自行准备：
+
+- 钉钉 AppKey
+- 钉钉 AppSecret
+- 国际物流流程 Code
+- 采购支出流程 Code
+- 可下载审批附件的钉钉 UserID
+
+具体配置方式以目标 Frappe 站点环境为准，不要把 `.env`、密钥、真实附件或真实业务数据提交到 GitHub。
+
+## 本地开发
+
+当前本地开发路径：
 
 ```text
 E:\Yuewei开发\海外采购综合成本核算项目\overseas-cost
 ```
 
-WSL 运行副本：
+当前 WSL Frappe app 运行副本：
 
 ```text
 /home/frappe/frappe-bench/apps/overseas_costing
 ```
 
-Frappe bench：
-
-```text
-/home/frappe/frappe-bench
-```
-
-开发站点：
+本地开发站点：
 
 ```text
 http://development.localhost:8000/app/overseas-cost-workbench
 ```
 
-## 常用操作
-
-前端或后端代码改完后，需要同步到 WSL 的 Frappe app，再构建并清缓存：
+本地代码改完后，需要同步到 WSL 的 Frappe app，并重新构建资源：
 
 ```bash
 rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
@@ -86,7 +107,7 @@ bench build --app overseas_costing
 bench --site development.localhost clear-cache
 ```
 
-如果 DocType 字段有变化，除 `bench migrate` 外，必要时需要 reload-doc：
+如果 DocType 字段有变化，执行：
 
 ```bash
 bench --site development.localhost reload-doc overseas_costing doctype overseas_cost_batch
@@ -94,7 +115,7 @@ bench --site development.localhost reload-doc overseas_costing doctype overseas_
 bench --site development.localhost migrate
 ```
 
-## 验证命令
+## 检查命令
 
 前端语法检查：
 
@@ -103,7 +124,7 @@ node --check backend/overseas_costing/overseas_costing/page/overseas_cost_workbe
 node --check backend/overseas_costing/overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js
 ```
 
-后端相关测试：
+后端测试：
 
 ```bash
 python -m pytest backend/overseas_costing/overseas_costing/tests/test_dingtalk.py backend/overseas_costing/overseas_costing/tests/test_import_service.py
@@ -111,21 +132,8 @@ python -m pytest backend/overseas_costing/overseas_costing/tests/test_dingtalk.p
 
 ## 开发注意事项
 
-1. 页面文件有两份，需要同步修改：
-   - `backend/overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js`
-   - `backend/overseas_costing/overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js`
-   - CSS 同理也有两份。
-2. 本地改完不代表 Frappe 页面已更新，必须同步到 WSL 并执行 build/clear-cache。
-3. 提交信息统一使用中文。
-4. 不要把测试假数据当成正式数据长期保留。
-5. 不要把杂乱附件 OCR 结果直接写入金额字段，除非业务确认附件格式稳定且字段口径明确。
-
-## 当前下一步
-
-建议继续围绕 MVP 收口：
-
-1. 稳定钉钉 OA 批次拉取和采购字段写入。
-2. 补齐关键核算字段的来源说明和空值检查。
-3. 保持附件原件可预览、可下载、可回溯。
-4. 完善费用分摊和综合单价展示。
-5. 用真实完税凭证做最终金额对比和人工差异处理。
+- 提交信息统一使用中文。
+- 页面文件目前有两份重复路径，修改工作台 JS / CSS 时需要保持同步。
+- `docs/`、`frontend-demo/`、本地测试数据、`.env` 和密钥不上传 GitHub。
+- 杂乱图片、截图、合同、聊天记录等附件只做归集和人工复核，不直接自动写入金额字段。
+- 测试数据不要作为正式数据长期保留。
