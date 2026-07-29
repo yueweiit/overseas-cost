@@ -5805,7 +5805,7 @@ class OverseasCostWorkbench {
     const upper = text.toUpperCase();
     if (["SEA", "OCEAN", "OCEAN_FREIGHT", "海运"].includes(upper) || text.includes("海运")) return "SEA";
     if (["AIR", "AIR_FREIGHT", "空运"].includes(upper) || text.includes("空运")) return "AIR";
-    if (["EXPRESS", "COURIER", "DOUBLE_CLEAR", "快递", "双清"].includes(upper) || text.includes("快递") || text.includes("双清")) {
+    if (["EXPRESS", "COURIER", "快递"].includes(upper) || text.includes("快递") || upper.includes("CORREO EXPRESS")) {
       return "EXPRESS";
     }
     return upper;

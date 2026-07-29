@@ -1199,6 +1199,97 @@ def test_save_sea_approvals_to_erp_dry_run_returns_trace_preview() -> None:
     assert result["items"][0]["batch_no"] == "HPCU5155607"
 
 
+def test_transport_mode_follows_camino_envio_value() -> None:
+    sea_double_clear = build_batch_values_from_approval(
+        {
+            "source_approval_no": "202601301527000335149",
+            "source_instance_id": "PROC-SEA-DOUBLE-CLEAR",
+            "approval_status": "RUNNING",
+            "transport_mode_raw": "doble despacho en aduana para transporte marítimo海运双清",
+            "logistics_no": "",
+            "form_fields": {},
+        }
+    )
+    express = build_batch_values_from_approval(
+        {
+            "source_approval_no": "202601300932000271071",
+            "source_instance_id": "PROC-EXPRESS",
+            "approval_status": "COMPLETED",
+            "transport_mode_raw": "correo express快递",
+            "logistics_no": "",
+            "form_fields": {},
+        }
+    )
+
+    assert sea_double_clear["transport_mode"] == "SEA"
+    assert express["transport_mode"] == "EXPRESS"
+
+
+def test_existing_oa_batch_refreshes_transport_mode(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    set_values = []
+    audits = []
+
+    class FakeMeta:
+        @staticmethod
+        def has_field(_fieldname):
+            return True
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, filters, fieldname=None, as_dict=False):
+            if doctype == "Overseas Cost Batch" and filters == "BATCH-001" and fieldname == "current_version":
+                return "VER-001"
+            if doctype == "Overseas Cost Batch" and filters == "BATCH-001" and isinstance(fieldname, list):
+                current = {name: "" for name in fieldname}
+                current["transport_mode"] = "SEA"
+                return current if as_dict else current
+            return None
+
+        @staticmethod
+        def set_value(doctype, name, values, update_modified=False):
+            set_values.append(
+                {
+                    "doctype": doctype,
+                    "name": name,
+                    "values": dict(values),
+                    "update_modified": update_modified,
+                }
+            )
+
+    class FakeDoc:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def insert(self, **_kwargs):
+            audits.append(self.payload)
+            return self
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        class session:
+            user = "tester@example.com"
+
+        @staticmethod
+        def get_meta(_doctype):
+            return FakeMeta()
+
+        @staticmethod
+        def get_doc(payload):
+            return FakeDoc(payload)
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+
+    result = import_oa_logistics._update_oa_trace_batch("BATCH-001", {"transport_mode": "EXPRESS"})
+
+    assert result["action"] == "updated"
+    assert result["changed_fields"] == ["transport_mode"]
+    assert set_values[0]["values"] == {"transport_mode": "EXPRESS"}
+    assert audits[0]["field_name"] == "oa_logistics_trace"
+
+
 def test_sync_oa_form_attachments_creates_attachment_records(monkeypatch) -> None:
     from overseas_costing.scripts import import_oa_logistics
 

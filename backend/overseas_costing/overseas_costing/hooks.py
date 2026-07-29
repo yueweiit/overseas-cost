@@ -21,3 +21,9 @@ fixtures = []
 
 doctype_js = {}
 doc_events = {}
+
+scheduler_events = {
+    "daily": [
+        "overseas_costing.scripts.import_oa_logistics.scheduled_pull_logistics_approvals",
+    ],
+}

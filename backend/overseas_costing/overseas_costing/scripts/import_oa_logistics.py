@@ -25,7 +25,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -64,6 +64,16 @@ NEW_DRIVE_FILE_DOWNLOAD_INFO_PATH = "/v1.0/drive/spaces/{space_id}/files/{file_i
 NEW_STORAGE_THUMBNAILS_QUERY_PATH = "/v1.0/storage/spaces/{space_id}/thumbnails/query"
 
 DEFAULT_SEA_KEYWORDS = ("海运", "SEA", "OCEAN", "MARITIMO", "MARÍTIMO")
+TRANSPORT_MODE_KEYWORDS = {
+    "EXPRESS": ("快递", "EXPRESS", "COURIER", "CORREO EXPRESS", "CORREO", "DHL", "FEDEX", "UPS"),
+    "AIR": ("空运", "AIR", "AIR FREIGHT", "CARGA AEREA", "CARGA AÉREA", "AEREA", "AÉREA"),
+    "SEA": DEFAULT_SEA_KEYWORDS + ("OCEAN FREIGHT", "CONTENEDOR", "MARITIMO", "MARÍTIMO"),
+}
+TRANSPORT_MODE_LABELS = {
+    "SEA": "海运",
+    "AIR": "空运",
+    "EXPRESS": "快递",
+}
 HIDDEN_APPROVAL_STATUSES = ("TERMINATED", "CANCELED", "CANCELLED", "REVOKED", "撤销", "已撤销")
 COMPLETED_APPROVAL_STATUSES = ("COMPLETED", "FINISHED", "AGREE", "APPROVED", "已完成", "审批通过", "同意")
 TRANSPORT_FIELD_ALIASES = (
@@ -216,6 +226,56 @@ def resolve_dingtalk_env_file(env_file: str | None = None) -> str:
     return ""
 
 
+def _runtime_config_value(*keys: str, default: str = "") -> str:
+    """读取运行时配置：环境变量优先，其次 Frappe site_config。"""
+
+    for key in keys:
+        value = os.environ.get(key)
+        if _has_value(value):
+            return _clean(value)
+
+    conf = getattr(frappe, "conf", None) if frappe is not None else None
+    if conf:
+        for key in keys:
+            candidates = (key, key.lower())
+            for candidate in candidates:
+                value = conf.get(candidate) if hasattr(conf, "get") else None
+                if _has_value(value):
+                    return _clean(value)
+    return default
+
+
+def _runtime_config_int(*keys: str, default: int = 0) -> int:
+    value = _runtime_config_value(*keys)
+    if not _has_value(value):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _runtime_config_bool(*keys: str, default: bool = False) -> bool:
+    value = _runtime_config_value(*keys)
+    if not _has_value(value):
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "y", "on", "开启", "启用")
+
+
+def _has_dingtalk_pull_credentials() -> bool:
+    if _runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"):
+        return True
+    if _runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key") and _runtime_config_value(
+        "DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret"
+    ):
+        return True
+    return bool(
+        _runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id")
+        and _runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id")
+        and _runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret")
+    )
+
+
 def _preload_env_file_from_argv(argv: list[str]) -> str:
     env_file = _clean(os.environ.get("DINGTALK_ENV_FILE"))
     for index, arg in enumerate(argv):
@@ -324,6 +384,42 @@ def _parse_datetime_ms(value: str, *, end_of_day: bool = False) -> int:
     if end_of_day and parsed.time() == dt_time.min:
         parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999000)
     return int(parsed.timestamp() * 1000)
+
+
+def _normalize_transport_mode(value: Any) -> str:
+    text = _clean(value)
+    if not text:
+        return ""
+    upper = text.upper()
+    if upper in TRANSPORT_MODE_LABELS:
+        return upper
+    normalized = _normalize_key(text).upper()
+    for mode, keywords in TRANSPORT_MODE_KEYWORDS.items():
+        if any(_normalize_key(keyword).upper() in normalized for keyword in keywords):
+            return mode
+    return upper if upper in TRANSPORT_MODE_LABELS else ""
+
+
+def _parse_transport_modes(value: Any, *, default: tuple[str, ...] = ("SEA",)) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        raw_values = re.split(r"[,，/、\s]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    else:
+        raw_values = [value]
+    modes: list[str] = []
+    for raw_value in raw_values:
+        text = _clean(raw_value)
+        if not text:
+            continue
+        if text.upper() in ("ALL", "*", "全部"):
+            return tuple(TRANSPORT_MODE_LABELS)
+        mode = _normalize_transport_mode(text)
+        if mode and mode not in modes:
+            modes.append(mode)
+    return tuple(modes) if modes else default
 
 
 def _iter_time_chunks(start_time_ms: int, end_time_ms: int, chunk_days: int = 30) -> list[tuple[int, int]]:
@@ -2144,8 +2240,22 @@ def extract_attachments_from_form_fields(form_fields: dict[str, Any]) -> list[di
 
 def is_sea_approval(fields: dict[str, Any], *, sea_keywords: tuple[str, ...] = DEFAULT_SEA_KEYWORDS) -> bool:
     transport_value = _find_field_value(fields, TRANSPORT_FIELD_ALIASES)
+    detected = detect_approval_transport_mode(transport_value)
+    if detected:
+        return detected == "SEA"
     normalized = _normalize_key(transport_value).upper()
     return any(_normalize_key(keyword).upper() in normalized for keyword in sea_keywords)
+
+
+def detect_approval_transport_mode(fields_or_value: Any) -> str:
+    if isinstance(fields_or_value, dict):
+        fields_or_value = _find_field_value(fields_or_value, TRANSPORT_FIELD_ALIASES)
+    return _normalize_transport_mode(fields_or_value)
+
+
+def is_transport_approval(fields: dict[str, Any], transport_modes: tuple[str, ...]) -> bool:
+    mode = detect_approval_transport_mode(fields)
+    return bool(mode and mode in transport_modes)
 
 
 def is_hidden_approval_status(status: str | None) -> bool:
@@ -2192,6 +2302,7 @@ def summarize_approval(instance: dict, *, process_instance_id: str = "", include
         instance_id=instance_id,
         official_url=official_url,
     )
+    transport_mode_raw = _find_field_value(fields, TRANSPORT_FIELD_ALIASES)
     summary = {
         "source_instance_id": instance_id,
         "source_approval_no": approval_no,
@@ -2203,7 +2314,8 @@ def summarize_approval(instance: dict, *, process_instance_id: str = "", include
         "originator_dept_id": _clean(instance.get("originator_dept_id") or instance.get("originatorDeptId")),
         "create_time": instance.get("create_time") or instance.get("createTime") or "",
         "finish_time": instance.get("finish_time") or instance.get("finishTime") or "",
-        "transport_mode_raw": _find_field_value(fields, TRANSPORT_FIELD_ALIASES),
+        "transport_mode": detect_approval_transport_mode(transport_mode_raw),
+        "transport_mode_raw": transport_mode_raw,
         "logistics_no": _find_field_value(fields, BATCH_NO_FIELD_ALIASES),
         "linked_purchase_count": len(linked_purchase_approvals),
         "linked_purchase_approvals": linked_purchase_approvals,
@@ -2846,7 +2958,7 @@ def build_oa_item_values_from_approval(item: dict) -> list[dict]:
 
 
 def build_batch_values_from_approval(item: dict) -> dict:
-    """把一条海运审批摘要整理成批次头追溯字段。"""
+    """把一条国际物流审批摘要整理成批次头追溯字段。"""
 
     form_fields = item.get("form_fields") or {}
     logistics_no = _clean(item.get("logistics_no"))
@@ -2856,11 +2968,12 @@ def build_batch_values_from_approval(item: dict) -> dict:
     source_dingtalk_url = _clean(item.get("source_dingtalk_url"))
     oa_form_attachments = item.get("oa_form_attachments") or extract_attachments_from_form_fields(form_fields)
     attachment_count = len(oa_form_attachments) if oa_form_attachments else _count_dingtalk_attachments(form_fields)
+    transport_mode = _normalize_transport_mode(item.get("transport_mode")) or detect_approval_transport_mode(item.get("transport_mode_raw")) or "SEA"
     values = {
         "batch_no": batch_no,
         "waybill_no": logistics_no,
         "container_no": logistics_no if _looks_like_container_no(logistics_no) else "",
-        "transport_mode": "SEA",
+        "transport_mode": transport_mode,
         "source_type": "oa_logistics",
         "source_data_id": source_instance_id or source_approval_no,
         "source_approval_no": source_approval_no,
@@ -2883,6 +2996,7 @@ def build_batch_values_from_approval(item: dict) -> dict:
         "extra_json": _json_dumps(
             {
                 "source": "dingtalk_oa_logistics",
+                "transport_mode": transport_mode,
                 "transport_mode_raw": item.get("transport_mode_raw"),
                 "open_url": item.get("open_url"),
                 "logistics_fee": item.get("logistics_fee") or extract_logistics_fee_from_approval(item),
@@ -3013,7 +3127,7 @@ def _create_oa_trace_batch(values: dict) -> dict:
 def _update_oa_trace_batch(batch_name: str, values: dict) -> dict:
     current = frappe.db.get_value("Overseas Cost Batch", batch_name, list(_filter_batch_values(values).keys()), as_dict=True) or {}
     updates: dict[str, Any] = {}
-    always_refresh_fields = {"source_approval_status", "source_attachment_count", "source_finished_at"}
+    always_refresh_fields = {"transport_mode", "source_approval_status", "source_attachment_count", "source_finished_at"}
     for fieldname, new_value in _filter_batch_values(values).items():
         if fieldname in {"batch_no", "status", "confirm_status", "writeback_status", "version_count", "item_count"}:
             continue
@@ -3997,7 +4111,7 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
         return {
             "ok": True,
             "dry_run": True,
-            "message": "当前未连接 Frappe，仅返回钉钉海运审批批次追溯和基础物料行预览。",
+            "message": "当前未连接 Frappe，仅返回钉钉国际物流审批批次追溯和基础物料行预览。",
             "total": len(raw_items),
             "valid_count": len(preview),
             "created_count": 0,
@@ -4077,7 +4191,7 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
     return {
         "ok": True,
         "dry_run": False,
-        "message": "钉钉海运审批已保存到批次；已生成/保留物料行、登记发起附件，并按关联采购支出 OA 同步采购单价、币种和货值，同时把明确的物流费用生成分摊规则。",
+        "message": "钉钉国际物流审批已保存到批次；已生成/保留物料行、登记发起附件，并按关联采购支出 OA 同步采购单价、币种和货值，同时把明确的物流费用生成分摊规则。",
         "total": len(raw_items),
         "created_count": created_count,
         "updated_count": updated_count,
@@ -4102,7 +4216,7 @@ def save_json_file_to_erp_from_env() -> dict:
     return save_json_file_to_erp(input_path)
 
 
-def pull_sea_approvals(
+def pull_logistics_approvals(
     *,
     process_code: str,
     start: str,
@@ -4121,11 +4235,13 @@ def pull_sea_approvals(
     client_secret: str = "",
     app_key: str = "",
     app_secret: str = "",
+    transport_modes: tuple[str, ...] | list[str] | str = ("SEA",),
 ) -> dict:
-    """拉取并筛选海运审批单，不写数据库。"""
+    """拉取并按运输方式筛选国际物流审批单，不写数据库。"""
 
     resolved_api_style = _resolve_api_style(api_style)
     resolved_list_api = _resolve_list_api_mode(list_api, resolved_api_style)
+    resolved_transport_modes = _parse_transport_modes(transport_modes)
     start_time_ms = _parse_datetime_ms(start)
     end_time_ms = _parse_datetime_ms(end, end_of_day=True)
     token = get_access_token(
@@ -4152,31 +4268,88 @@ def pull_sea_approvals(
         instance_ids = instance_ids[:limit]
 
     all_items: list[dict] = []
-    sea_items: list[dict] = []
+    matched_items: list[dict] = []
     for instance_id in instance_ids:
         detail = get_process_instance_detail(token=token, process_instance_id=instance_id, api_style=resolved_api_style)
         summary = summarize_approval(detail, process_instance_id=instance_id, include_raw=include_raw)
         all_items.append(summary)
-        if is_sea_approval(summary["form_fields"]) and not is_hidden_approval_status(summary.get("approval_status")):
-            sea_items.append(summary)
+        if is_transport_approval(summary["form_fields"], resolved_transport_modes) and not is_hidden_approval_status(summary.get("approval_status")):
+            matched_items.append(summary)
+
+    transport_counts = {
+        mode: sum(
+            1
+            for item in all_items
+            if not is_hidden_approval_status(item.get("approval_status")) and item.get("transport_mode") == mode
+        )
+        for mode in TRANSPORT_MODE_LABELS
+    }
 
     result = {
         "ok": True,
         "process_code": process_code,
         "api_style": resolved_api_style,
         "list_api": resolved_list_api,
+        "transport_modes": list(resolved_transport_modes),
         "start_time_ms": start_time_ms,
         "end_time_ms": end_time_ms,
         "chunk_days": chunk_days,
         "total_instance_count": len(instance_ids),
         "detail_count": len(all_items),
-        "sea_count": len(sea_items),
-        "items": sea_items,
+        "transport_counts": transport_counts,
+        "filtered_count": len(matched_items),
+        "sea_count": transport_counts.get("SEA", 0),
+        "items": matched_items,
     }
     if include_all:
         result["all_items"] = all_items
-        result["non_sea_items"] = [item for item in all_items if item not in sea_items]
+        result["non_matching_items"] = [item for item in all_items if item not in matched_items]
+        result["non_sea_items"] = [item for item in all_items if item.get("transport_mode") != "SEA"]
     return result
+
+
+def pull_sea_approvals(
+    *,
+    process_code: str,
+    start: str,
+    end: str,
+    api_style: str = "auto",
+    list_api: str = "auto",
+    page_size: int = 20,
+    max_pages: int = 20,
+    chunk_days: int = 30,
+    limit: int | None = None,
+    include_raw: bool = False,
+    include_all: bool = False,
+    access_token: str = "",
+    corp_id: str = "",
+    client_id: str = "",
+    client_secret: str = "",
+    app_key: str = "",
+    app_secret: str = "",
+) -> dict:
+    """拉取并筛选海运审批单，不写数据库。"""
+
+    return pull_logistics_approvals(
+        process_code=process_code,
+        start=start,
+        end=end,
+        api_style=api_style,
+        list_api=list_api,
+        page_size=page_size,
+        max_pages=max_pages,
+        chunk_days=chunk_days,
+        limit=limit,
+        include_raw=include_raw,
+        include_all=include_all,
+        access_token=access_token,
+        corp_id=corp_id,
+        client_id=client_id,
+        client_secret=client_secret,
+        app_key=app_key,
+        app_secret=app_secret,
+        transport_modes=("SEA",),
+    )
 
 
 def pull_purchase_expense_approvals(
@@ -4647,6 +4820,7 @@ def save_csv(items: list[dict], output_path: str | Path) -> None:
         "originator_userid",
         "create_time",
         "finish_time",
+        "transport_mode",
         "transport_mode_raw",
         "logistics_no",
         "linked_purchase_count",
@@ -4676,6 +4850,9 @@ def build_console_summary(result: dict, *, output: str = "", csv_output: str = "
         "chunk_days": result.get("chunk_days"),
         "total_instance_count": result.get("total_instance_count"),
         "detail_count": result.get("detail_count"),
+        "transport_modes": result.get("transport_modes"),
+        "transport_counts": result.get("transport_counts"),
+        "filtered_count": result.get("filtered_count"),
         "sea_count": result.get("sea_count"),
         "output": output,
         "csv": csv_output,
@@ -4683,6 +4860,7 @@ def build_console_summary(result: dict, *, output: str = "", csv_output: str = "
             {
                 "source_approval_no": item.get("source_approval_no"),
                 "source_instance_id": item.get("source_instance_id"),
+                "transport_mode": item.get("transport_mode"),
                 "transport_mode_raw": item.get("transport_mode_raw"),
                 "logistics_no": item.get("logistics_no"),
                 "approval_status": item.get("approval_status"),
@@ -4698,7 +4876,7 @@ def pull_from_env() -> dict:
     """从环境变量读取参数，适合 bench execute 调试。"""
 
     load_env_file(os.environ.get("DINGTALK_ENV_FILE"))
-    result = pull_sea_approvals(
+    result = pull_logistics_approvals(
         process_code=resolve_logistics_process_code(),
         start=_clean(os.environ.get("DINGTALK_PULL_START")),
         end=_clean(os.environ.get("DINGTALK_PULL_END")),
@@ -4710,6 +4888,7 @@ def pull_from_env() -> dict:
         limit=int(os.environ.get("DINGTALK_LIMIT") or 0) or None,
         include_raw=os.environ.get("DINGTALK_INCLUDE_RAW") in ("1", "true", "True", "yes"),
         include_all=os.environ.get("DINGTALK_INCLUDE_ALL") in ("1", "true", "True", "yes"),
+        transport_modes=os.environ.get("DINGTALK_TRANSPORT_MODES") or os.environ.get("DINGTALK_TRANSPORT_MODE") or "SEA",
     )
     output = _clean(os.environ.get("DINGTALK_PULL_OUTPUT"))
     csv_output = _clean(os.environ.get("DINGTALK_PULL_CSV"))
@@ -4781,7 +4960,7 @@ def pull_purchase_expenses_from_env() -> dict:
 
 
 def pull_and_save_to_erp_from_env() -> dict:
-    """从钉钉拉取海运审批，并保存为 ERP 批次追溯记录。"""
+    """从钉钉拉取国际物流审批，并保存为 ERP 批次追溯记录。"""
 
     result = pull_from_env()
     save_result = save_sea_approvals_to_erp(result)
@@ -4796,8 +4975,147 @@ def pull_and_save_to_erp_from_env() -> dict:
     }
 
 
+def _build_scheduled_pull_window() -> tuple[str, str]:
+    start = _runtime_config_value(
+        "DINGTALK_SCHEDULE_PULL_START",
+        "overseas_costing_dingtalk_schedule_pull_start",
+    )
+    end = _runtime_config_value(
+        "DINGTALK_SCHEDULE_PULL_END",
+        "overseas_costing_dingtalk_schedule_pull_end",
+    )
+    if start and end:
+        return start, end
+
+    lookback_days = max(
+        _runtime_config_int(
+            "DINGTALK_SCHEDULE_LOOKBACK_DAYS",
+            "overseas_costing_dingtalk_schedule_lookback_days",
+            default=7,
+        ),
+        1,
+    )
+    end_date = datetime.now().date()
+    start_date = end_date - timedelta(days=lookback_days - 1)
+    return start or start_date.strftime("%Y-%m-%d"), end or end_date.strftime("%Y-%m-%d")
+
+
+def _log_scheduled_pull_summary(summary: dict) -> None:
+    if frappe is None:
+        return
+    try:
+        logger = frappe.logger("overseas_costing", allow_site=True) if hasattr(frappe, "logger") else None
+        if logger:
+            logger.info(_json_dumps(summary))
+    except Exception:
+        return
+
+
+def _log_scheduled_pull_error(exc: Exception) -> None:
+    if frappe is None or not hasattr(frappe, "log_error"):
+        return
+    try:
+        message = frappe.get_traceback() if hasattr(frappe, "get_traceback") else str(exc)
+        frappe.log_error(title="海外成本钉钉自动拉取失败", message=message)
+    except Exception:
+        return
+
+
+def scheduled_pull_logistics_approvals() -> dict:
+    """Frappe 定时任务：每天自动拉取最近几天的国际物流 OA 并写入/更新批次。"""
+
+    try:
+        if _runtime_config_bool(
+            "DINGTALK_SCHEDULE_DISABLED",
+            "overseas_costing_dingtalk_schedule_disabled",
+            default=False,
+        ):
+            return {"ok": True, "skipped": True, "reason": "钉钉国际物流自动拉取已关闭。"}
+
+        env_file = resolve_dingtalk_env_file(
+            _runtime_config_value(
+                "DINGTALK_SCHEDULE_ENV_FILE",
+                "DINGTALK_ENV_FILE",
+                "overseas_costing_dingtalk_env_file",
+            )
+        )
+        env_file_loaded = False
+        if env_file:
+            load_env_file(env_file)
+            env_file_loaded = True
+
+        if not _has_dingtalk_pull_credentials():
+            return {"ok": True, "skipped": True, "reason": "未配置钉钉拉取凭据，自动拉取跳过。", "env_file_loaded": env_file_loaded}
+
+        start, end = _build_scheduled_pull_window()
+        transport_modes = _runtime_config_value(
+            "DINGTALK_SCHEDULE_TRANSPORT_MODES",
+            "DINGTALK_TRANSPORT_MODES",
+            "DINGTALK_TRANSPORT_MODE",
+            "overseas_costing_dingtalk_schedule_transport_modes",
+            default="ALL",
+        )
+        result = pull_logistics_approvals(
+            process_code=resolve_logistics_process_code(
+                _runtime_config_value(
+                    "DINGTALK_LOGISTICS_PROCESS_CODE",
+                    "overseas_costing_dingtalk_logistics_process_code",
+                )
+            ),
+            start=start,
+            end=end,
+            api_style=_runtime_config_value("DINGTALK_API_STYLE", "overseas_costing_dingtalk_api_style", default="auto"),
+            list_api=_runtime_config_value("DINGTALK_LIST_API", "overseas_costing_dingtalk_list_api", default="auto"),
+            page_size=_runtime_config_int("DINGTALK_SCHEDULE_PAGE_SIZE", "DINGTALK_PAGE_SIZE", default=20),
+            max_pages=_runtime_config_int("DINGTALK_SCHEDULE_MAX_PAGES", "DINGTALK_MAX_PAGES", default=20),
+            chunk_days=_runtime_config_int("DINGTALK_SCHEDULE_CHUNK_DAYS", "DINGTALK_CHUNK_DAYS", default=30),
+            limit=_runtime_config_int(
+                "DINGTALK_SCHEDULE_LIMIT",
+                "overseas_costing_dingtalk_schedule_limit",
+                default=200,
+            )
+            or None,
+            include_raw=False,
+            include_all=False,
+            access_token=_runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"),
+            corp_id=_runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id"),
+            client_id=_runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id"),
+            client_secret=_runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret"),
+            app_key=_runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key"),
+            app_secret=_runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret"),
+            transport_modes=transport_modes,
+        )
+        save_result = save_sea_approvals_to_erp(result)
+        summary = {
+            "ok": bool(save_result.get("ok")),
+            "scheduled": True,
+            "env_file_loaded": env_file_loaded,
+            "start": start,
+            "end": end,
+            "transport_modes": result.get("transport_modes"),
+            "pull": {
+                "total_instance_count": result.get("total_instance_count", 0),
+                "detail_count": result.get("detail_count", 0),
+                "transport_counts": result.get("transport_counts", {}),
+                "filtered_count": result.get("filtered_count", 0),
+            },
+            "save": {
+                "created_count": save_result.get("created_count", 0),
+                "updated_count": save_result.get("updated_count", 0),
+                "unchanged_count": save_result.get("unchanged_count", 0),
+                "skipped_count": save_result.get("skipped_count", 0),
+                "message": save_result.get("message"),
+            },
+        }
+        _log_scheduled_pull_summary(summary)
+        return summary
+    except Exception as exc:
+        _log_scheduled_pull_error(exc)
+        raise
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="拉取钉钉国际物流审批单并筛选海运")
+    parser = argparse.ArgumentParser(description="拉取钉钉国际物流审批单并按运输方式筛选")
     parser.add_argument("--env-file", default=os.environ.get("DINGTALK_ENV_FILE", ""), help="加载指定 .env，例如预算管理系统 server\\.env")
     parser.add_argument("--process-code", default="", help=f"国际物流审批流程模板 process_code，默认 {DEFAULT_LOGISTICS_PROCESS_CODE}")
     parser.add_argument("--start", default=os.environ.get("DINGTALK_PULL_START", ""), help="开始时间，例如 2026-07-01")
@@ -4814,8 +5132,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-pages", type=int, default=int(os.environ.get("DINGTALK_MAX_PAGES") or 20), help="最多拉取页数，避免误拉过大范围")
     parser.add_argument("--chunk-days", type=int, default=int(os.environ.get("DINGTALK_CHUNK_DAYS") or 30), help="按多少天分段拉取，旧版钉钉接口建议 30")
     parser.add_argument("--limit", type=int, default=int(os.environ.get("DINGTALK_LIMIT") or 0), help="最多读取多少个实例详情，0 表示不限制")
+    parser.add_argument("--transport-mode", default=os.environ.get("DINGTALK_TRANSPORT_MODES") or os.environ.get("DINGTALK_TRANSPORT_MODE") or "SEA", help="运输方式：SEA、AIR、EXPRESS、ALL，可用逗号分隔")
     parser.add_argument("--include-raw", action="store_true", help="JSON 中包含完整审批详情原文")
-    parser.add_argument("--include-all", action="store_true", help="JSON 中同时包含未命中海运的审批摘要，便于调试字段名")
+    parser.add_argument("--include-all", action="store_true", help="JSON 中同时包含未命中当前运输方式的审批摘要，便于调试字段名")
     parser.add_argument("--output", default=os.environ.get("DINGTALK_PULL_OUTPUT", ""), help="输出 JSON 路径")
     parser.add_argument("--csv", default=os.environ.get("DINGTALK_PULL_CSV", ""), help="输出 CSV 路径")
     parser.add_argument("--save-to-erp", action="store_true", help="保存海运审批追溯到 Frappe 批次头；不写物料和金额")
@@ -4827,7 +5146,7 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.env_file:
         load_env_file(args.env_file)
-    result = pull_sea_approvals(
+    result = pull_logistics_approvals(
         process_code=resolve_logistics_process_code(args.process_code),
         start=args.start,
         end=args.end,
@@ -4845,6 +5164,7 @@ def main() -> None:
         client_secret=args.client_secret,
         app_key=args.app_key,
         app_secret=args.app_secret,
+        transport_modes=args.transport_mode,
     )
     if args.output:
         save_json(result, args.output)
