@@ -2752,6 +2752,37 @@
   gap: 10px;
 }
 
+.ocw-category-toolbar {
+  display: grid;
+  grid-template-columns: minmax(260px, 420px) minmax(0, 1fr);
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--ocw-line);
+  border-radius: 8px;
+  background: #f7faf9;
+}
+
+.ocw-category-toolbar label {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.ocw-category-toolbar span {
+  color: var(--ocw-muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.ocw-category-toolbar em {
+  color: var(--ocw-muted);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.5;
+}
+
 .ocw-category-loading,
 .ocw-category-empty {
   display: grid;
@@ -3846,11 +3877,49 @@
   display: grid;
   gap: 6px;
   min-height: 132px;
+  overflow: hidden;
   padding: 10px;
+  position: relative;
+  transition: background-color 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
 }
 
 .ocw-manual-doc-card.uploaded {
-  border-color: #9ed0b2;
+  background: linear-gradient(180deg, #ecfdf5 0%, #f7fff9 100%);
+  border-color: #22c55e;
+  box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.12), 0 8px 18px rgba(21, 128, 61, 0.08);
+}
+
+.ocw-manual-doc-card.uploaded::before,
+.ocw-manual-doc-card.missing::before,
+.ocw-manual-doc-card.oa::before,
+.ocw-manual-doc-card.optional::before {
+  bottom: 0;
+  content: "";
+  left: 0;
+  position: absolute;
+  top: 0;
+  width: 4px;
+}
+
+.ocw-manual-doc-card.uploaded::before {
+  background: #22c55e;
+}
+
+.ocw-manual-doc-card.missing::before {
+  background: #f97316;
+}
+
+.ocw-manual-doc-card.oa::before {
+  background: #38bdf8;
+}
+
+.ocw-manual-doc-card.optional::before {
+  background: #cbd5e1;
+}
+
+.ocw-manual-doc-card.uploaded .ocw-manual-doc-card-head strong,
+.ocw-manual-doc-card.uploaded .ocw-manual-doc-status em {
+  color: #047857;
 }
 
 .ocw-manual-doc-card-head,
@@ -3921,21 +3990,25 @@
 
 .ocw-manual-doc-status-badge.uploaded {
   background: #ecfdf5;
+  border: 1px solid #86efac;
   color: #047857;
 }
 
 .ocw-manual-doc-status-badge.oa {
   background: #e0f2fe;
+  border: 1px solid #bae6fd;
   color: #0369a1;
 }
 
 .ocw-manual-doc-status-badge.missing {
   background: #fff7ed;
+  border: 1px solid #fed7aa;
   color: #c2410c;
 }
 
 .ocw-manual-doc-status-badge.optional {
   background: #f1f5f9;
+  border: 1px solid #e2e8f0;
   color: #475569;
 }
 

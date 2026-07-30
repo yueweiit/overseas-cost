@@ -490,10 +490,12 @@ class OverseasCostWorkbench {
   }
 
   openFileParseDialog() {
-    const batch = this.getVisibleActiveBatch() || this.getActiveBatch();
+    const selectableBatches = this.getSelectableBatches();
+    const batch = this.getSelectableBatch("", selectableBatches);
     const batchName = batch ? batch.name : "";
     const batchHint = this.voucherBatchHint(batch);
-    const batchOptions = this.renderBatchOptions(batchName);
+    const batchOptions = this.renderSelectableBatchOptions(batchName, selectableBatches);
+    const batchSelectDisabled = selectableBatches.length ? "" : " disabled";
     const dialog = new frappe.ui.Dialog({
       title: "文件解析预览",
       fields: [
@@ -505,7 +507,7 @@ class OverseasCostWorkbench {
               <div class="ocw-voucher-target">
                 <label class="ocw-voucher-batch-picker">
                   <span>解析对比批次</span>
-                  <select class="form-control ocw-batch-select" data-role="voucher-batch-select" aria-label="选择文件解析批次">${batchOptions}</select>
+                  <select class="form-control ocw-batch-select" data-role="voucher-batch-select" aria-label="选择文件解析批次"${batchSelectDisabled}>${batchOptions}</select>
                 </label>
                 <em data-area="voucher-batch-hint">${this.escape(batchHint)}</em>
               </div>
@@ -586,7 +588,7 @@ class OverseasCostWorkbench {
       setFile(event.originalEvent?.dataTransfer?.files?.[0]);
     });
     dialog.$wrapper.on("change", "[data-role='voucher-batch-select']", (event) => {
-      const batch = this.findBatch(String($(event.currentTarget).val() || ""));
+      const batch = this.findSelectableBatch(String($(event.currentTarget).val() || ""));
       dialog.$wrapper.data("ocw-voucher-batch-name", batch ? batch.name : "");
       dialog.$wrapper.removeData("ocw-voucher-preview");
       this.renderVoucherPreview(dialog, null, "empty");
@@ -1636,12 +1638,15 @@ class OverseasCostWorkbench {
   }
 
   async openCategoryPreviewDialog(batchName = "") {
-    const batch = batchName ? this.findBatch(batchName) : this.getVisibleActiveBatch();
+    const selectableBatches = this.getSelectableBatches();
+    const batch = this.getSelectableBatch(batchName, selectableBatches);
     if (!batch) {
       this.showPendingFeature("当前没有可归类的批次，请先拉取或查询一条数据。");
       return;
     }
     this.activeBatchName = batch.name;
+    const batchOptions = this.renderSelectableBatchOptions(batch.name, selectableBatches);
+    const batchSelectDisabled = selectableBatches.length ? "" : " disabled";
 
     const dialog = new frappe.ui.Dialog({
       title: "商品名称归并预览",
@@ -1650,6 +1655,13 @@ class OverseasCostWorkbench {
           fieldtype: "HTML",
           fieldname: "category_preview",
           options: `
+            <div class="ocw-category-toolbar">
+              <label>
+                <span>当前批次</span>
+                <select class="form-control ocw-batch-select" data-role="category-batch-select" aria-label="选择名称归并批次"${batchSelectDisabled}>${batchOptions}</select>
+              </label>
+              <em>${this.escape(this.scopedBatchHint())}</em>
+            </div>
             <div class="ocw-category-preview" data-area="category-preview">
               <div class="ocw-category-loading">正在检查当前批次是否存在需要统一名称的商品...</div>
             </div>
@@ -1661,22 +1673,37 @@ class OverseasCostWorkbench {
     });
     dialog.show();
     dialog.$wrapper.addClass("ocw-category-modal");
-
-    try {
-      const result = await this.call(
-        "overseas_costing.api.category.preview_batch_categories",
-        {
-          batch_name: batch.name,
-          version_name: batch.current_version,
-          limit: 500,
-        },
-        true
-      );
-      this.renderCategoryPreview(dialog, result, batch);
-    } catch (error) {
+    dialog.$wrapper.data("ocw-category-batch-name", batch.name);
+    dialog.$wrapper.on("change", "[data-role='category-batch-select']", (event) => {
+      const selectedBatch = this.findSelectableBatch(String($(event.currentTarget).val() || ""));
+      if (!selectedBatch) return;
+      this.activeBatchName = selectedBatch.name;
+      dialog.$wrapper.data("ocw-category-batch-name", selectedBatch.name);
+      this.loadCategoryPreview(dialog, selectedBatch).catch((error) => {
+        dialog.hide();
+        this.showError(error);
+      });
+    });
+    this.loadCategoryPreview(dialog, batch).catch((error) => {
       dialog.hide();
       this.showError(error);
-    }
+    });
+  }
+
+  async loadCategoryPreview(dialog, batch) {
+    dialog.$wrapper.find("[data-area='category-preview']").html(`
+      <div class="ocw-category-loading">正在检查当前批次是否存在需要统一名称的商品...</div>
+    `);
+    const result = await this.call(
+      "overseas_costing.api.category.preview_batch_categories",
+      {
+        batch_name: batch.name,
+        version_name: batch.current_version,
+        limit: 500,
+      },
+      true
+    );
+    this.renderCategoryPreview(dialog, result, batch);
   }
 
   renderCategoryPreview(dialog, result, batch) {
@@ -2195,21 +2222,21 @@ class OverseasCostWorkbench {
           <span class="${missingRequired ? "warning" : "done"}">${missingRequired ? `${this.escape(String(missingRequired))} 项核算资料待确认` : "核算资料已补齐"}</span>
         </div>
         <div class="ocw-manual-doc-grid">
-          ${this.renderManualDocumentCards(plan, bySlot, logisticsType)}
+          ${this.renderManualDocumentCards(plan, bySlot, logisticsType, batch)}
         </div>
       </div>
     `;
   }
 
-  renderManualDocumentCards(plan = [], bySlot = {}, logisticsType = "SEA") {
+  renderManualDocumentCards(plan = [], bySlot = {}, logisticsType = "SEA", batch = {}) {
     return plan
       .map((slot) => {
         const attachment = bySlot[slot.code] || null;
-        const status = this.manualDocumentStatusInfo(slot, attachment);
+        const status = this.manualDocumentStatusInfo(slot, attachment, batch);
         const badge = this.manualDocumentBadgeInfo(slot);
         const fileName = attachment ? attachment.file_name || attachment.file_url || "--" : "";
         return `
-          <div class="ocw-manual-doc-card ${attachment ? "uploaded" : ""}">
+          <div class="ocw-manual-doc-card ${this.escape(status.className)} ${attachment ? "uploaded" : ""}">
             <div class="ocw-manual-doc-card-head">
               <strong>${this.escape(slot.label)}</strong>
               <span class="ocw-manual-doc-required ${this.escape(badge.className)}">${this.escape(badge.label)}</span>
@@ -2217,7 +2244,7 @@ class OverseasCostWorkbench {
             <div class="ocw-manual-doc-purpose">用于：${this.escape(slot.purpose)}</div>
             <div class="ocw-manual-doc-status">
               <span class="ocw-manual-doc-status-badge ${this.escape(status.className)}">${this.escape(status.label)}</span>
-              ${attachment ? `<em title="${this.escape(fileName)}">${this.escape(fileName)}</em>` : `<em>${slot.oaSource ? "优先从钉钉读取" : "缺了再补传"}</em>`}
+              ${attachment ? `<em title="${this.escape(fileName)}">${this.escape(fileName)}</em>` : `<em>${this.escape(status.note || (slot.oaSource ? "优先从钉钉读取" : "缺了再补传"))}</em>`}
             </div>
             <div class="ocw-manual-doc-actions">
               <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="upload-manual-document" data-logistics-type="${this.escape(logisticsType)}" data-slot-code="${this.escape(slot.code)}" data-slot-label="${this.escape(slot.label)}" data-attachment-type="${this.escape(slot.attachmentType)}" data-required="${slot.required ? "1" : "0"}">
@@ -2252,8 +2279,12 @@ class OverseasCostWorkbench {
     }, {});
   }
 
-  manualDocumentStatusInfo(slot, attachment) {
+  manualDocumentStatusInfo(slot, attachment, batch = {}) {
     if (attachment) return { label: "已补传", className: "uploaded" };
+    const sourceAttachmentCount = Number(batch.source_attachment_count || 0);
+    if (slot.oaSource && sourceAttachmentCount > 0) {
+      return { label: "已拉取", className: "uploaded", note: `已从钉钉拉取 ${sourceAttachmentCount} 个附件` };
+    }
     if (slot.oaSource) return { label: "OA拉取", className: "oa" };
     if (slot.required) return { label: "待确认", className: "missing" };
     return { label: "可选补充", className: "optional" };
@@ -5745,9 +5776,31 @@ class OverseasCostWorkbench {
       .join("");
   }
 
-  renderVisibleBatchOptions(selectedBatchName = "") {
-    if (!this.visibleBatches.length) return `<option value="">当前筛选无批次</option>`;
-    return this.visibleBatches
+  getSelectableBatches() {
+    if (this.hasActiveFilters()) return this.visibleBatches;
+    return this.visibleBatches.length ? this.visibleBatches : this.batches;
+  }
+
+  getSelectableBatch(batchName = "", batches = null) {
+    const options = batches || this.getSelectableBatches();
+    if (!options.length) return null;
+    return (
+      options.find((batch) => batch.name === batchName) ||
+      options.find((batch) => batch.name === this.activeBatchName) ||
+      options[0] ||
+      null
+    );
+  }
+
+  findSelectableBatch(batchName, batches = null) {
+    const options = batches || this.getSelectableBatches();
+    return options.find((batch) => batch.name === batchName) || null;
+  }
+
+  renderSelectableBatchOptions(selectedBatchName = "", batches = null) {
+    const options = batches || this.getSelectableBatches();
+    if (!options.length) return `<option value="">当前筛选无批次</option>`;
+    return options
       .map((batch) => {
         const selected = batch.name === selectedBatchName ? " selected" : "";
         return `<option value="${this.escape(batch.name)}"${selected}>${this.escape(this.batchReferenceLabel(batch))}</option>`;
@@ -5755,11 +5808,20 @@ class OverseasCostWorkbench {
       .join("");
   }
 
+  scopedBatchHint() {
+    return this.hasActiveFilters() ? "仅显示当前筛选范围内的批次。" : "未筛选物流方式时显示全部批次。";
+  }
+
+  renderVisibleBatchOptions(selectedBatchName = "") {
+    return this.renderSelectableBatchOptions(selectedBatchName, this.visibleBatches);
+  }
+
   getDataCheckBatch() {
-    if (!this.visibleBatches.length) return null;
+    const selectableBatches = this.getSelectableBatches();
+    if (!selectableBatches.length) return null;
     return (
-      this.visibleBatches.find((batch) => batch.name === this.dataCheckBatchName) ||
-      this.getVisibleActiveBatch() ||
+      selectableBatches.find((batch) => batch.name === this.dataCheckBatchName) ||
+      this.getSelectableBatch(this.activeBatchName, selectableBatches) ||
       null
     );
   }
@@ -5767,9 +5829,10 @@ class OverseasCostWorkbench {
   renderDataCheckBatchSelector(batch) {
     const $select = this.$root.find("[data-role='data-check-batch-select']");
     if (!$select.length) return;
+    const selectableBatches = this.getSelectableBatches();
     const selectedBatchName = batch ? batch.name : "";
-    $select.html(this.renderVisibleBatchOptions(selectedBatchName));
-    $select.prop("disabled", !this.visibleBatches.length);
+    $select.html(this.renderSelectableBatchOptions(selectedBatchName, selectableBatches));
+    $select.prop("disabled", !selectableBatches.length);
   }
 
   getActiveBatch() {
