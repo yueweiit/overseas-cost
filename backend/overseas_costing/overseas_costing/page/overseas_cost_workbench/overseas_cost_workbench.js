@@ -126,6 +126,7 @@ class OverseasCostWorkbench {
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="file-parse">文件解析</button>
                 <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-categories">名称归并</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="open-import">Excel 导入</button>
+                  <button class="ocw-outline-btn ocw-mini-btn" data-action="export-current">导出当前结果</button>
                   <button class="ocw-primary-btn ocw-mini-btn" data-action="recalculate">重新试算</button>
                   <button class="ocw-primary-btn ocw-mini-btn" data-action="add-batch">+ 添加报关运单</button>
                 </div>
@@ -236,6 +237,7 @@ class OverseasCostWorkbench {
     });
     this.$root.on("click", "[data-action='preview-categories']", () => this.openCategoryPreviewDialog());
     this.$root.on("click", "[data-action='file-parse']", () => this.openFileParseDialog());
+    this.$root.on("click", "[data-action='export-current']", () => this.exportCurrentResult().catch((error) => this.showError(error)));
     this.$root.on("click", "[data-action='open-dingtalk']", (event) => this.openApprovalSourceDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='preview-purchase']", (event) => this.openPurchasePreviewDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='oa-attachments']", (event) => this.openOaAttachmentDialog($(event.currentTarget).attr("data-batch-name")));
@@ -4631,6 +4633,44 @@ class OverseasCostWorkbench {
       .on("resize.ocwHierarchyScrollbars", () => {
         window.requestAnimationFrame(() => this.bindHierarchyScrollbars());
       });
+  }
+
+  async exportCurrentResult() {
+    const batches = this.getSelectableBatches();
+    if (!batches.length) {
+      frappe.msgprint("当前没有可导出的批次。");
+      return;
+    }
+    const mode = this.normalizeTransportMode(this.filters.transport_mode);
+    const modeLabel = mode ? this.transportLabel(mode) : "全部";
+    const result = await this.call(
+      "overseas_costing.api.batch.export_current_result_xlsx",
+      {
+        batch_names_json: JSON.stringify(batches.map((batch) => batch.name)),
+        transport_label: modeLabel,
+      },
+      true
+    );
+    if (!result.ok) throw new Error(result.message || "导出失败");
+    this.downloadBase64File(result.content_base64, result.file_name, result.mime_type);
+    frappe.show_alert({ message: result.message || `已导出 ${result.total || 0} 行 SKU 明细。`, indicator: "green" });
+  }
+
+  downloadBase64File(contentBase64, fileName, mimeType) {
+    const binary = atob(contentBase64 || "");
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    const blob = new Blob([bytes], { type: mimeType || "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName || "海外采购综合成本核算.xlsx";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 
   splitHeaderLabel(label) {

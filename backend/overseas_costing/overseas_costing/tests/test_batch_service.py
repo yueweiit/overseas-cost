@@ -1,12 +1,18 @@
 """中文用途：批次查询服务测试。"""
 
+from io import BytesIO
 import json
+
+from openpyxl import load_workbook
 
 from overseas_costing.services.batch_service import (
     _build_item_query_args,
     _build_batch_source_status,
+    _build_export_xlsx_content,
+    _build_writeback_readiness,
     _normalize_item_query_filters,
     _normalize_limit,
+    check_writeback_ready,
     create_batch,
     get_audit_logs,
     get_batch_items,
@@ -104,6 +110,102 @@ def test_get_audit_logs_dry_run_returns_stable_shape() -> None:
     assert result["version_name"] == "VERSION-001"
     assert result["items"] == []
     assert result["total"] == 0
+
+
+def test_build_export_xlsx_content_styles_and_freezes_header() -> None:
+    content = _build_export_xlsx_content(
+        columns=[
+            {"excel_col": "A", "fieldname": "material_code", "label": "物料编码"},
+            {"excel_col": "B", "fieldname": "product_name", "label": "产品名称"},
+        ],
+        rows=[["FL004106", "钢化膜"]],
+    )
+
+    workbook = load_workbook(BytesIO(content))
+    sheet = workbook.active
+
+    assert sheet.freeze_panes == "A2"
+    assert sheet.auto_filter.ref == "A1:B2"
+    assert sheet["A1"].value == "A 物料编码"
+    assert sheet["A1"].fill.fgColor.rgb == "FF1F4E79"
+    assert sheet["A1"].font.bold is True
+    assert sheet["A2"].value == "FL004106"
+
+
+def test_check_writeback_ready_dry_run_returns_blocking_reasons() -> None:
+    result = check_writeback_ready(batch_name="HPCU5155607", version_name="VERSION-001")
+
+    assert result["ok"] is True
+    assert result["dry_run"] is True
+    assert result["ready"] is False
+    assert result["checks"]["batch_exists"] is False
+    assert result["blocking_reasons"] == ["当前未连接 Frappe，不能执行真实回写检查。"]
+    assert result["item_issue_examples"] == []
+
+
+def test_build_writeback_readiness_allows_complete_confirmed_batch() -> None:
+    result = _build_writeback_readiness(
+        batch={
+            "status": "Clean",
+            "confirm_status": "Confirmed",
+            "current_version": "VERSION-001",
+            "item_count": 1,
+            "actual_total_cost_rmb": 25,
+        },
+        resolved_version_name="VERSION-001",
+        items=[
+            {
+                "row_no": 1,
+                "material_code": "YL000001",
+                "product_name": "太阳眼镜",
+                "quantity": 2,
+                "unit_price": 8,
+                "purchase_currency": "RMB",
+                "goods_value": 16,
+                "total_unit_rmb": 12.5,
+            }
+        ],
+    )
+
+    assert result["ready"] is True
+    assert result["blocking_reasons"] == []
+    assert result["checks"]["has_items"] is True
+    assert result["checks"]["items_have_unit_price"] is True
+
+
+def test_build_writeback_readiness_blocks_incomplete_item_data() -> None:
+    result = _build_writeback_readiness(
+        batch={
+            "status": "Dirty",
+            "confirm_status": "Draft",
+            "current_version": "",
+            "item_count": 2,
+            "estimated_total_cost_rmb": 0,
+            "actual_total_cost_rmb": 0,
+        },
+        resolved_version_name=None,
+        items=[
+            {
+                "row_no": 7,
+                "material_code": "",
+                "product_name": "保护膜",
+                "quantity": 0,
+                "unit_price": "",
+                "purchase_currency": "",
+                "goods_value": 0,
+                "total_unit_rmb": 0,
+            }
+        ],
+    )
+
+    assert result["ready"] is False
+    assert result["checks"]["has_current_version"] is False
+    assert result["checks"]["has_dirty_data"] is True
+    assert result["item_issue_counts"]["material_code"] == 1
+    assert result["item_issue_counts"]["unit_price"] == 1
+    assert result["item_issue_examples"][0]["row_no"] == 7
+    assert "当前批次还没有确认。" in result["blocking_reasons"]
+    assert "批次记录明细数为 2，实际查询到 1 条。" in result["warning_reasons"]
 
 
 def test_hidden_approval_status_matches_revoked_dingtalk_statuses() -> None:

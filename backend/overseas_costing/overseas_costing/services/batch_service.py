@@ -7,6 +7,9 @@
 
 from __future__ import annotations
 
+import base64
+from datetime import datetime
+from io import BytesIO
 import json
 
 try:
@@ -911,6 +914,331 @@ def _normalize_limit(limit, default: int = 80, maximum: int = 300) -> int:
     return max(1, min(value, maximum))
 
 
+EXPORT_XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+EXPORT_TEXT_FIELDS = {
+    "material_code",
+    "product_name",
+    "product_name_es",
+    "spec_model",
+    "unit",
+    "recipient",
+    "purchase_currency",
+    "import_name",
+    "hs_code",
+    "category",
+    "customs_no",
+    "waybill_no",
+    "container_no",
+    "sea_bill_no",
+    "commercial_invoice_no",
+    "purchase_order_no",
+    "project_collection",
+    "transport_mode",
+    "source_type",
+    "source_doc_no",
+    "source_file_name",
+}
+EXPORT_BATCH_FALLBACK_FIELDS = [
+    "name",
+    "batch_no",
+    "customs_no",
+    "waybill_no",
+    "container_no",
+    "sea_bill_no",
+    "commercial_invoice_no",
+    "transport_mode",
+    "project_collection",
+    "source_approval_no",
+    "source_instance_id",
+    "source_dingtalk_url",
+    "source_file_name",
+    "current_version",
+]
+TRANSPORT_MODE_LABELS = {"SEA": "海运", "AIR": "空运", "EXPRESS": "快递"}
+
+
+def _normalize_export_batch_names(batch_names_json) -> list[str]:
+    if isinstance(batch_names_json, str):
+        text = batch_names_json.strip()
+        if not text:
+            return []
+        try:
+            value = json.loads(text)
+        except Exception:
+            value = [part.strip() for part in text.split(",")]
+    else:
+        value = batch_names_json
+    if not isinstance(value, (list, tuple)):
+        return []
+    result = []
+    for item in value:
+        name = str(item or "").strip()
+        if name and name not in result:
+            result.append(name)
+    return result
+
+
+def _transport_label(value) -> str:
+    code = normalize_transport_mode(value)
+    return TRANSPORT_MODE_LABELS.get(code, str(value or ""))
+
+
+def _clean_export_filename_part(value: str) -> str:
+    text = str(value or "").strip() or "全部"
+    for char in '\\/:*?"<>|':
+        text = text.replace(char, "_")
+    return text
+
+
+def _export_cell_value(item: dict, batch: dict, column: dict):
+    fieldname = column.get("fieldname")
+    value = item.get(fieldname)
+    if value in (None, ""):
+        value = batch.get(fieldname)
+    if fieldname == "transport_mode":
+        value = _transport_label(value)
+    if value in (None, ""):
+        return ""
+    if fieldname in EXPORT_TEXT_FIELDS:
+        return str(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return int(number) if number.is_integer() else number
+
+
+def _display_width(value) -> int:
+    text = str(value or "")
+    return sum(2 if ord(char) > 127 else 1 for char in text)
+
+
+def _build_export_xlsx_content(columns: list[dict], rows: list[list]) -> bytes:
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+        from openpyxl.utils import get_column_letter
+    except Exception as exc:  # pragma: no cover - 真实导出时才需要 openpyxl
+        raise RuntimeError("导出 .xlsx 需要安装 openpyxl。") from exc
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "综合成本核算"
+    sheet.freeze_panes = "A2"
+
+    headers = [
+        f"{column.get('excel_col') or ''} {column.get('label') or column.get('fieldname') or ''}".strip()
+        for column in columns
+    ]
+    sheet.append(headers)
+    for row in rows:
+        sheet.append(row)
+
+    last_column_letter = get_column_letter(len(headers))
+    sheet.auto_filter.ref = f"A1:{last_column_letter}{max(sheet.max_row, 1)}"
+
+    header_fill = PatternFill(fill_type="solid", fgColor="FF1F4E79")
+    header_font = Font(name="Arial", bold=True, color="FFFFFF")
+    header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    body_alignment = Alignment(vertical="center")
+    thin_side = Side(style="thin", color="D9E2F3")
+    cell_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+
+    sheet.row_dimensions[1].height = 28
+    for cell in sheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_alignment
+        cell.border = cell_border
+
+    for row in sheet.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = body_alignment
+            cell.border = cell_border
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = '#,##0.######'
+
+    for index, header in enumerate(headers, start=1):
+        max_width = _display_width(header) + 2
+        for row in rows[:300]:
+            value = row[index - 1] if index - 1 < len(row) else ""
+            max_width = max(max_width, _display_width(value) + 2)
+        sheet.column_dimensions[get_column_letter(index)].width = min(max(max_width, 10), 34)
+
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def export_current_result_xlsx(batch_names_json=None, transport_label: str | None = None) -> dict:
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，不能导出真实结果。",
+        }
+
+    batch_names = _normalize_export_batch_names(batch_names_json)
+    if not batch_names:
+        return {"ok": False, "message": "当前没有可导出的批次。"}
+
+    export_rows = []
+    for batch_name in batch_names:
+        batch_doc_name = _resolve_batch_name(batch_name)
+        if not batch_doc_name:
+            continue
+        batch = frappe.db.get_value(
+            "Overseas Cost Batch",
+            batch_doc_name,
+            EXPORT_BATCH_FALLBACK_FIELDS,
+            as_dict=True,
+        ) or {}
+        detail = get_batch_items(
+            batch_name=batch_doc_name,
+            version_name=batch.get("current_version"),
+        )
+        if not detail.get("ok"):
+            continue
+        for item in detail.get("items") or []:
+            export_rows.append([_export_cell_value(item, batch, column) for column in EXCEL_COLUMNS])
+
+    if not export_rows:
+        return {"ok": False, "message": "当前批次没有可导出的 SKU 明细。"}
+
+    content = _build_export_xlsx_content(EXCEL_COLUMNS, export_rows)
+    label = _clean_export_filename_part(transport_label or "全部")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = f"海外采购综合成本核算_{label}_{stamp}.xlsx"
+    return {
+        "ok": True,
+        "file_name": file_name,
+        "mime_type": EXPORT_XLSX_MIME_TYPE,
+        "content_base64": base64.b64encode(content).decode("ascii"),
+        "total": len(export_rows),
+        "message": f"已生成 {len(export_rows)} 行 SKU 明细。",
+    }
+
+
+WRITEBACK_REQUIRED_ITEM_FIELDS = (
+    ("material_code", "物料编码", "text"),
+    ("product_name", "物料名称", "text"),
+    ("quantity", "数量", "positive_number"),
+    ("unit_price", "采购单价", "positive_number"),
+    ("purchase_currency", "采购币种", "text"),
+    ("goods_value", "总货值", "positive_number"),
+    ("total_unit_rmb", "综合物品单价RMB", "positive_number"),
+)
+
+
+def _as_float(value) -> float:
+    if value in (None, ""):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_blank(value) -> bool:
+    return value is None or str(value).strip() == ""
+
+
+def _build_writeback_item_quality(items: list[dict]) -> dict:
+    issue_counts = {fieldname: 0 for fieldname, _label, _rule in WRITEBACK_REQUIRED_ITEM_FIELDS}
+    issue_examples = []
+
+    for index, item in enumerate(items, start=1):
+        item_missing_labels = []
+        for fieldname, label, rule in WRITEBACK_REQUIRED_ITEM_FIELDS:
+            value = item.get(fieldname)
+            has_issue = _is_blank(value) if rule == "text" else _as_float(value) <= 0
+            if has_issue:
+                issue_counts[fieldname] += 1
+                item_missing_labels.append(label)
+
+        if item_missing_labels and len(issue_examples) < 5:
+            issue_examples.append(
+                {
+                    "row_no": item.get("row_no") or item.get("excel_row_no") or index,
+                    "material_code": item.get("material_code") or "",
+                    "product_name": item.get("product_name") or "",
+                    "missing_fields": item_missing_labels,
+                }
+            )
+
+    checks = {
+        f"items_have_{fieldname}": count == 0
+        for fieldname, count in issue_counts.items()
+    }
+    blocking_reasons = [
+        f"有 {count} 条 SKU 缺少或未填有效的{label}。"
+        for fieldname, label, _rule in WRITEBACK_REQUIRED_ITEM_FIELDS
+        if (count := issue_counts[fieldname]) > 0
+    ]
+
+    return {
+        "checks": checks,
+        "issue_counts": issue_counts,
+        "issue_examples": issue_examples,
+        "blocking_reasons": blocking_reasons,
+    }
+
+
+def _build_writeback_readiness(
+    batch: dict,
+    items: list[dict],
+    resolved_version_name: str | None,
+) -> dict:
+    item_quality = _build_writeback_item_quality(items)
+    actual_total_cost = _as_float(batch.get("actual_total_cost_rmb"))
+    estimated_total_cost = _as_float(batch.get("estimated_total_cost_rmb"))
+    total_cost = actual_total_cost or estimated_total_cost
+    recorded_item_count = int(_as_float(batch.get("item_count")))
+    actual_item_count = len(items)
+
+    checks = {
+        "batch_exists": True,
+        "has_current_version": bool(resolved_version_name or batch.get("current_version")),
+        "is_confirmed": batch.get("confirm_status") == "Confirmed",
+        "has_dirty_data": batch.get("status") == "Dirty",
+        "has_items": actual_item_count > 0,
+        "has_total_cost": total_cost > 0,
+        **item_quality["checks"],
+    }
+
+    blocking_reasons = []
+    if not checks["has_current_version"]:
+        blocking_reasons.append("当前批次没有当前版本。")
+    if not checks["is_confirmed"]:
+        blocking_reasons.append("当前批次还没有确认。")
+    if checks["has_dirty_data"]:
+        blocking_reasons.append("当前批次存在未重新计算的数据。")
+    if not checks["has_items"]:
+        blocking_reasons.append("当前批次没有 SKU 明细。")
+    if not checks["has_total_cost"]:
+        blocking_reasons.append("当前批次没有可回写的综合成本结果。")
+    blocking_reasons.extend(item_quality["blocking_reasons"])
+
+    warning_reasons = []
+    if recorded_item_count and recorded_item_count != actual_item_count:
+        warning_reasons.append(f"批次记录明细数为 {recorded_item_count}，实际查询到 {actual_item_count} 条。")
+    if estimated_total_cost > 0 and actual_total_cost <= 0:
+        warning_reasons.append("当前只有系统计算成本，尚无凭证后的实际总成本。")
+
+    ready = not blocking_reasons
+    return {
+        "ready": ready,
+        "checks": checks,
+        "blocking_reasons": blocking_reasons,
+        "warning_reasons": warning_reasons,
+        "item_issue_counts": item_quality["issue_counts"],
+        "item_issue_examples": item_quality["issue_examples"],
+        "item_count": actual_item_count,
+        "total_cost_rmb": total_cost,
+        "message": "允许回写。" if ready else "当前批次暂不满足回写条件：" + "；".join(blocking_reasons),
+    }
+
+
 def get_audit_logs(batch_name: str, version_name: str | None = None, limit: int | str = 80) -> dict:
     normalized_limit = _normalize_limit(limit)
     if frappe is None:
@@ -963,38 +1291,85 @@ def get_audit_logs(batch_name: str, version_name: str | None = None, limit: int 
 
 def check_writeback_ready(batch_name: str, version_name: str | None = None) -> dict:
     if frappe is None:
+        blocking_reasons = ["当前未连接 Frappe，不能执行真实回写检查。"]
         return {
             "ok": True,
             "dry_run": True,
             "ready": False,
             "batch_name": batch_name,
             "version_name": version_name,
-            "checks": {},
-            "message": "当前未连接 Frappe，返回回写检查预览。",
+            "checks": {
+                "batch_exists": False,
+                "has_current_version": False,
+                "is_confirmed": False,
+                "has_dirty_data": False,
+                "has_items": False,
+                "has_total_cost": False,
+            },
+            "blocking_reasons": blocking_reasons,
+            "warning_reasons": [],
+            "item_issue_counts": {},
+            "item_issue_examples": [],
+            "item_count": 0,
+            "total_cost_rmb": 0,
+            "message": blocking_reasons[0],
         }
 
     batch_doc_name = _resolve_batch_name(batch_name)
     if not batch_doc_name:
-        return {"ok": False, "ready": False, "message": f"未找到批次：{batch_name}"}
+        return {
+            "ok": False,
+            "ready": False,
+            "batch_name": batch_name,
+            "version_name": version_name,
+            "checks": {"batch_exists": False},
+            "blocking_reasons": [f"未找到批次：{batch_name}"],
+            "warning_reasons": [],
+            "message": f"未找到批次：{batch_name}",
+        }
 
     resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
     batch = frappe.db.get_value(
         "Overseas Cost Batch",
         batch_doc_name,
-        ["status", "confirm_status", "current_version"],
+        [
+            "status",
+            "confirm_status",
+            "current_version",
+            "item_count",
+            "estimated_total_cost_rmb",
+            "actual_total_cost_rmb",
+        ],
         as_dict=True,
     ) or {}
-    checks = {
-        "has_current_version": bool(resolved_version_name or batch.get("current_version")),
-        "is_confirmed": batch.get("confirm_status") == "Confirmed",
-        "has_dirty_data": batch.get("status") == "Dirty",
-    }
-    ready = checks["has_current_version"] and checks["is_confirmed"] and not checks["has_dirty_data"]
+    item_filters = {"batch": batch_doc_name}
+    if resolved_version_name:
+        item_filters["version"] = resolved_version_name
+    items = frappe.get_all(
+        "Overseas Cost Item",
+        filters=item_filters,
+        fields=[
+            "name",
+            "row_no",
+            "excel_row_no",
+            "material_code",
+            "product_name",
+            "quantity",
+            "unit_price",
+            "purchase_currency",
+            "goods_value",
+            "total_unit_rmb",
+        ],
+        limit_page_length=10000,
+    )
+    readiness = _build_writeback_readiness(
+        batch=batch,
+        items=items,
+        resolved_version_name=resolved_version_name,
+    )
     return {
         "ok": True,
-        "ready": ready,
         "batch_name": batch_doc_name,
         "version_name": resolved_version_name,
-        "checks": checks,
-        "message": "允许回写。" if ready else "当前批次暂不满足回写条件。",
+        **readiness,
     }

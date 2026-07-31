@@ -86,6 +86,16 @@ def get_audit_logs(batch_name: str, version_name: str | None = None, limit: int 
 
 
 @frappe.whitelist()
+def export_current_result_xlsx(batch_names_json: str | None = None, transport_label: str | None = None) -> dict:
+    """导出当前筛选范围内的核算结果 xlsx。"""
+
+    return batch_service.export_current_result_xlsx(
+        batch_names_json=batch_names_json,
+        transport_label=transport_label,
+    )
+
+
+@frappe.whitelist()
 def get_dingtalk_order_link(batch_name: str) -> dict:
     """返回钉钉订单按钮使用的跳转信息。"""
 

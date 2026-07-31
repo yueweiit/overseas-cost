@@ -883,6 +883,14 @@
   border-bottom: 1px solid var(--ocw-line);
 }
 
+.ocw-hierarchy-table > thead > tr > th {
+  position: sticky;
+  top: 0;
+  z-index: 34;
+  background: #f7faf9;
+  box-shadow: 0 1px 0 var(--ocw-line), 0 4px 10px rgba(31, 41, 51, 0.06);
+}
+
 .ocw-hierarchy-table td {
   padding: 6px 7px;
   border-bottom: 1px solid var(--ocw-line);
@@ -1074,14 +1082,19 @@
 
 .ocw-child-sku-table th {
   position: sticky;
-  top: 0;
-  z-index: 4;
+  top: 34px;
+  z-index: 24;
   color: var(--ocw-muted);
   text-align: center;
   font-size: 11px;
   font-weight: 900;
   background: #fbfcfc;
+  box-shadow: 0 1px 0 #dce7e5, 0 4px 10px rgba(31, 41, 51, 0.05);
   vertical-align: top;
+}
+
+.ocw-child-sku-table > thead > tr > th.ocw-sticky-head {
+  z-index: 28;
 }
 
 .ocw-child-sku-table td {
