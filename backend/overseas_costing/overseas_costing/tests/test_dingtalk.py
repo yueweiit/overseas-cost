@@ -35,12 +35,14 @@ from overseas_costing.scripts.import_oa_logistics import (
     is_hidden_approval_status,
     is_sea_approval,
     load_env_file,
+    refresh_missing_oa_finished_times,
     resolve_logistics_process_code,
     resolve_purchase_process_code,
     refresh_existing_oa_logistics_details,
     pull_purchase_expense_approvals,
     preview_purchase_expenses_from_process,
     save_sea_approvals_to_erp,
+    sync_existing_oa_finished_times,
     sync_purchase_expenses_from_process,
     summarize_approval,
     summarize_purchase_approval,
@@ -1591,6 +1593,235 @@ def test_refresh_existing_oa_logistics_details_repulls_missing_trace(monkeypatch
     assert save_calls[0]["items"][0]["linked_purchase_approvals"][0]["source_instance_id"] == "PROC-PURCHASE-001"
     assert result["skipped_count"] == 2
     assert {item["batch_name"] for item in result["skipped_items"]} == {"BATCH-MISSING-ID", "BATCH-REVOKED"}
+
+
+def test_sync_existing_oa_finished_times_backfills_only_empty(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    rows = [
+        {
+            "name": "BATCH-MISSING-FINISH",
+            "batch_no": "HPCU5155607",
+            "source_approval_no": "202601291020000337788",
+            "source_instance_id": "PROC-SEA-TRACE",
+            "source_finished_at": "",
+            "extra_json": json.dumps(
+                {
+                    "source": "dingtalk_oa_logistics",
+                    "finish_time": "2026-04-21T17:16Z",
+                    "source_instance_id": "PROC-SEA-TRACE",
+                },
+                ensure_ascii=False,
+            ),
+        },
+        {
+            "name": "BATCH-HAS-FINISH",
+            "batch_no": "FSCU8486789",
+            "source_approval_no": "202607010001",
+            "source_instance_id": "PROC-HAS-FINISH",
+            "source_finished_at": "2026-07-01 09:30:00",
+            "extra_json": json.dumps(
+                {
+                    "source": "dingtalk_oa_logistics",
+                    "finish_time": "2026-07-01T09:30Z",
+                    "source_instance_id": "PROC-HAS-FINISH",
+                },
+                ensure_ascii=False,
+            ),
+        },
+        {
+            "name": "BATCH-NO-SNAPSHOT-FINISH",
+            "batch_no": "NO-FINISH",
+            "source_approval_no": "202607010002",
+            "source_instance_id": "PROC-NO-FINISH",
+            "source_finished_at": "",
+            "extra_json": json.dumps({"source": "dingtalk_oa_logistics"}, ensure_ascii=False),
+        },
+    ]
+    set_values = []
+    audit_payloads = []
+    commit_count = {"value": 0}
+
+    class FakeDB:
+        @staticmethod
+        def set_value(doctype, name, fieldname, value=None, **kwargs):
+            set_values.append(
+                {
+                    "doctype": doctype,
+                    "name": name,
+                    "fieldname": fieldname,
+                    "value": value,
+                    "update_modified": kwargs.get("update_modified"),
+                }
+            )
+
+        @staticmethod
+        def commit():
+            commit_count["value"] += 1
+
+    class FakeDoc:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def insert(self, **_kwargs):
+            audit_payloads.append(self.payload)
+            return self
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        class session:
+            user = "tester@example.com"
+
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            if doctype == "Overseas Cost Batch":
+                return rows
+            return []
+
+        @staticmethod
+        def get_doc(payload):
+            return FakeDoc(payload)
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+
+    result = sync_existing_oa_finished_times(limit=50)
+
+    assert result["ok"] is True
+    assert result["scanned_count"] == 3
+    assert result["updated_count"] == 1
+    assert result["skipped_count"] == 2
+    assert set_values == [
+        {
+            "doctype": "Overseas Cost Batch",
+            "name": "BATCH-MISSING-FINISH",
+            "fieldname": "source_finished_at",
+            "value": "2026-04-21 17:16:00",
+            "update_modified": False,
+        }
+    ]
+    assert audit_payloads[0]["field_name"] == "source_finished_at"
+    assert "暂估汇率" in audit_payloads[0]["action_remark"]
+    assert commit_count["value"] == 1
+    assert result["items"][0]["source_finished_at"] == "2026-04-21 17:16:00"
+    assert {item["batch_name"] for item in result["skipped_items"]} == {"BATCH-HAS-FINISH", "BATCH-NO-SNAPSHOT-FINISH"}
+
+
+def test_refresh_missing_oa_finished_times_only_updates_finish_fields(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    rows = [
+        {
+            "name": "BATCH-MISSING-FINISH",
+            "batch_no": "HPCU5155607",
+            "source_approval_no": "202601291020000337788",
+            "source_instance_id": "PROC-SEA-TRACE",
+            "source_dingtalk_url": "",
+            "source_approval_status": "",
+            "source_finished_at": "",
+            "extra_json": json.dumps({"source": "dingtalk_oa_logistics"}, ensure_ascii=False),
+        },
+        {
+            "name": "BATCH-NO-FINISH",
+            "batch_no": "NO-FINISH",
+            "source_approval_no": "202607010001",
+            "source_instance_id": "PROC-NO-FINISH",
+            "source_dingtalk_url": "",
+            "source_approval_status": "",
+            "source_finished_at": "",
+            "extra_json": json.dumps({"source": "dingtalk_oa_logistics"}, ensure_ascii=False),
+        },
+    ]
+    detail_calls = []
+    set_values = []
+    audit_payloads = []
+    commit_count = {"value": 0}
+
+    class FakeDB:
+        @staticmethod
+        def set_value(doctype, name, fieldname, value=None, **kwargs):
+            set_values.append(
+                {
+                    "doctype": doctype,
+                    "name": name,
+                    "fieldname": fieldname,
+                    "value": value,
+                    "update_modified": kwargs.get("update_modified"),
+                }
+            )
+
+        @staticmethod
+        def commit():
+            commit_count["value"] += 1
+
+    class FakeDoc:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def insert(self, **_kwargs):
+            audit_payloads.append(self.payload)
+            return self
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        class session:
+            user = "tester@example.com"
+
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            assert kwargs["filters"] == {"source_type": "oa_logistics", "source_finished_at": ["in", ["", None]]}
+            if doctype == "Overseas Cost Batch":
+                return rows
+            return []
+
+        @staticmethod
+        def get_doc(payload):
+            return FakeDoc(payload)
+
+    def fake_get_process_instance_detail(**kwargs):
+        detail_calls.append(kwargs)
+        return {"processInstanceId": kwargs["process_instance_id"]}
+
+    def fake_summarize_approval(detail, **_kwargs):
+        if detail["processInstanceId"] == "PROC-NO-FINISH":
+            return {
+                "source_instance_id": "PROC-NO-FINISH",
+                "source_approval_no": "202607010001",
+                "source_dingtalk_url": "",
+                "approval_status": "RUNNING",
+                "finish_time": "",
+            }
+        return {
+            "source_instance_id": "PROC-SEA-TRACE",
+            "source_approval_no": "202601291020000337788",
+            "source_dingtalk_url": "https://aflow.dingtalk.com/example",
+            "approval_status": "COMPLETED",
+            "finish_time": "2026-04-21T17:16Z",
+        }
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_oa_logistics, "resolve_dingtalk_env_file", lambda env_file=None: "")
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "TOKEN")
+    monkeypatch.setattr(import_oa_logistics, "get_process_instance_detail", fake_get_process_instance_detail)
+    monkeypatch.setattr(import_oa_logistics, "summarize_approval", fake_summarize_approval)
+
+    result = refresh_missing_oa_finished_times(limit=50)
+
+    assert result["ok"] is True
+    assert result["scanned_count"] == 2
+    assert result["updated_count"] == 1
+    assert result["skipped_count"] == 1
+    assert {call["process_instance_id"] for call in detail_calls} == {"PROC-SEA-TRACE", "PROC-NO-FINISH"}
+    assert set_values[0]["doctype"] == "Overseas Cost Batch"
+    assert set_values[0]["name"] == "BATCH-MISSING-FINISH"
+    assert set_values[0]["fieldname"]["source_finished_at"] == "2026-04-21 17:16:00"
+    assert set_values[0]["fieldname"]["source_approval_status"] == "COMPLETED"
+    assert "extra_json" in set_values[0]["fieldname"]
+    assert set_values[0]["update_modified"] is False
+    assert audit_payloads[0]["field_name"] == "source_finished_at"
+    assert "暂估汇率" in audit_payloads[0]["action_remark"]
+    assert commit_count["value"] == 1
 
 
 def test_revoked_approval_is_skipped_when_saving_oa_trace() -> None:

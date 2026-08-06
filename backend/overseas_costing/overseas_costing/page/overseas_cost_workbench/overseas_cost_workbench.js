@@ -24,6 +24,7 @@ class OverseasCostWorkbench {
     this.batchColumns = [];
     this.expandedBatchNames = new Set();
     this.activeBatchName = "";
+    this.exportPinnedBatchName = "";
     this.dataCheckBatchName = "";
     this.filters = {
       customs_no: "",
@@ -39,6 +40,7 @@ class OverseasCostWorkbench {
     this.specialOverrideFields = new Set(["weight_ratio", "alloc_price_mxn", "total_cost_rmb", "total_unit_rmb"]);
     this.selectOptions = {
       transport_mode: ["SEA", "AIR", "EXPRESS"],
+      purchase_currency: ["RMB", "USD", "MXN"],
     };
     this.auditEvents = [];
     this.lastImportResult = null;
@@ -124,10 +126,9 @@ class OverseasCostWorkbench {
                 <div class="ocw-head-actions">
                   <span class="ocw-summary-pill" data-area="hierarchy-summary">加载批次中</span>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="file-parse">文件解析</button>
-                <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-categories">名称归并</button>
+                  <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-categories">商品归类</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="open-import">Excel 导入</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="export-current">导出当前结果</button>
-                  <button class="ocw-primary-btn ocw-mini-btn" data-action="recalculate">重新试算</button>
                   <button class="ocw-primary-btn ocw-mini-btn" data-action="add-batch">+ 添加报关运单</button>
                 </div>
               </div>
@@ -189,8 +190,8 @@ class OverseasCostWorkbench {
               </article>
             <article class="ocw-bottom-panel">
               <div class="ocw-bottom-panel-head">
-                <h2>当前批次数据检查</h2>
-                <select class="form-control ocw-batch-select" data-role="data-check-batch-select" aria-label="选择数据检查批次"></select>
+                <h2>AI 分摊填入</h2>
+                <select class="form-control ocw-batch-select" data-role="data-check-batch-select" aria-label="选择 AI 分摊填入批次"></select>
               </div>
               <div class="ocw-diff-wrap" data-area="diff-panel"></div>
             </article>
@@ -211,6 +212,7 @@ class OverseasCostWorkbench {
       const batchName = $(event.currentTarget).attr("data-batch-name");
       if (batchName) {
         this.activeBatchName = batchName;
+        this.exportPinnedBatchName = batchName;
         this.renderDiffPanel();
         this.updateRecalculateAction();
         const batch = this.findBatch(batchName);
@@ -224,7 +226,7 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='set-transport-filter']", (event) =>
       this.setTransportFilter($(event.currentTarget).attr("data-transport-mode")).catch((error) => this.showError(error))
     );
-    this.$root.on("click", "[data-action='recalculate']", () => this.recalculate());
+    this.$root.on("click", "[data-action='recalculate']", (event) => this.recalculate($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='open-import']", () => this.openImportDialog());
     this.$root.on("change", "[data-role='data-check-batch-select']", (event) => {
       const batchName = String($(event.currentTarget).val() || "");
@@ -238,7 +240,7 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='preview-categories']", () => this.openCategoryPreviewDialog());
     this.$root.on("click", "[data-action='file-parse']", () => this.openFileParseDialog());
     this.$root.on("click", "[data-action='export-current']", () => this.exportCurrentResult().catch((error) => this.showError(error)));
-    this.$root.on("click", "[data-action='open-dingtalk']", (event) => this.openApprovalSourceDialog($(event.currentTarget).attr("data-batch-name")));
+    this.$root.on("click", "[data-action='open-dingtalk']", (event) => this.openDingtalkOrder($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='preview-purchase']", (event) => this.openPurchasePreviewDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='oa-attachments']", (event) => this.openOaAttachmentDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='source-center']", (event) => this.openSourceCenterDialog($(event.currentTarget).attr("data-batch-name")));
@@ -259,6 +261,10 @@ class OverseasCostWorkbench {
       );
     });
     this.$root.on("dblclick", "[data-editable-cell='1']", (event) => this.startCellEdit($(event.currentTarget), event));
+    this.$root.on("click", "[data-editable-cell='1'][data-fieldname='purchase_currency']", (event) => {
+      if ($(event.target).closest(".ocw-cell-editor").length) return;
+      this.startCellEdit($(event.currentTarget), event, true);
+    });
     this.$root.on("keydown", ".ocw-cell-editor", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
@@ -377,6 +383,7 @@ class OverseasCostWorkbench {
     }
     this.setTableLoading();
     try {
+      this.exportPinnedBatchName = "";
       this.batchItems = {};
       await this.prefetchBatchItems(this.batches);
       this.visibleBatches = this.filterBatches();
@@ -399,6 +406,7 @@ class OverseasCostWorkbench {
 
   async setTransportFilter(mode = "") {
     this.filters.transport_mode = this.normalizeTransportMode(mode);
+    this.exportPinnedBatchName = "";
     if (!this.batches.length) {
       await this.loadBatches();
       return;
@@ -421,11 +429,15 @@ class OverseasCostWorkbench {
   syncActiveSelectionWithVisible() {
     if (!this.visibleBatches.length) {
       this.activeBatchName = "";
+      this.exportPinnedBatchName = "";
       this.dataCheckBatchName = "";
       return;
     }
     if (!this.visibleBatches.some((batch) => batch.name === this.activeBatchName)) {
       this.activeBatchName = this.visibleBatches[0].name;
+    }
+    if (this.exportPinnedBatchName && !this.visibleBatches.some((batch) => batch.name === this.exportPinnedBatchName)) {
+      this.exportPinnedBatchName = "";
     }
     if (!this.visibleBatches.some((batch) => batch.name === this.dataCheckBatchName)) {
       this.dataCheckBatchName = this.activeBatchName;
@@ -443,9 +455,11 @@ class OverseasCostWorkbench {
     await this.loadBatches();
   }
 
-  async recalculate() {
-    const batch = this.getActiveBatch();
+  async recalculate(batchName = "") {
+    const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
     if (!batch) return;
+    this.activeBatchName = batch.name;
+    this.exportPinnedBatchName = batch.name;
     try {
       const result = await this.call(
         "overseas_costing.api.calculate.recalculate_batch",
@@ -456,13 +470,13 @@ class OverseasCostWorkbench {
         true
       );
       const summary = result.summary_snapshot || {};
-      this.applyRecalculateSummary(batch.name, summary);
+      this.applyRecalculateSummary(batch.name, summary, result.allocation_rules || []);
       await this.loadBatchItems(batch.name, batch.current_version, true);
       await this.loadAuditLogs(batch.name, batch.current_version);
       this.renderTable();
       this.lastRecalculateResult = { batch_name: batch.name, summary };
       this.renderRecalculateResult(batch.name, summary);
-      frappe.show_alert({ message: "重新试算完成", indicator: "green" });
+      frappe.show_alert({ message: result.message || "重新试算完成", indicator: summary.ai_allocation?.ok ? "green" : "orange" });
     } catch (error) {
       this.showError(error);
     }
@@ -472,6 +486,7 @@ class OverseasCostWorkbench {
     const batch = this.findBatch(batchName);
     if (!batch) return;
     this.activeBatchName = batch.name;
+    this.exportPinnedBatchName = batch.name;
     try {
       await this.loadBatchItems(batch.name, batch.current_version, true);
       await this.loadAuditLogs(batch.name, batch.current_version);
@@ -481,7 +496,7 @@ class OverseasCostWorkbench {
     }
   }
 
-  applyRecalculateSummary(batchName, summary) {
+  applyRecalculateSummary(batchName, summary, allocationRules = []) {
     const batch = this.findBatch(batchName);
     if (!batch) return;
     batch.status = "Calculated";
@@ -489,6 +504,9 @@ class OverseasCostWorkbench {
     if (summary.total_goods_value !== undefined) batch.total_goods_value = summary.total_goods_value;
     if (summary.total_gross_weight_kg !== undefined) batch.total_gross_weight_kg = summary.total_gross_weight_kg;
     if (summary.total_cost_rmb !== undefined) batch.estimated_total_cost_rmb = summary.total_cost_rmb;
+    batch.summary_snapshot = summary;
+    batch.ai_allocation = summary.ai_allocation || {};
+    if (Array.isArray(allocationRules)) batch.allocation_rule_snapshot = allocationRules;
   }
 
   openFileParseDialog() {
@@ -530,7 +548,10 @@ class OverseasCostWorkbench {
               <div class="ocw-voucher-records">
                 <div class="ocw-voucher-records-head">
                   <strong>已保存解析记录</strong>
-                  <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="refresh-voucher-records">刷新</button>
+                  <div class="ocw-voucher-records-actions">
+                    <button class="ocw-outline-btn ocw-mini-btn" type="button" data-action="refresh-voucher-records">刷新</button>
+                    <button class="ocw-danger-btn ocw-mini-btn" type="button" data-action="delete-voucher-records">删除</button>
+                  </div>
                 </div>
                 <div class="ocw-voucher-record-list loading" data-area="voucher-records">加载中</div>
               </div>
@@ -609,6 +630,10 @@ class OverseasCostWorkbench {
     dialog.$wrapper.on("click", "[data-action='refresh-voucher-records']", (event) => {
       event.preventDefault();
       this.loadTaxCertificateRecords(dialog).catch((error) => this.showError(error));
+    });
+    dialog.$wrapper.on("click", "[data-action='delete-voucher-records']", (event) => {
+      event.preventDefault();
+      this.deleteTaxCertificateRecords(dialog).catch((error) => this.showError(error));
     });
     dialog.$wrapper.on("click", "[data-action='open-voucher-record']", (event) => {
       event.preventDefault();
@@ -742,6 +767,10 @@ class OverseasCostWorkbench {
   renderTaxCertificateRecords(dialog, result) {
     const $records = dialog.$wrapper.find("[data-area='voucher-records']");
     const items = (result && result.items) || [];
+    const recordNames = items.map((row) => String((row && row.name) || "").trim()).filter(Boolean);
+    dialog.$wrapper.data("ocw-voucher-record-names", recordNames);
+    dialog.$wrapper.data("ocw-voucher-record-count", recordNames.length);
+    dialog.$wrapper.find("[data-action='delete-voucher-records']").prop("disabled", false);
     $records.removeClass("loading ready empty");
     if (!items.length) {
       $records.addClass("empty").text("暂无保存记录");
@@ -782,6 +811,34 @@ class OverseasCostWorkbench {
         </div>
       </div>
     `;
+  }
+
+  async deleteTaxCertificateRecords(dialog) {
+    const batchName = dialog.$wrapper.data("ocw-voucher-batch-name") || "";
+    const recordNames = dialog.$wrapper.data("ocw-voucher-record-names") || [];
+    const targetNames = Array.isArray(recordNames) ? recordNames.filter(Boolean) : [];
+    const recordCount = targetNames.length;
+    if (!recordCount) {
+      frappe.msgprint("当前列表没有可删除的解析记录。");
+      return;
+    }
+    frappe.confirm(
+      `确认删除当前列表显示的 ${recordCount} 条完税凭证解析记录？删除后只移除解析记录，不会删除批次和物料明细。`,
+      async () => {
+        const result = await this.call(
+          "overseas_costing.api.import_api.delete_tax_certificate_parse_records",
+          { record_names_json: JSON.stringify(targetNames) },
+          true
+        );
+        if (!result || !result.ok) {
+          frappe.msgprint((result && result.message) || "删除解析记录失败。");
+          return;
+        }
+        frappe.show_alert({ message: result.message || "解析记录已删除。", indicator: "green" });
+        await this.loadTaxCertificateRecords(dialog);
+        await this.refreshBatch(batchName).catch((error) => this.showError(error));
+      }
+    );
   }
 
   async openTaxCertificateRecordDialog(recordName) {
@@ -834,6 +891,10 @@ class OverseasCostWorkbench {
     const batchLabel = batch.customs_no || batch.waybill_no || batch.batch_no || batch.container_no || batch.name || "--";
     const itemCount = `${summary.item_count || items.length || record.item_count || 0} / ${summary.declared_item_count ?? record.declared_item_count ?? "--"}`;
     const rows = items.map((row) => this.renderVoucherItemRow(row)).join("");
+    const fxSync = parseResult.fx_sync || {};
+    const rawPaymentDate = header.payment_date || record.payment_date || "";
+    const paymentDateText = this.formatVoucherPaymentDate(rawPaymentDate, fxSync.normalized_payment_date || fxSync.payment_date || "");
+    const systemFxInfo = this.formatSystemPaymentFx(fxSync, rawPaymentDate);
 
     return `
       <div class="ocw-voucher-record-detail">
@@ -850,8 +911,14 @@ class OverseasCostWorkbench {
           <div><span>柜号</span><strong>${this.escape(record.container_no || header.container_no || "--")}</strong></div>
           <div><span>匹配批次</span><strong>${this.escape(batchLabel)}</strong></div>
           <div><span>文件名</span><strong title="${this.escape(record.file_name || parseResult.source_name || "")}">${this.escape(record.file_name || parseResult.source_name || "--")}</strong></div>
-          <div><span>支付日期</span><strong>${this.escape(header.payment_date || record.payment_date || "--")}</strong></div>
-          <div><span>汇率</span><strong>${this.escape(this.formatValidationValue(header.exchange_rate))}</strong></div>
+          <div><span>支付日期</span><strong title="${this.escape(rawPaymentDate)}">${this.escape(paymentDateText)}</strong></div>
+          <div><span>凭证原始汇率</span><strong>${this.escape(this.formatValidationValue(header.exchange_rate))}</strong></div>
+          <div class="ocw-voucher-summary-wide">
+            <span>${this.escape(systemFxInfo.heading || "系统采用汇率")}</span>
+            <div class="ocw-system-fx-lines" title="${this.escape(systemFxInfo.title)}">
+              ${systemFxInfo.lines.map((line) => `<strong>${this.escape(line)}</strong>`).join("")}
+            </div>
+          </div>
           <div><span>毛重 KG</span><strong>${this.escape(this.formatValidationValue(header.gross_weight_kg))}</strong></div>
           <div><span>支付总额 MXN</span><strong>${this.escape(this.formatValidationValue(summary.paid_total_mxn ?? record.paid_total_mxn))}</strong></div>
           <div><span>税费合计 MXN</span><strong>${this.escape(this.formatValidationValue(summary.tax_total_sum_mxn ?? record.tax_total_sum_mxn))}</strong></div>
@@ -1057,6 +1124,7 @@ class OverseasCostWorkbench {
     const reconciliationHtml = this.renderVoucherReconciliation(reconciliation, { showSaveButton: false });
     const reconciliationText = reconciliation.status_label ? `，对比${reconciliation.status_label}` : "";
     const canSave = Boolean(reconciliation.batch && reconciliation.batch.name);
+    const paymentDateText = this.formatVoucherPaymentDate(header.payment_date || "");
     this.updateVoucherPrimarySaveAction(dialog, canSave);
 
     $status.text(`预览完成：校验${statusText}${reconciliationText}。`);
@@ -1072,8 +1140,8 @@ class OverseasCostWorkbench {
         <div><span>报关单号</span><strong>${this.escape(header.pedimento_no || "--")}</strong></div>
         <div><span>凭证参考号</span><strong>${this.escape(header.pedimento_ref || header.pedimento_short_no || "--")}</strong></div>
         <div><span>柜号</span><strong>${this.escape(header.container_no || "--")}</strong></div>
-        <div><span>支付日期</span><strong>${this.escape(header.payment_date || "--")}</strong></div>
-        <div><span>汇率</span><strong>${this.escape(this.formatValue(header.exchange_rate || "--"))}</strong></div>
+        <div><span>支付日期</span><strong title="${this.escape(header.payment_date || "")}">${this.escape(paymentDateText)}</strong></div>
+        <div><span>凭证原始汇率</span><strong>${this.escape(this.formatValue(header.exchange_rate || "--"))}</strong></div>
         <div><span>毛重 KG</span><strong>${this.escape(this.formatValue(header.gross_weight_kg || "--"))}</strong></div>
         <div><span>支付总额 MXN</span><strong>${this.escape(this.formatNumber(summary.paid_total_mxn || 0))}</strong></div>
         <div><span>商品分项</span><strong>${this.escape(String(summary.item_count || items.length || 0))} / ${this.escape(String(declaredCount))}</strong></div>
@@ -1130,15 +1198,28 @@ class OverseasCostWorkbench {
   }
 
   renderVoucherTaxChips(taxes = {}) {
-    return [
-      ["DTA", taxes.dta_mxn],
-      ["PRV", taxes.prv_mxn],
-      ["PRV IVA", taxes.prv_iva_mxn],
-      ["IGI/IGE", taxes.igi_mxn],
-      ["IVA", taxes.iva_mxn],
-    ]
-      .map(([label, value]) => `<span>${this.escape(label)} ${this.escape(this.formatNumber(value || 0))}</span>`)
-      .join("");
+    const rows = [
+      ["海关手续费（DTA）", taxes.dta_mxn],
+      ["预验证费（PRV）", taxes.prv_mxn],
+      ["预验证增值税（PRV IVA）", taxes.prv_iva_mxn],
+      ["进口关税（IGI/IGE）", taxes.igi_mxn],
+      ["进口增值税（IVA）", taxes.iva_mxn],
+    ];
+    return `
+      <div class="ocw-voucher-tax-title">税费构成 MXN</div>
+      <div class="ocw-voucher-tax-grid">
+        ${rows
+          .map(
+            ([label, value]) => `
+              <div class="ocw-voucher-tax-item">
+                <span>${this.escape(label)}</span>
+                <strong>${this.escape(this.formatNumber(value || 0))}</strong>
+              </div>
+            `
+          )
+          .join("")}
+      </div>
+    `;
   }
 
   renderVoucherReconciliation(reconciliation, options = {}) {
@@ -1258,6 +1339,74 @@ class OverseasCostWorkbench {
     if (Array.isArray(value)) return value.join("、");
     if (typeof value === "object") return JSON.stringify(value);
     return String(value);
+  }
+
+  normalizeVoucherPaymentDate(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    const dateOnly = text.split(/\s+/)[0].replace(/[年月.]/g, "-").replace(/日/g, "");
+    let match = dateOnly.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    if (match) {
+      const [, year, month, day] = match;
+      return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+    match = dateOnly.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+    if (match) {
+      const [, day, month, year] = match;
+      return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+    return text;
+  }
+
+  formatVoucherPaymentDate(rawDate, preferredDate = "") {
+    const raw = String(rawDate || "").trim();
+    const normalized = this.normalizeVoucherPaymentDate(preferredDate || raw);
+    if (!normalized && !raw) return "--";
+    if (!raw || raw === normalized) return normalized || raw;
+    return `${normalized || raw}（原始：${raw}）`;
+  }
+
+  formatSystemPaymentFx(fxSync = {}, rawPaymentDate = "") {
+    const hasFx = fxSync && (fxSync.action === "updated" || fxSync.action === "unchanged" || fxSync.usd_to_rmb || fxSync.rmb_to_mxn);
+    if (!hasFx) {
+      const message = fxSync.reason || fxSync.message || "未保存系统汇率；保存后优先按真实付款日查询，缺失时按付款审批完成日暂估。";
+      return { heading: "系统采用汇率", title: message, lines: [message] };
+    }
+
+    const rateDate = this.normalizeVoucherPaymentDate(
+      fxSync.normalized_fx_rate_date || fxSync.fx_rate_date || fxSync.normalized_payment_date || fxSync.payment_date || rawPaymentDate || ""
+    );
+    const sourceLabel = fxSync.fx_date_source_label || (fxSync.is_estimated_rate ? "付款审批完成日（暂估）" : "真实付款日");
+    const heading = fxSync.is_estimated_rate ? "系统采用汇率（暂估）" : "系统采用汇率";
+    const usdToRmb = this.numericOrNull(fxSync.usd_to_rmb);
+    const rmbToMxn = this.numericOrNull(fxSync.rmb_to_mxn);
+    const snapshotMxnRate = fxSync.rate_snapshots && fxSync.rate_snapshots.MXN
+      ? this.numericOrNull(fxSync.rate_snapshots.MXN.cny_per_unit)
+      : null;
+    const mxnToRmb = this.numericOrNull(fxSync.fx_mxn_to_rmb) || snapshotMxnRate || (rmbToMxn ? 1 / rmbToMxn : null);
+    const isFallbackRate = Boolean(fxSync.fallback_rate_source);
+    const parts = [`${sourceLabel}：${rateDate || "未识别"}`];
+    if (isFallbackRate) {
+      parts.push(fxSync.fallback_message || "汇率库缺少付款日汇率，当前成本暂用版本汇率");
+      parts.push(`汇率来源：${fxSync.fallback_rate_source_label || "当前版本汇率（暂用）"}`);
+    } else if (fxSync.is_estimated_rate) {
+      parts.push("后续拿到真实付款日后需重算确认");
+    } else if (!fxSync.normalized_fx_rate_date && !fxSync.normalized_payment_date && !fxSync.rate_snapshots) {
+      parts.push("历史保存汇率");
+    }
+    parts.push(`1 USD = ${usdToRmb ? this.formatNumber(usdToRmb) : "--"} RMB`);
+    if (mxnToRmb && rmbToMxn) {
+      parts.push(`1 MXN = ${this.formatNumber(mxnToRmb)} RMB（按 1 RMB = ${this.formatNumber(rmbToMxn)} MXN 换算）`);
+    } else {
+      parts.push(`1 MXN = ${mxnToRmb ? this.formatNumber(mxnToRmb) : "--"} RMB`);
+    }
+    return { heading, title: parts.join("；"), lines: parts };
+  }
+
+  numericOrNull(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const number = Number(String(value).replace(/,/g, ""));
+    return Number.isFinite(number) ? number : null;
   }
 
   renderVoucherItemRow(row) {
@@ -1624,6 +1773,10 @@ class OverseasCostWorkbench {
   renderRecalculateResult(batchName, summary = {}) {
     const batch = this.findBatch(batchName) || this.getVisibleActiveBatch();
     const label = batch ? batch.waybill_no || batch.batch_no || batch.name : batchName;
+    const ai = summary.ai_allocation || {};
+    const aiText = ai.ok
+      ? `AI基础分摊：已填入（${ai.model || "DeepSeek"}）`
+      : `AI基础分摊：${ai.message || "未生成，已使用系统基础规则"}`;
     const parts = [
       `批次 ${label || "--"}`,
       `SKU ${this.formatValue(summary.item_count || 0)} 行`,
@@ -1631,6 +1784,7 @@ class OverseasCostWorkbench {
       `毛重 ${this.formatNumber(summary.total_gross_weight_kg || 0)} KG`,
       `综合成本 ${this.formatNumber(summary.total_cost_rmb || 0)} RMB`,
       `规则 ${this.formatValue(summary.rule_count || 0)} 条`,
+      aiText,
     ];
     this.$root
       .find("[data-area='search-result']")
@@ -1651,7 +1805,7 @@ class OverseasCostWorkbench {
     const batchSelectDisabled = selectableBatches.length ? "" : " disabled";
 
     const dialog = new frappe.ui.Dialog({
-      title: "商品名称归并预览",
+      title: "AI 商品业务归类预览",
       fields: [
         {
           fieldtype: "HTML",
@@ -1660,12 +1814,12 @@ class OverseasCostWorkbench {
             <div class="ocw-category-toolbar">
               <label>
                 <span>当前批次</span>
-                <select class="form-control ocw-batch-select" data-role="category-batch-select" aria-label="选择名称归并批次"${batchSelectDisabled}>${batchOptions}</select>
+                <select class="form-control ocw-batch-select" data-role="category-batch-select" aria-label="选择商品归类批次"${batchSelectDisabled}>${batchOptions}</select>
               </label>
               <em>${this.escape(this.scopedBatchHint())}</em>
             </div>
             <div class="ocw-category-preview" data-area="category-preview">
-              <div class="ocw-category-loading">正在检查当前批次是否存在需要统一名称的商品...</div>
+              <div class="ocw-category-loading">正在检查当前批次是否存在可建议的业务大类...</div>
             </div>
           `,
         },
@@ -1694,7 +1848,7 @@ class OverseasCostWorkbench {
 
   async loadCategoryPreview(dialog, batch) {
     dialog.$wrapper.find("[data-area='category-preview']").html(`
-      <div class="ocw-category-loading">正在检查当前批次是否存在需要统一名称的商品...</div>
+      <div class="ocw-category-loading">正在检查当前批次是否存在可建议的业务大类...</div>
     `);
     const result = await this.call(
       "overseas_costing.api.category.preview_batch_categories",
@@ -1713,7 +1867,7 @@ class OverseasCostWorkbench {
     if (!result || !result.ok) {
       $target.html(`
         <div class="ocw-category-empty">
-          <strong>暂时无法生成名称归并预览</strong>
+          <strong>暂时无法生成商品归类预览</strong>
           <span>${this.escape((result && result.message) || "请确认当前批次已有物料明细。")}</span>
         </div>
       `);
@@ -1733,13 +1887,15 @@ class OverseasCostWorkbench {
       <div class="ocw-category-summary">
         <div><span>当前批次</span><strong>${this.escape(batchLabel || "--")}</strong></div>
         <div><span>物料行数</span><strong>${this.escape(String(summary.item_count || items.length || 0))}</strong></div>
-        <div><span>归并候选</span><strong>${this.escape(String(summary.normalization_candidate_count || 0))}</strong></div>
+        <div><span>归类候选</span><strong>${this.escape(String(summary.business_category_candidate_count || summary.normalization_candidate_count || 0))}</strong></div>
+        <div><span>AI命中</span><strong>${this.escape(String(summary.ai_business_category_count || summary.ai_normalization_count || 0))}</strong></div>
         <div><span>无需处理</span><strong>${this.escape(String(summary.no_action_count || 0))}</strong></div>
+        <div><span>影响税费</span><strong>不影响</strong></div>
       </div>
       <div class="ocw-category-note">
-        仅提示名称不同但实际可能是同一商品的少量候选，例如“墨镜”统一为“太阳眼镜”。普通商品不归类；不会因“袋 / bolsa”等泛词归为包装材料，也不会自动写回。
+        AI 用于把不同语言、不同写法的商品归到统一业务大类，辅助查询、汇总和分摊参考；不会修改海关进口名称、HS 编码、税率和完税金额。
       </div>
-      <div class="ocw-category-counts">${countChips || "<span>当前批次没有需要归并的名称</span>"}</div>
+      <div class="ocw-category-counts">${countChips || "<span>当前批次没有明确的归类候选</span>"}</div>
       <div class="ocw-category-table-wrap">
         <table class="ocw-category-table">
           <thead>
@@ -1748,7 +1904,7 @@ class OverseasCostWorkbench {
               <th>中文品名</th>
               <th>海关进口名称</th>
               <th>规格型号</th>
-              <th>建议统一名称</th>
+              <th>建议业务大类</th>
               <th>状态</th>
               <th>原因</th>
             </tr>
@@ -1767,7 +1923,7 @@ class OverseasCostWorkbench {
         <td title="${this.escape(row.product_name || "")}">${this.escape(row.product_name || "--")}</td>
         <td title="${this.escape(row.import_name || "")}">${this.escape(row.import_name || "--")}</td>
         <td title="${this.escape(row.spec_model || "")}">${this.escape(row.spec_model || "--")}</td>
-        <td><strong>${this.escape(row.suggested_name || "--")}</strong></td>
+        <td><strong>${this.escape(row.suggested_business_category || row.suggested_name || "--")}</strong></td>
         <td><span class="ocw-category-status ${this.escape(status.className)}">${this.escape(status.label)}</span></td>
         <td title="${this.escape(row.reason || "")}">${this.escape(row.reason || "--")}</td>
       </tr>
@@ -1776,9 +1932,12 @@ class OverseasCostWorkbench {
 
   categoryStatusInfo(row) {
     if (row.needs_review) {
+      if (row.ai_ready || row.match_type === "ai_business_category" || row.match_type === "ai_name_normalization") {
+        return { label: "AI候选", className: "ai", rowClass: "needs-ai" };
+      }
       return { label: "待确认", className: "review", rowClass: "needs-review" };
     }
-    return { label: "无需归并", className: "noop", rowClass: "" };
+    return { label: "无需归类", className: "noop", rowClass: "" };
   }
 
   formatConfidence(value) {
@@ -2017,18 +2176,6 @@ class OverseasCostWorkbench {
                 <strong>钉钉原单</strong>
                 <span>打开当前批次对应的钉钉审批表</span>
               </button>
-              <button class="ocw-quick-card" data-action="approval-attachments">
-                <strong>发起附件</strong>
-                <span>查看发起表单上传的装箱单、提单、发票等附件</span>
-              </button>
-              <button class="ocw-quick-card" data-action="approval-purchase">
-                <strong>采购支出单</strong>
-                <span>查看关联采购审批，同步单价、币种、总金额</span>
-              </button>
-              <button class="ocw-quick-card" data-action="approval-logistics-quote">
-                <strong>物流报价</strong>
-                <span>查看 OA 填写的报价候选，确认后才计入物流成本</span>
-              </button>
             </div>
           `,
         },
@@ -2042,18 +2189,6 @@ class OverseasCostWorkbench {
       .off("click.ocwApprovalSource")
       .on("click.ocwApprovalSource", "[data-action='approval-open-original']", () => {
         this.openDingtalkOrder(batch.name);
-      })
-      .on("click.ocwApprovalSource", "[data-action='approval-attachments']", () => {
-        dialog.hide();
-        this.openOaAttachmentDialog(batch.name);
-      })
-      .on("click.ocwApprovalSource", "[data-action='approval-purchase']", () => {
-        dialog.hide();
-        this.openPurchasePreviewDialog(batch.name);
-      })
-      .on("click.ocwApprovalSource", "[data-action='approval-logistics-quote']", () => {
-        dialog.hide();
-        this.openLogisticsQuoteDialog(batch.name);
       });
   }
 
@@ -2700,9 +2835,9 @@ class OverseasCostWorkbench {
                 <span>当前批次</span>
                 <strong>${this.escape(batchLabel)}</strong>
               </div>
-              <button class="ocw-quick-card" data-action="more-refresh">
-                <strong>刷新数据</strong>
-                <span>重新读取当前批次明细和计算结果</span>
+              <button class="ocw-quick-card" data-action="more-open-dingtalk">
+                <strong>审批单</strong>
+                <span>打开钉钉原始审批表</span>
               </button>
               <button class="ocw-quick-card danger" data-action="more-delete">
                 <strong>删除批次</strong>
@@ -2719,9 +2854,9 @@ class OverseasCostWorkbench {
     dialog.$wrapper.addClass("ocw-quick-modal");
     dialog.$wrapper
       .off("click.ocwRowMore")
-      .on("click.ocwRowMore", "[data-action='more-refresh']", () => {
+      .on("click.ocwRowMore", "[data-action='more-open-dingtalk']", () => {
         dialog.hide();
-        this.refreshBatch(batch.name);
+        this.openDingtalkOrder(batch.name);
       })
       .on("click.ocwRowMore", "[data-action='more-delete']", () => {
         dialog.hide();
@@ -4334,10 +4469,11 @@ class OverseasCostWorkbench {
           <col class="ocw-col-customs" />
           <col class="ocw-col-waybill" />
           <col class="ocw-col-count" />
-          <col class="ocw-col-money" />
-          <col class="ocw-col-money-wide" />
+          <col class="ocw-col-state" />
+          <col class="ocw-col-value" />
           <col class="ocw-col-money" />
           <col class="ocw-col-value" />
+          <col class="ocw-col-voucher" />
           <col class="ocw-col-action" />
         </colgroup>
         <thead>
@@ -4346,10 +4482,11 @@ class OverseasCostWorkbench {
             <th>${this.escape(labels.sourceNo)}</th>
             <th>${this.escape(labels.logisticsNo)}</th>
             <th>SKU数</th>
-            <th>${this.escape(labels.miscRmb)}</th>
-            <th>${this.escape(labels.miscMxn)}</th>
-            <th>${this.escape(labels.mainFreight)}</th>
+            <th>资料状态</th>
             <th>采购货值</th>
+            <th>已识别费用</th>
+            <th>综合成本</th>
+            <th>凭证差异</th>
             <th>操作</th>
           </tr>
         </thead>
@@ -4370,9 +4507,6 @@ class OverseasCostWorkbench {
       title: "报关/来源单层级列表",
       sourceNo: "报关/来源单号",
       logisticsNo: "运单/物流单号",
-      miscRmb: "物流杂费 RMB",
-      miscMxn: "折合 MXN",
-      mainFreight: "国际运费/报价",
       blockName: "报关/来源单块",
     };
     const byMode = {
@@ -4380,27 +4514,18 @@ class OverseasCostWorkbench {
         title: "海运报关/来源单层级列表",
         sourceNo: "报关/来源单号",
         logisticsNo: "运单/柜号",
-        miscRmb: "中国杂费 RMB",
-        miscMxn: "折合 MXN",
-        mainFreight: "海运费 USD",
         blockName: "海运单块",
       },
       AIR: {
         title: "空运来源单层级列表",
         sourceNo: "来源单号",
         logisticsNo: "空运运单号",
-        miscRmb: "空运杂费 RMB",
-        miscMxn: "折合 MXN",
-        mainFreight: "空运费/报价",
         blockName: "空运单块",
       },
       EXPRESS: {
         title: "快递来源单层级列表",
         sourceNo: "来源单号",
         logisticsNo: "快递运单号",
-        miscRmb: "快递杂费 RMB",
-        miscMxn: "折合 MXN",
-        mainFreight: "快递/双清费用",
         blockName: "快递单块",
       },
     };
@@ -4420,8 +4545,12 @@ class OverseasCostWorkbench {
     const customsNo = batch.customs_no || firstItem.customs_no || batch.batch_no || firstItem.source_doc_no || "--";
     const waybillNo = batch.waybill_no || firstItem.waybill_no || "--";
     const itemCount = hasLoadedItems ? items.length : batch.item_count || 0;
-    const totalGoodsValue = hasLoadedItems ? this.sumBatchNumber(batch.name, "goods_value") : batch.total_goods_value;
     const statusInfo = this.batchStatusInfo(batch.status, batch, itemCount);
+    const documentStatus = this.batchDocumentStatus(batch, items, hasLoadedItems);
+    const goodsValueDisplay = this.batchGoodsValueDisplay(batch, items, hasLoadedItems);
+    const recognizedFeeDisplay = this.batchRecognizedFeeDisplay(batch, items, hasLoadedItems);
+    const totalCostDisplay = this.batchTotalCostDisplay(batch, items, hasLoadedItems);
+    const voucherDiffDisplay = this.batchVoucherDiffDisplay(batch);
     const importedClass = this.lastImportedBatchNames.has(batch.name) ? "imported" : "";
     this.activeBatchName = this.activeBatchName || batch.name;
     return `
@@ -4441,13 +4570,14 @@ class OverseasCostWorkbench {
           <small>${this.escape(this.transportLabel(batch.transport_mode || firstItem.transport_mode))}</small>
         </td>
         <td class="ocw-num-cell">${this.escape(String(itemCount))}</td>
-        <td class="ocw-money-cell">${this.escape(this.formatValue(this.firstBatchValue(batch.name, "china_misc_rmb")))}</td>
-        <td class="ocw-money-cell">${this.escape(this.formatValue(this.firstBatchValue(batch.name, "china_misc_mxn")))}</td>
-        <td class="ocw-money-cell">${this.escape(this.formatValue(this.firstBatchValue(batch.name, "china_ocean_usd")))}</td>
-        <td class="ocw-money-cell">${this.escape(this.formatValue(totalGoodsValue))}</td>
+        <td>${this.renderParentMetric(documentStatus)}</td>
+        <td>${this.renderParentMetric(goodsValueDisplay)}</td>
+        <td>${this.renderParentMetric(recognizedFeeDisplay)}</td>
+        <td>${this.renderParentMetric(totalCostDisplay)}</td>
+        <td>${this.renderParentMetric(voucherDiffDisplay)}</td>
         <td class="ocw-row-actions">
           <div class="ocw-row-action-group">
-            <button class="ocw-outline-btn ocw-mini-btn" data-action="open-dingtalk" data-batch-name="${this.escape(batch.name)}">审批单</button>
+            <button class="ocw-outline-btn ocw-mini-btn" data-action="recalculate" data-batch-name="${this.escape(batch.name)}">重新试算</button>
             <button class="ocw-outline-btn ocw-mini-btn" data-action="source-center" data-batch-name="${this.escape(batch.name)}">资料</button>
             <button class="ocw-outline-btn ocw-mini-btn" data-action="row-more" data-batch-name="${this.escape(batch.name)}">更多</button>
           </div>
@@ -4456,19 +4586,353 @@ class OverseasCostWorkbench {
     `;
   }
 
+  renderParentMetric(metric = {}) {
+    const value = metric.value || "--";
+    const hint = metric.hint ? `<small>${this.escape(metric.hint)}</small>` : "";
+    return `
+      <div class="ocw-parent-metric ${this.escape(metric.className || "muted")}">
+        <strong>${this.escape(value)}</strong>
+        ${hint}
+      </div>
+    `;
+  }
+
+  batchDocumentStatus(batch, items, hasLoadedItems) {
+    const sourceStatus = batch.source_status || {};
+    const itemCount = hasLoadedItems ? items.length : Number(batch.item_count || 0);
+    const attachmentCount = Number(sourceStatus.oa_attachment_count || batch.source_attachment_count || 0);
+    const packingListCount = Number(sourceStatus.packing_list_count || 0);
+    const taxCertificateCount = Number(sourceStatus.tax_certificate_count || 0);
+    const hasOaSource =
+      Boolean(sourceStatus.has_oa_logistics) ||
+      String(batch.source_type || "").trim() === "oa_logistics" ||
+      this.hasText(batch.source_approval_no) ||
+      this.hasText(batch.source_instance_id) ||
+      this.hasText(batch.source_dingtalk_url);
+    const parts = [];
+    if (hasOaSource) parts.push("OA");
+    if (attachmentCount) parts.push(`${attachmentCount}附件`);
+    if (packingListCount) parts.push("装箱单");
+    if (itemCount) parts.push(`${itemCount}SKU`);
+    if (taxCertificateCount) parts.push("凭证");
+
+    if (!parts.length) {
+      return { value: "待资料", hint: "未关联 OA/附件", className: "warn" };
+    }
+    if (!itemCount) {
+      return { value: "待解析", hint: parts.join(" / "), className: "warn" };
+    }
+    return {
+      value: taxCertificateCount ? "资料较全" : "资料可用",
+      hint: parts.join(" / "),
+      className: "ok",
+    };
+  }
+
+  batchGoodsValueNumber(batch, items, hasLoadedItems) {
+    const loadedValue = hasLoadedItems ? this.sumRowsNumber(items, "goods_value") : 0;
+    const batchValue = Number(batch.total_goods_value || 0);
+    return this.isPositive(loadedValue) ? loadedValue : batchValue;
+  }
+
+  batchTotalCostNumber(batch, items, hasLoadedItems) {
+    const loadedValue = hasLoadedItems ? this.sumRowsNumber(items, "total_cost_rmb") : 0;
+    const batchValue = Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+    return this.isPositive(loadedValue) ? loadedValue : batchValue;
+  }
+
+  batchGoodsValueDisplay(batch, items, hasLoadedItems) {
+    const itemCount = hasLoadedItems ? items.length : Number(batch.item_count || 0);
+    const goodsValue = this.batchGoodsValueNumber(batch, items, hasLoadedItems);
+    if (this.isPositive(goodsValue)) {
+      return { value: `${this.formatNumber(goodsValue)} RMB`, hint: "来自采购/OA/明细", className: "ok" };
+    }
+    if (itemCount) {
+      return { value: "待补货值", hint: "缺采购单价或金额", className: "warn" };
+    }
+    return { value: "待物料", hint: "先生成 SKU", className: "muted" };
+  }
+
+  batchRecognizedFeeDisplay(batch, items, hasLoadedItems) {
+    const itemCount = hasLoadedItems ? items.length : Number(batch.item_count || 0);
+    const goodsValue = this.batchGoodsValueNumber(batch, items, hasLoadedItems);
+    const totalCost = this.batchTotalCostNumber(batch, items, hasLoadedItems);
+    const feeFromTotal = this.isPositive(totalCost) && totalCost > goodsValue ? totalCost - goodsValue : 0;
+    const fallbackFeeFields = [
+      "freight_alloc_rmb",
+      "mexico_customs_rmb",
+      "mexico_inland_misc_rmb",
+      "china_misc_rmb",
+      "china_to_mexico_freight_rmb",
+    ];
+    const fallbackFee = hasLoadedItems
+      ? fallbackFeeFields.reduce((total, fieldname) => total + this.sumRowsNumber(items, fieldname), 0)
+      : 0;
+    const recognizedFee = this.isPositive(feeFromTotal) ? feeFromTotal : fallbackFee;
+    if (this.isPositive(recognizedFee)) {
+      return { value: `${this.formatNumber(recognizedFee)} RMB`, hint: "已计入试算", className: "ok" };
+    }
+    if (itemCount) {
+      return { value: "待费用", hint: "等运费/税费/杂费", className: "warn" };
+    }
+    return { value: "--", hint: "暂无明细", className: "muted" };
+  }
+
+  batchTotalCostDisplay(batch, items, hasLoadedItems) {
+    const itemCount = hasLoadedItems ? items.length : Number(batch.item_count || 0);
+    const totalCost = this.batchTotalCostNumber(batch, items, hasLoadedItems);
+    const statusInfo = this.batchStatusInfo(batch.status, batch, itemCount);
+    if (statusInfo.needsRecalculate) {
+      const hint = this.isPositive(totalCost) ? `当前 ${this.formatNumber(totalCost)} RMB` : "明细已修改";
+      return { value: "待重算", hint, className: "warn" };
+    }
+    if (this.isPositive(totalCost)) {
+      return { value: `${this.formatNumber(totalCost)} RMB`, hint: "已生成", className: "ok" };
+    }
+    if (itemCount) {
+      return { value: "待试算", hint: "请先确认运费/税费/杂费", className: "warn" };
+    }
+    return { value: "待物料", hint: "暂无 SKU", className: "muted" };
+  }
+
+  batchVoucherDiffDisplay(batch) {
+    const sourceStatus = batch.source_status || {};
+    const reconciliation = sourceStatus.latest_tax_certificate_reconciliation || {};
+    const taxCertificateCount = Number(sourceStatus.tax_certificate_count || 0);
+    if (Object.keys(reconciliation).length) {
+      const diff = Number(reconciliation.tax_total_diff_mxn);
+      const statusLabel =
+        reconciliation.manual_resolution_status_label || reconciliation.status_label || reconciliation.status || "已对账";
+      if (Number.isFinite(diff)) {
+        if (Math.abs(diff) <= 0.01) {
+          return { value: "一致", hint: "0 MXN", className: "ok" };
+        }
+        return {
+          value: statusLabel,
+          hint: `${this.formatNumber(diff)} MXN`,
+          className: "review",
+        };
+      }
+      return {
+        value: statusLabel,
+        hint: reconciliation.file_name || "已登记凭证",
+        className: String(statusLabel).includes("复核") ? "review" : "ok",
+      };
+    }
+    if (taxCertificateCount) {
+      return { value: "待对账", hint: `${taxCertificateCount} 份凭证`, className: "warn" };
+    }
+    return { value: "待凭证", hint: "最终对账", className: "muted" };
+  }
+
+  renderAllocationOverview(batch, items = []) {
+    const rows = this.buildAllocationOverviewRows(batch, items);
+    const body = rows.length
+      ? rows
+          .map(
+            (row) => `
+              <div class="ocw-allocation-row">
+                <div>
+                  <strong>${this.escape(row.amountTitle)}</strong>
+                  <span>${this.escape(row.amountText)}</span>
+                </div>
+                <div title="${this.escape(row.source)}">${this.escape(row.source)}</div>
+                <div>${this.escape(row.basis)}</div>
+                <div>${this.escape(row.result)}</div>
+              </div>
+            `
+          )
+          .join("")
+      : `
+        <div class="ocw-allocation-empty">
+          暂无可填入的费用分摊金额。请先确认物流费、清关费、税费或杂费，然后点击“重新试算”填入 AI/系统基础分摊金额。
+        </div>
+      `;
+
+    return `
+      <div class="ocw-allocation-overview">
+        <div class="ocw-allocation-title">
+          <strong>AI/系统基础分摊填入</strong>
+          <span>费用池金额 + 费用来源 + 分摊依据 + 分摊结果</span>
+        </div>
+        <div class="ocw-allocation-policy">
+          <strong>当前口径</strong>
+          <span>物流费、清关费、税费、仓储费、罚款、杂费等有来源的费用原则上都进综合成本；系统默认先按毛重分摊。确认属于抛货时，可人工改为体积/计费重后重新试算；税费最终以完税凭证为准。</span>
+        </div>
+        <div class="ocw-allocation-grid">
+          <div class="ocw-allocation-head">
+            <span>费用池金额</span>
+            <span>费用来源</span>
+            <span>分摊依据</span>
+            <span>分摊结果</span>
+          </div>
+          ${body}
+        </div>
+      </div>
+    `;
+  }
+
+  buildAllocationOverviewRows(batch, items = []) {
+    const buckets = new Map();
+    items.forEach((item) => {
+      const derived = this.parseJsonObject(item.derived_json);
+      const rules = Array.isArray(derived.allocated_rules) ? derived.allocated_rules : [];
+      rules.forEach((rule) => this.addAllocationRuleBucket(buckets, rule, item, batch));
+    });
+
+    const rows = Array.from(buckets.values()).map((bucket) => this.formatAllocationBucket(bucket));
+    const customsRow = this.buildDirectCustomsAllocationRow(items);
+    if (customsRow) rows.push(customsRow);
+
+    if (!rows.length) {
+      const freightAlloc = this.sumRowsNumber(items, "freight_alloc_rmb");
+      const freightAllocMxn = this.sumRowsNumber(items, "freight_alloc_mxn");
+      const coveredRows = this.countRows(items, (row) => this.isPositive(row.freight_alloc_rmb) || this.isPositive(row.freight_alloc_mxn));
+      if (this.isPositive(freightAlloc) || this.isPositive(freightAllocMxn)) {
+        rows.push({
+          amountTitle: "运输费用分摊",
+          amountText: this.isPositive(freightAlloc)
+            ? `${this.formatNumber(freightAlloc)} RMB`
+            : `${this.formatNumber(freightAllocMxn)} MXN`,
+          source: "历史试算结果",
+          basis: "按已保存规则快照",
+          result: `已分摊到 ${coveredRows || items.length} 行物料`,
+        });
+      }
+    }
+
+    return rows;
+  }
+
+  addAllocationRuleBucket(buckets, rule = {}, item = {}, batch = {}) {
+    const ruleCode = String(rule.rule_code || rule.fee_key || "").trim();
+    const basis = String(rule.basis || rule.allocation_basis || rule.basis_label || "goods_value").trim();
+    const currency = this.normalizeCurrencyCode(rule.currency || "RMB");
+    const amount = this.numericOrNull(rule.amount);
+    const amountKey = amount === null ? "allocated" : String(amount);
+    const key = [ruleCode || "未命名费用", basis, currency, amountKey].join("|");
+    const allocatedRmb = Number(this.numericOrNull(rule.allocated_rmb) || 0);
+    const allocatedMxn = Number(this.numericOrNull(rule.allocated_mxn) || 0);
+    if (!allocatedRmb && !allocatedMxn && amount === null) return;
+
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        ruleCode,
+        feeName: this.allocationFeeLabel(rule),
+        basis,
+        currency,
+        amount,
+        amountRmb: this.numericOrNull(rule.amount_rmb),
+        source: this.allocationSourceLabel(rule, batch),
+        allocatedRmb: 0,
+        allocatedMxn: 0,
+        coveredRows: new Set(),
+      });
+    }
+    const bucket = buckets.get(key);
+    bucket.allocatedRmb += allocatedRmb;
+    bucket.allocatedMxn += allocatedMxn;
+    if (item.name || item.row_no) bucket.coveredRows.add(item.name || item.row_no);
+  }
+
+  formatAllocationBucket(bucket) {
+    const amountParts = [];
+    if (bucket.amount !== null && bucket.amount !== undefined) {
+      amountParts.push(`${this.formatNumber(bucket.amount)} ${bucket.currency || "RMB"}`);
+      if (bucket.currency !== "RMB" && this.isPositive(bucket.amountRmb)) {
+        amountParts.push(`折 ${this.formatNumber(bucket.amountRmb)} RMB`);
+      }
+    } else if (this.isPositive(bucket.allocatedRmb)) {
+      amountParts.push(`${this.formatNumber(bucket.allocatedRmb)} RMB（按分摊汇总）`);
+    } else if (this.isPositive(bucket.allocatedMxn)) {
+      amountParts.push(`${this.formatNumber(bucket.allocatedMxn)} MXN（按分摊汇总）`);
+    } else {
+      amountParts.push("--");
+    }
+
+    const resultParts = [];
+    if (this.isPositive(bucket.allocatedRmb)) resultParts.push(`${this.formatNumber(bucket.allocatedRmb)} RMB`);
+    if (this.isPositive(bucket.allocatedMxn)) resultParts.push(`${this.formatNumber(bucket.allocatedMxn)} MXN`);
+    const coveredCount = bucket.coveredRows && bucket.coveredRows.size ? bucket.coveredRows.size : 0;
+    if (coveredCount) resultParts.push(`覆盖 ${coveredCount} 行`);
+
+    return {
+      amountTitle: bucket.feeName || "费用池",
+      amountText: amountParts.join(" / "),
+      source: bucket.source || "明细字段/系统规则",
+      basis: this.allocationBasisLabel(bucket.basis),
+      result: resultParts.length ? resultParts.join("，") : "待试算",
+    };
+  }
+
+  buildDirectCustomsAllocationRow(items = []) {
+    const customsRmb = this.sumRowsNumber(items, "mexico_customs_rmb");
+    const customsMxn = this.sumRowsNumber(items, "mexico_customs_mxn");
+    if (!this.isPositive(customsRmb) && !this.isPositive(customsMxn)) return null;
+    const amountParts = [];
+    if (this.isPositive(customsMxn)) amountParts.push(`${this.formatNumber(customsMxn)} MXN`);
+    if (this.isPositive(customsRmb)) amountParts.push(`${this.formatNumber(customsRmb)} RMB`);
+    const coveredRows = this.countRows(items, (row) => this.isPositive(row.mexico_customs_rmb) || this.isPositive(row.mexico_customs_mxn));
+    return {
+      amountTitle: "清关/税费",
+      amountText: amountParts.join(" / "),
+      source: "完税凭证、清关资料或明细字段",
+      basis: "已匹配到物料行",
+      result: `计入 ${coveredRows || items.length} 行物料综合成本`,
+    };
+  }
+
+  allocationFeeLabel(rule = {}) {
+    const explicit = String(rule.expense_category || "").trim();
+    const code = String(rule.rule_code || rule.fee_key || "").trim();
+    const text = `${explicit} ${code}`.toLowerCase();
+    if (text.includes("oa_logistics") || text.includes("freight") || text.includes("ocean") || text.includes("运费")) {
+      return explicit && !explicit.toLowerCase().includes("freight") ? explicit : "国际运输费用";
+    }
+    if (code === "china_misc_rmb" || text.includes("china misc")) return "中国段杂费";
+    if (code === "mexico_inland_misc_rmb" || text.includes("mexico inland")) return "墨西哥内陆/杂费";
+    return explicit || code || "费用池";
+  }
+
+  allocationSourceLabel(rule = {}, batch = {}) {
+    const remark = String(rule.remark || "").trim();
+    const code = String(rule.rule_code || rule.fee_key || "").toLowerCase();
+    const sourceStatus = batch.source_status || {};
+    if (remark.includes("AI") || rule.is_ai_suggestion) return "AI基础分摊/待人工复核";
+    if (remark.includes("钉钉") || code.includes("oa_logistics")) return "钉钉国际物流 OA";
+    if ((sourceStatus.confirmed_logistics_quote || {}).amount && (code.includes("freight") || code.includes("logistics"))) {
+      return "钉钉国际物流 OA/已确认物流报价";
+    }
+    if (remark.includes("货代") || code.includes("freight") || code.includes("ocean")) return "国际物流 OA/货代账单";
+    if (remark.includes("清关") || remark.includes("墨西哥")) return "清关资料/墨西哥费用资料";
+    if (remark.includes("Excel") || remark.includes("明细字段")) return "Excel/OA 明细字段";
+    return "明细字段/系统规则";
+  }
+
+  allocationBasisLabel(value = "") {
+    const basis = String(value || "").trim();
+    const labels = {
+      goods_value: "按货值比例分摊",
+      gross_weight: "按毛重比例分摊",
+      volume: "按体积比例分摊",
+      chargeable_weight: "按计费重比例分摊",
+      chargeable_weight_kg: "按计费重比例分摊",
+    };
+    return labels[basis] || (basis ? `按 ${basis} 分摊` : "按规则分摊");
+  }
+
   renderChildRow(batch) {
     const items = this.batchItems[batch.name] || [];
     return `
       <tr class="ocw-child-row">
-        <td colspan="9">
+        <td colspan="10">
           <div class="ocw-child-table-shell">
             <div class="ocw-child-table-toolbar">
               <span>SKU 成本分摊明细 / 物料详情 · ${items.length} 行</span>
               <button class="ocw-outline-btn ocw-mini-btn ocw-add-material-sticky" data-action="add-material" data-batch-name="${this.escape(batch.name)}">+ 添加新物料</button>
             </div>
-            <div class="ocw-child-table-scroll" data-role="child-table-scroll" data-batch-name="${this.escape(batch.name)}">
-              ${this.renderChildTable(batch)}
-            </div>
+            ${this.renderAllocationOverview(batch, items)}
+            ${this.renderChildTable(batch)}
             <div class="ocw-child-table-x-scroll" data-role="child-table-x-scroll" data-batch-name="${this.escape(batch.name)}" aria-label="SKU 明细横向滚动条">
               <div class="ocw-child-table-x-scroll-spacer" data-role="child-table-x-scroll-spacer"></div>
             </div>
@@ -4509,7 +4973,7 @@ class OverseasCostWorkbench {
       .map((column, index) => {
         const sticky = index < 2 ? `ocw-sticky-head ocw-sticky-${index}` : "";
         return `
-          <th class="${sticky} ${this.escape(this.columnAlignClass(column))}" title="${this.escape(column.excel_col + " " + column.label)}">
+          <th class="${sticky} ${this.escape(this.columnAlignClass(column))} notranslate" translate="no" title="${this.escape(column.excel_col + " " + column.label)}">
             ${this.renderHeaderCell(column)}
           </th>
         `;
@@ -4560,11 +5024,18 @@ class OverseasCostWorkbench {
       .join("");
 
     return `
-      <table class="ocw-child-sku-table">
-        <colgroup>${colgroup}<col class="ocw-col-row-action" /></colgroup>
-        <thead><tr>${head}<th class="ocw-row-action-head">操作</th></tr></thead>
-        <tbody>${body}</tbody>
-      </table>
+      <div class="ocw-child-table-head-scroll" data-role="child-table-head-scroll" data-batch-name="${this.escape(batch.name)}">
+        <table class="ocw-child-sku-table ocw-child-sku-head-table notranslate" translate="no">
+          <colgroup>${colgroup}<col class="ocw-col-row-action" /></colgroup>
+          <thead><tr>${head}<th class="ocw-row-action-head">操作</th></tr></thead>
+        </table>
+      </div>
+      <div class="ocw-child-table-scroll" data-role="child-table-scroll" data-batch-name="${this.escape(batch.name)}">
+        <table class="ocw-child-sku-table notranslate" translate="no">
+          <colgroup>${colgroup}<col class="ocw-col-row-action" /></colgroup>
+          <tbody>${body}</tbody>
+        </table>
+      </div>
     `;
   }
 
@@ -4572,9 +5043,9 @@ class OverseasCostWorkbench {
     const parts = this.splitHeaderLabel(column.label);
     const secondary = parts.secondary ? `<span class="ocw-sku-header-secondary">${this.escape(parts.secondary)}</span>` : "";
     return `
-      <div class="ocw-sku-header-cell">
-        <span class="ocw-sku-header-code">${this.escape(column.excel_col)}</span>
-        <span class="ocw-sku-header-primary">${this.escape(parts.primary)}</span>
+      <div class="ocw-sku-header-cell notranslate" translate="no">
+        <span class="ocw-sku-header-code notranslate" translate="no">${this.escape(column.excel_col)}</span>
+        <span class="ocw-sku-header-primary notranslate" translate="no">${this.escape(parts.primary)}</span>
         ${secondary}
       </div>
     `;
@@ -4599,23 +5070,30 @@ class OverseasCostWorkbench {
       const source = $source.get(0);
       const bar = $bar.get(0);
       const $spacer = $bar.find("[data-role$='scroll-spacer']");
+      const $header = $source.prev("[data-role='child-table-head-scroll']");
+      const syncHeader = () => {
+        if ($header.length) $header.get(0).scrollLeft = source.scrollLeft;
+      };
       const update = () => {
         const width = source.scrollWidth || source.clientWidth;
         $spacer.css("width", `${width}px`);
         $bar.toggleClass("is-hidden", width <= source.clientWidth + 1);
         bar.scrollLeft = source.scrollLeft;
+        syncHeader();
       };
       let syncing = false;
       $source.off("scroll.ocwStickyX").on("scroll.ocwStickyX", () => {
         if (syncing) return;
         syncing = true;
         bar.scrollLeft = source.scrollLeft;
+        syncHeader();
         syncing = false;
       });
       $bar.off("scroll.ocwStickyX").on("scroll.ocwStickyX", () => {
         if (syncing) return;
         syncing = true;
         source.scrollLeft = bar.scrollLeft;
+        syncHeader();
         syncing = false;
       });
       update();
@@ -4623,11 +5101,18 @@ class OverseasCostWorkbench {
       window.setTimeout(update, 80);
     };
 
-    bindPair(this.$root.find("[data-area='table']"), this.$root.find("[data-role='hierarchy-x-scroll']"));
+    const $hierarchyWrap = this.$root.find("[data-area='table']");
+    bindPair($hierarchyWrap, this.$root.find("[data-role='hierarchy-x-scroll']"));
     this.$root.find("[data-role='child-table-scroll']").each((_, element) => {
       const $source = $(element);
       bindPair($source, $source.next("[data-role='child-table-x-scroll']"));
     });
+    this.positionChildScrollbars();
+    $hierarchyWrap
+      .off("scroll.ocwChildScrollbarPosition")
+      .on("scroll.ocwChildScrollbarPosition", () => {
+        window.requestAnimationFrame(() => this.positionChildScrollbars());
+      });
     $(window)
       .off("resize.ocwHierarchyScrollbars")
       .on("resize.ocwHierarchyScrollbars", () => {
@@ -4635,19 +5120,51 @@ class OverseasCostWorkbench {
       });
   }
 
+  positionChildScrollbars() {
+    const $wrap = this.$root.find("[data-area='table']");
+    if (!$wrap.length) return;
+    const wrap = $wrap.get(0);
+    const wrapRect = wrap.getBoundingClientRect();
+    const hierarchyBarHeight = this.$root.find("[data-role='hierarchy-x-scroll']").not(".is-hidden").outerHeight() || 0;
+    const visibleTop = wrapRect.top;
+    const visibleBottom = wrapRect.bottom - hierarchyBarHeight;
+
+    this.$root.find("[data-role='child-table-x-scroll']").each((_, barElement) => {
+      const $bar = $(barElement);
+      const $shell = $bar.closest(".ocw-child-table-shell");
+      const $source = $bar.prev("[data-role='child-table-scroll']");
+      if (!$shell.length || !$source.length) {
+        $bar.addClass("is-hidden");
+        return;
+      }
+      const shell = $shell.get(0);
+      const source = $source.get(0);
+      const shellRect = shell.getBoundingClientRect();
+      const visibleHeight = Math.min(shellRect.bottom, visibleBottom) - Math.max(shellRect.top, visibleTop);
+      const hasHorizontalScroll = source.scrollWidth > source.clientWidth + 1;
+      if (!hasHorizontalScroll || visibleHeight < 64) {
+        $bar.addClass("is-hidden");
+        return;
+      }
+      const barHeight = barElement.offsetHeight || 18;
+      const maxTop = Math.max(0, shell.offsetHeight - barHeight);
+      const nextTop = Math.max(0, Math.min(visibleBottom - shellRect.top - barHeight, maxTop));
+      barElement.style.top = `${nextTop}px`;
+      $bar.removeClass("is-hidden");
+    });
+  }
+
   async exportCurrentResult() {
-    const batches = this.getSelectableBatches();
+    const { batches, label } = this.getExportCurrentBatches();
     if (!batches.length) {
       frappe.msgprint("当前没有可导出的批次。");
       return;
     }
-    const mode = this.normalizeTransportMode(this.filters.transport_mode);
-    const modeLabel = mode ? this.transportLabel(mode) : "全部";
     const result = await this.call(
       "overseas_costing.api.batch.export_current_result_xlsx",
       {
         batch_names_json: JSON.stringify(batches.map((batch) => batch.name)),
-        transport_label: modeLabel,
+        transport_label: label,
       },
       true
     );
@@ -4722,31 +5239,49 @@ class OverseasCostWorkbench {
     }
   }
 
+  getExportCurrentBatches() {
+    const pinnedBatch = this.exportPinnedBatchName ? this.findBatch(this.exportPinnedBatchName) : null;
+    const pinnedInVisible = pinnedBatch && this.visibleBatches.some((batch) => batch.name === pinnedBatch.name);
+    const mode = this.normalizeTransportMode(this.filters.transport_mode);
+    const modeLabel = mode ? this.transportLabel(mode) : "全部";
+    if (pinnedInVisible) {
+      return {
+        batches: [pinnedBatch],
+        label: this.batchReferenceLabel(pinnedBatch),
+      };
+    }
+    const batches = this.visibleBatches.length ? this.visibleBatches : this.getSelectableBatches();
+    const label = batches.length === 1 ? this.batchReferenceLabel(batches[0]) : this.hasActiveFilters() ? `${modeLabel}筛选结果` : modeLabel;
+    return { batches, label };
+  }
+
   updateRecalculateAction() {
     if (!this.$root) return;
-    const batch = this.getVisibleActiveBatch();
-    const $button = this.$root.find("[data-action='recalculate']");
-    if (!$button.length) return;
+    const $buttons = this.$root.find("[data-action='recalculate']");
+    if (!$buttons.length) return;
 
-    $button.removeClass("needs-recalculate is-calculated").attr("title", "");
-    if (!batch) {
-      $button.text("重新试算").prop("disabled", true).attr("title", "暂无可试算批次");
-      return;
-    }
+    $buttons.each((_, node) => {
+      const $button = $(node);
+      const batchName = $button.attr("data-batch-name");
+      const batch = batchName ? this.findBatch(batchName) : this.getVisibleActiveBatch();
 
-    const statusInfo = this.batchStatusInfo(batch.status);
-    $button.prop("disabled", false);
-    if (statusInfo.needsRecalculate) {
-      $button.addClass("needs-recalculate").text("待重算 · 重新试算").attr("title", statusInfo.suggestion);
-      return;
-    }
+      $button.removeClass("needs-recalculate is-calculated").text("重新试算").attr("title", "");
+      if (!batch) {
+        $button.prop("disabled", true).attr("title", "暂无可试算批次");
+        return;
+      }
 
-    if (String(batch.status || "").toLowerCase().includes("calculated")) {
-      $button.addClass("is-calculated").text("重新试算").attr("title", "当前批次已试算，可按需重新计算");
-      return;
-    }
+      const statusInfo = this.batchStatusInfo(batch.status);
+      $button.prop("disabled", false).attr("title", "对当前批次重新计算分摊和综合成本");
+      if (statusInfo.needsRecalculate) {
+        $button.addClass("needs-recalculate").attr("title", statusInfo.suggestion);
+        return;
+      }
 
-    $button.text("重新试算").attr("title", "对当前批次重新计算分摊和综合成本");
+      if (String(batch.status || "").toLowerCase().includes("calculated")) {
+        $button.addClass("is-calculated").attr("title", "当前批次已试算，可按需重新计算");
+      }
+    });
   }
 
   updateHierarchySummary() {
@@ -5007,15 +5542,15 @@ class OverseasCostWorkbench {
     if (!batch) {
       this.$root.find("[data-area='diff-panel']").html(`
         <div class="ocw-diff-table">
-          <div class="ocw-diff-head"><span>检查项</span><span>当前状态</span><span>处理建议</span></div>
-          <div><span>当前批次</span><b class="ocw-check-warn">未选择</b><strong>先导入或查询一条批次</strong></div>
+          <div class="ocw-diff-head"><span>复核项</span><span>当前状态</span><span>说明</span></div>
+          <div><span>当前批次</span><b class="ocw-check-warn">未选择</b><strong>先选择一条批次查看 AI 分摊状态</strong></div>
         </div>
       `);
       return;
     }
 
     const items = this.batchItems[batch.name] || [];
-    const rows = this.buildDataCheckRows(batch, items);
+    const rows = this.buildAiReviewRows(batch, items);
     const sourceStatus = batch.source_status || {};
     const batchLabel = batch.waybill_no || batch.customs_no || batch.batch_no || batch.name;
     const sourceNo = sourceStatus.source_no || batch.source_approval_no || batch.source_instance_id || "";
@@ -5032,7 +5567,7 @@ class OverseasCostWorkbench {
     ];
     this.$root.find("[data-area='diff-panel']").html(`
       <div class="ocw-diff-table">
-        <div class="ocw-diff-head"><span>检查项</span><span>当前状态</span><span>处理建议</span></div>
+        <div class="ocw-diff-head"><span>复核项</span><span>当前状态</span><span>说明</span></div>
         ${displayRows
           .map(
             (row) => `
@@ -5046,6 +5581,141 @@ class OverseasCostWorkbench {
           .join("")}
       </div>
     `);
+  }
+
+  buildAiReviewRows(batch, items = []) {
+    const hasLoadedItems = Object.prototype.hasOwnProperty.call(this.batchItems, batch.name);
+    const loadedItems = hasLoadedItems ? items : [];
+    const itemCount = hasLoadedItems ? loadedItems.length : Number(batch.item_count || 0);
+    const summary = batch.summary_snapshot || {};
+    const ai = batch.ai_allocation || summary.ai_allocation || {};
+    const ruleSnapshot = Array.isArray(batch.allocation_rule_snapshot) ? batch.allocation_rule_snapshot : [];
+    const overviewRows = this.buildAllocationOverviewRows(batch, loadedItems);
+    const positiveRules = ruleSnapshot.filter((rule) => this.isPositive(rule.amount) || this.isPositive(rule.amount_rmb));
+    const aiRules = positiveRules.filter((rule) => rule.is_ai_suggestion || String(rule.remark || "").includes("AI"));
+    const hasAi = Boolean(ai.ok || aiRules.length);
+    const sourceStatus = batch.source_status || {};
+    const confirmedQuote = sourceStatus.confirmed_logistics_quote || {};
+    const freightValue =
+      this.sumRowsNumber(loadedItems, "china_to_mexico_freight_rmb") ||
+      this.sumRowsNumber(loadedItems, "china_ocean_usd") ||
+      Number(confirmedQuote.amount || 0);
+    const taxValue =
+      this.sumRowsNumber(loadedItems, "import_tax_total") ||
+      this.sumRowsNumber(loadedItems, "mexico_customs_mxn") ||
+      this.sumRowsNumber(loadedItems, "mexico_customs_rmb");
+    const miscValue =
+      this.sumRowsNumber(loadedItems, "china_misc_rmb") ||
+      this.sumRowsNumber(loadedItems, "mexico_inland_mxn") ||
+      this.sumRowsNumber(loadedItems, "mexico_misc_mxn") ||
+      this.sumRowsNumber(loadedItems, "mexico_inland_misc_rmb");
+    const missingPrice = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.unit_price)) : 0;
+    const missingGoods = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.goods_value)) : 0;
+    const missingWeight = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.gross_weight_kg)) : 0;
+    const missingCost = hasLoadedItems ? this.countRows(loadedItems, (row) => !this.isPositive(row.total_unit_rmb)) : 0;
+    const feeHints = [];
+    if (this.isPositive(freightValue)) feeHints.push("物流费");
+    if (this.isPositive(taxValue)) feeHints.push("税费/清关费");
+    if (this.isPositive(miscValue)) feeHints.push("杂费");
+    const ruleBasisText = this.summarizeAllocationRuleBasis(positiveRules);
+    const resultText = overviewRows.length
+      ? overviewRows.slice(0, 2).map((row) => `${row.amountTitle}：${row.basis}，${row.result}`).join("；")
+      : "暂无分摊结果，请先确认费用池并点击重新试算";
+    const reviewIssues = [];
+    if (missingPrice) reviewIssues.push(`单价缺 ${missingPrice} 行`);
+    if (missingGoods) reviewIssues.push(`货值缺 ${missingGoods} 行`);
+    if (missingWeight) reviewIssues.push(`毛重缺 ${missingWeight} 行`);
+    if (missingCost) reviewIssues.push(`综合单价缺 ${missingCost} 行`);
+    const calculationReview = summary.calculation_review || batch.calculation_review || {};
+    const reviewReasons = Array.isArray(calculationReview.reasons)
+      ? calculationReview.reasons.filter((reason) => this.hasText(reason))
+      : [];
+    const reviewStatus = calculationReview.status || "";
+    const reviewLabel =
+      calculationReview.label ||
+      (!itemCount ? "待补数据" : reviewIssues.length || (!positiveRules.length && !overviewRows.length) ? "需人工复核" : "可先采用");
+    const reviewStatusClass =
+      reviewStatus === "usable" || reviewLabel === "可先采用"
+        ? "ocw-check-ok"
+        : reviewStatus === "blocked" || reviewLabel === "待补数据"
+        ? "ocw-check-warn"
+        : "ocw-check-info";
+    const reviewSuggestion =
+      calculationReview.reason ||
+      reviewReasons.slice(0, 3).join("；") ||
+      (reviewLabel === "可先采用"
+        ? "核心采购金额、费用池和分摊结果已生成，可作为当前试算结果"
+        : reviewIssues.length
+        ? `${reviewIssues.join("，")}；财务可双击明细补齐后重新试算`
+        : "先补齐物料、采购价格和费用池，再重新试算");
+
+    return [
+      {
+        label: "核算结论",
+        status: reviewLabel,
+        statusClass: reviewStatusClass,
+        suggestion: reviewSuggestion,
+      },
+      {
+        label: "分摊填入",
+        status: hasAi ? "AI已填" : positiveRules.length ? "系统已填" : "待费用",
+        statusClass: hasAi ? "ocw-check-ok" : positiveRules.length ? "ocw-check-info" : "ocw-check-warn",
+        suggestion: hasAi
+          ? `AI 已选择基础分摊口径，系统已把分摊金额写入每行明细；模型 ${ai.model || "deepseek-v4-flash"}`
+          : positiveRules.length
+          ? ai.message || "当前使用系统基础规则，已按规则填入每行分摊金额"
+          : "没有物流费、税费或杂费费用池时，AI 不会凭空生成费用分摊金额",
+      },
+      {
+        label: "费用池",
+        status: positiveRules.length ? `${positiveRules.length} 个` : feeHints.length ? `${feeHints.length} 类` : "0 个",
+        statusClass: positiveRules.length || feeHints.length ? "ocw-check-ok" : "ocw-check-warn",
+        suggestion: positiveRules.length
+          ? this.summarizeAllocationRuleAmounts(positiveRules)
+          : feeHints.length
+          ? `已检测到${feeHints.join("、")}，点击重新试算后形成规则快照`
+          : "先确认物流费、清关费、税费或杂费；否则只能填入货值/重量比例，费用分摊金额为 0",
+      },
+      {
+        label: "分摊依据",
+        status: ruleBasisText ? "已确定" : "待确定",
+        statusClass: ruleBasisText ? "ocw-check-ok" : "ocw-check-warn",
+        suggestion: ruleBasisText || "默认先按毛重分摊；抛货或特殊费用可人工改为体积/计费重后重新试算",
+      },
+      {
+        label: "分摊结果",
+        status: overviewRows.length ? `${overviewRows.length} 项` : itemCount ? "待重算" : "待物料",
+        statusClass: overviewRows.length ? "ocw-check-ok" : "ocw-check-warn",
+        suggestion: resultText,
+      },
+      {
+        label: "人工调整",
+        status: reviewIssues.length ? "需核对" : "可复核",
+        statusClass: reviewIssues.length ? "ocw-check-warn" : "ocw-check-info",
+        suggestion: reviewIssues.length
+          ? `${reviewIssues.join("，")}；财务可双击明细补齐后重新试算`
+          : "基础分摊金额已填入明细；后续可双击人工修改，税费最终以完税凭证对账为准",
+      },
+    ];
+  }
+
+  summarizeAllocationRuleAmounts(rules = []) {
+    return rules
+      .slice(0, 3)
+      .map((rule) => {
+        const amount = this.numericOrNull(rule.amount);
+        const currency = this.normalizeCurrencyCode(rule.currency || "RMB");
+        return `${this.allocationFeeLabel(rule)} ${amount === null ? "--" : this.formatNumber(amount)} ${currency}`;
+      })
+      .join("；");
+  }
+
+  summarizeAllocationRuleBasis(rules = []) {
+    if (!rules.length) return "";
+    return rules
+      .slice(0, 3)
+      .map((rule) => `${this.allocationFeeLabel(rule)}：${this.allocationBasisLabel(rule.allocation_basis || rule.basis_field)}`)
+      .join("；");
   }
 
   buildDataCheckRows(batch, items) {
@@ -5262,6 +5932,8 @@ class OverseasCostWorkbench {
   async toggleBatch(batchName) {
     if (!batchName) return;
     this.activeBatchName = batchName;
+    this.exportPinnedBatchName = batchName;
+    this.dataCheckBatchName = batchName;
     if (this.expandedBatchNames.has(batchName)) {
       this.expandedBatchNames.delete(batchName);
     } else {
@@ -5270,6 +5942,7 @@ class OverseasCostWorkbench {
       this.expandedBatchNames.add(batchName);
     }
     this.renderTable();
+    this.renderDiffPanel();
   }
 
   async setAllExpanded(expanded) {
@@ -5403,6 +6076,7 @@ class OverseasCostWorkbench {
     const batch = this.findBatch(batchName);
     if (!batch) return;
     this.activeBatchName = batch.name;
+    this.exportPinnedBatchName = batch.name;
     const dialog = new frappe.ui.Dialog({
       title: "添加新物料",
       fields: [
@@ -5513,7 +6187,7 @@ class OverseasCostWorkbench {
     }
   }
 
-  startCellEdit($cell, event = null) {
+  startCellEdit($cell, event = null, autoOpenSelect = false) {
     if (event) {
       event.preventDefault();
       event.stopPropagation();
@@ -5526,16 +6200,26 @@ class OverseasCostWorkbench {
     const label = $cell.attr("data-field-label") || fieldname;
     const isNumeric = this.isNumericField(fieldname);
     const options = this.selectOptions[fieldname] || null;
+    const selectedValue = options ? this.normalizeSelectValue(fieldname, oldValue) : oldValue;
 
     $cell.removeData("cancelled saving");
     $cell.data("original-html", $cell.html());
     $cell.addClass("is-editing");
 
     if (options) {
+      const hasSelectedOption = options.some((option) => String(option) === selectedValue);
+      const emptyOption = selectedValue ? "" : `<option value="" selected>请选择</option>`;
+      const currentOption =
+        selectedValue && !hasSelectedOption
+          ? `<option value="${this.escape(selectedValue)}" selected>${this.escape(this.selectOptionLabel(fieldname, selectedValue))}</option>`
+          : "";
       const optionHtml = options
-        .map((option) => `<option value="${this.escape(option)}" ${String(option) === oldValue ? "selected" : ""}>${this.escape(this.transportLabel(option))}</option>`)
+        .map(
+          (option) =>
+            `<option value="${this.escape(option)}" ${String(option) === selectedValue ? "selected" : ""}>${this.escape(this.selectOptionLabel(fieldname, option))}</option>`
+        )
         .join("");
-      $cell.html(`<select class="ocw-cell-editor ocw-cell-select" aria-label="${this.escape(label)}">${optionHtml}</select>`);
+      $cell.html(`<select class="ocw-cell-editor ocw-cell-select" aria-label="${this.escape(label)}">${emptyOption}${currentOption}${optionHtml}</select>`);
     } else {
       $cell.html(`
         <input
@@ -5549,6 +6233,15 @@ class OverseasCostWorkbench {
 
     const editor = $cell.find(".ocw-cell-editor").get(0);
     if (editor) {
+      if (autoOpenSelect && options && typeof editor.showPicker === "function") {
+        editor.focus();
+        try {
+          editor.showPicker();
+          return;
+        } catch (error) {
+          // Some browsers only allow showPicker in stricter user-gesture windows.
+        }
+      }
       window.requestAnimationFrame(() => {
         editor.focus();
         if (editor.setSelectionRange && editor.value !== undefined) {
@@ -5576,8 +6269,9 @@ class OverseasCostWorkbench {
 
     const $editor = $cell.find(".ocw-cell-editor");
     const oldValue = $cell.attr("data-raw-value") || "";
-    const newValue = this.normalizeEditorValue($editor.val());
     const fieldname = $cell.attr("data-fieldname");
+    const newValue = this.selectOptions[fieldname] ? this.normalizeSelectValue(fieldname, $editor.val()) : this.normalizeEditorValue($editor.val());
+    const oldComparableValue = this.selectOptions[fieldname] ? this.normalizeSelectValue(fieldname, oldValue) : oldValue;
     const fieldLabel = $cell.attr("data-field-label") || fieldname;
     const batchName = $cell.attr("data-batch-name");
     const itemName = $cell.attr("data-item-name");
@@ -5585,12 +6279,12 @@ class OverseasCostWorkbench {
     const isSpecialOverride = $cell.attr("data-special-override") === "1";
     const itemLabel = this.getLocalItemLabel(batchName, itemName);
 
-    if (newValue === oldValue) {
+    if (newValue === oldComparableValue) {
       this.cancelCellEdit($cell);
       return;
     }
 
-    const confirmed = await this.requestEditConfirm(fieldLabel, newValue);
+    const confirmed = await this.requestEditConfirm(fieldLabel, this.formatCellValue(newValue, { fieldname }));
     if (!confirmed) {
       this.cancelCellEdit($cell);
       return;
@@ -5925,6 +6619,55 @@ class OverseasCostWorkbench {
     return labels[key] || String(value);
   }
 
+  selectOptionLabel(fieldname, value) {
+    if (fieldname === "purchase_currency") return this.currencyLabel(value);
+    if (fieldname === "transport_mode") return this.transportLabel(value);
+    return String(value || "");
+  }
+
+  normalizeSelectValue(fieldname, value) {
+    if (fieldname === "purchase_currency") return this.normalizeCurrencyCode(value);
+    if (fieldname === "transport_mode") return this.normalizeTransportMode(value);
+    return this.normalizeEditorValue(value);
+  }
+
+  normalizeCurrencyCode(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    const compact = text.replace(/\s+/g, "").toLowerCase();
+    if (compact.includes("rmb") || compact.includes("cny") || compact.includes("人民币")) return "RMB";
+    if (compact.includes("usd") || compact.includes("dólar") || compact.includes("dolar") || compact.includes("美元") || compact.includes("美金")) {
+      return "USD";
+    }
+    if (compact.includes("mxn") || compact.includes("peso") || compact.includes("pesos") || compact.includes("比索") || compact.includes("墨西哥")) {
+      return "MXN";
+    }
+    return text.toUpperCase();
+  }
+
+  parseJsonObject(value) {
+    if (!value) return {};
+    if (typeof value === "object") return value && !Array.isArray(value) ? value : {};
+    try {
+      const parsed = JSON.parse(String(value));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch (_error) {
+      return {};
+    }
+  }
+
+  currencyLabel(value) {
+    if (!value) return "";
+    const labels = {
+      RMB: "人民币",
+      CNY: "人民币",
+      USD: "美元",
+      MXN: "比索",
+    };
+    const code = this.normalizeCurrencyCode(value);
+    return labels[code] || String(value);
+  }
+
   batchStatusInfo(status, batch = {}, itemCount = null) {
     const value = String(status || "").trim();
     const normalized = value.toLowerCase();
@@ -5952,7 +6695,7 @@ class OverseasCostWorkbench {
         label: "已试算",
         statusClass: "ocw-check-ok",
         needsRecalculate: false,
-        suggestion: "可继续核对费用池和分摊结果",
+        suggestion: "可继续核对运费/税费/杂费和分摊结果",
       };
     }
     if (normalized.includes("draft")) {
@@ -6114,6 +6857,7 @@ class OverseasCostWorkbench {
 
   formatCellValue(value, column) {
     if (column.fieldname === "transport_mode") return this.transportLabel(value);
+    if (column.fieldname === "purchase_currency") return this.currencyLabel(value);
     if (this.isNumericField(column.fieldname)) return this.formatNumber(value);
     return this.formatValue(value);
   }

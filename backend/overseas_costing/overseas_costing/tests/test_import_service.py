@@ -550,6 +550,141 @@ def test_preview_linked_purchase_expense_oa_matches_without_writing(monkeypatch)
     assert any(change["status"] == "conflict" for change in second_changes)
 
 
+def test_pull_linked_purchase_summaries_includes_running(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    captured = {}
+
+    monkeypatch.setattr(import_service, "_resolve_dingtalk_env_file", lambda _env_file=None: "")
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "TOKEN")
+
+    def fake_pull_linked_purchase_approval_details(**kwargs):
+        captured.update(kwargs)
+        return [
+            {
+                "ok": True,
+                "source_approval_no": "202606220952000179521",
+                "source_instance_id": "PROC-PURCHASE-RUNNING",
+                "approval_status": "RUNNING",
+                "mapped_preview_items": [
+                    {
+                        "material_code": "FL004106",
+                        "product_name": "钢化膜",
+                        "spec_model": "GALAXY A07",
+                        "unit_price": 1.23,
+                        "purchase_currency": "RMB",
+                        "goods_value": 615,
+                    }
+                ],
+            }
+        ]
+
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "pull_linked_purchase_approval_details",
+        fake_pull_linked_purchase_approval_details,
+    )
+
+    result = import_service._pull_purchase_summaries_from_dingtalk(
+        linked_approvals=[
+            {
+                "approval_no": "202606220952000179521",
+                "source_instance_id": "PROC-PURCHASE-RUNNING",
+            }
+        ]
+    )
+
+    assert captured["include_running"] is True
+    assert result[0]["approval_status"] == "RUNNING"
+    assert result[0]["mapped_preview_items"][0]["unit_price"] == 1.23
+
+
+def test_preview_linked_purchase_expense_splits_aggregated_price_by_material_code(monkeypatch) -> None:
+    from overseas_costing.services import import_service
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
+            if doctype == "Overseas Cost Batch" and name_or_filters == "BATCH-DOC":
+                if fields == ["current_version"]:
+                    return {"current_version": "VER-DOC"}
+                return {
+                    "name": "BATCH-DOC",
+                    "batch_no": "202607031639000159867",
+                    "extra_json": (
+                        '{"source":"dingtalk_oa_logistics","linked_purchase_approvals":['
+                        '{"approval_no":"202606220952000179521","source_instance_id":"PROC-PURCHASE-RUNNING"}'
+                        "]}",
+                    )[0],
+                }
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_all(doctype, **_kwargs):
+            if doctype == "Overseas Cost Item":
+                return [
+                    {
+                        "name": "ITEM-001",
+                        "row_no": 1,
+                        "material_code": "FL004106",
+                        "product_name": "钢化膜",
+                        "spec_model": "GALAXY A07",
+                        "quantity": 500,
+                        "actual_shipped_qty": 0,
+                        "unit_price": 0,
+                        "purchase_currency": "",
+                        "goods_value": 0,
+                    },
+                    {
+                        "name": "ITEM-002",
+                        "row_no": 2,
+                        "material_code": "FL004106",
+                        "product_name": "钢化膜",
+                        "spec_model": "GALAXY A07",
+                        "quantity": 300,
+                        "actual_shipped_qty": 0,
+                        "unit_price": 0,
+                        "purchase_currency": "",
+                        "goods_value": 0,
+                    },
+                ]
+            return []
+
+    monkeypatch.setattr(import_service, "frappe", FakeFrappe)
+
+    result = preview_linked_purchase_expense_oa(
+        batch_name="BATCH-DOC",
+        purchase_summaries_json=(
+            '[{"source_approval_no":"202606220952000179521","source_instance_id":"PROC-PURCHASE-RUNNING",'
+            '"purchase_currency":"人民币RMB","mapped_preview_items":['
+            '{"material_code":"FL004106","product_name":"钢化膜Película templada","spec_model":"SM A07/9H",'
+            '"quantity":800,"unit_price":1.2,"goods_value":960,"purchase_currency":"人民币RMB",'
+            '"source_type":"PURCHASE_EXPENSE_OA"}'
+            "]}]"
+        ),
+    )
+
+    matched_rows = result["writeback_preview"]["matched_rows"]
+    goods_values = [
+        change["new_value"]
+        for row in matched_rows
+        for change in row["business_changes"]
+        if change["field_name"] == "goods_value"
+    ]
+
+    assert result["writeback_preview"]["matched_count"] == 2
+    assert result["writeback_preview"]["unmatched_count"] == 0
+    assert result["writeback_preview"]["ambiguous_count"] == 0
+    assert goods_values == [600, 360]
+    assert {row["disambiguation_strategy"] for row in matched_rows} == {
+        "material_code_split_by_target_quantity"
+    }
+
+
 def test_apply_linked_purchase_expense_fillable_fields_writes_matched_conflicts(monkeypatch) -> None:
     from overseas_costing.services import import_service
 
@@ -2421,7 +2556,7 @@ IVA 16.00000 1 0 32719
     assert result["preview"]["reconciliation"]["voucher"]["paid_total_mxn"] == 129883
 
 
-def test_save_tax_certificate_parse_result_updates_version_fx_from_voucher(monkeypatch) -> None:
+def test_save_tax_certificate_parse_result_updates_version_fx_by_payment_date(monkeypatch) -> None:
     version_row = {"fx_usd_to_rmb": 0, "fx_rmb_to_mxn": 2.6, "remark": ""}
     batch_updates = {}
     attachment_payloads = []
@@ -2521,6 +2656,30 @@ IVA 16.00000 1 0 32719
 
     monkeypatch.setattr(attachment_parse_service, "frappe", FakeFrappe)
 
+    def fake_fx_context(*, payment_date=None, approval_finished_at=None):
+        assert payment_date == "01/04/2026"
+        assert approval_finished_at == ""
+        return {
+            "ok": True,
+            "action": "resolved",
+            "payment_date": payment_date,
+            "normalized_payment_date": "2026-04-01",
+            "normalized_fx_rate_date": "2026-04-01",
+            "fx_date_source": "payment_date",
+            "fx_date_source_label": "真实付款日",
+            "is_estimated_rate": False,
+            "source": "fx-rate-api",
+            "fx_usd_to_rmb": 6.8,
+            "fx_mxn_to_rmb": 0.4,
+            "fx_rmb_to_mxn": 2.5,
+            "rate_snapshots": {
+                "USD": {"ok": True, "currency": "USD", "rate_date": "2026-04-01", "cny_per_unit": 6.8},
+                "MXN": {"ok": True, "currency": "MXN", "rate_date": "2026-04-01", "cny_per_unit": 0.4},
+            },
+        }
+
+    monkeypatch.setattr(attachment_parse_service.fx_rate_service, "build_fx_context_for_costing", fake_fx_context)
+
     result = attachment_parse_service.save_tax_certificate_parse_result(
         source_name="PD_MZ260108.pdf",
         text=sample_text,
@@ -2530,13 +2689,303 @@ IVA 16.00000 1 0 32719
     assert result["ok"] is True
     assert result["saved"] is True
     assert result["fx_sync"]["action"] == "updated"
-    assert version_row["fx_usd_to_rmb"] == pytest.approx(17.7957 / 2.6)
+    assert result["fx_sync"]["normalized_payment_date"] == "2026-04-01"
+    assert result["fx_sync"]["normalized_fx_rate_date"] == "2026-04-01"
+    assert result["fx_sync"]["fx_date_source_label"] == "真实付款日"
+    assert result["fx_sync"]["voucher_usd_to_mxn"] == pytest.approx(17.7957)
+    assert version_row["fx_usd_to_rmb"] == pytest.approx(6.8)
+    assert version_row["fx_rmb_to_mxn"] == pytest.approx(2.5)
     assert "PD_MZ260108.pdf" in version_row["remark"]
+    assert "汇率日期 2026-04-01（真实付款日）" in version_row["remark"]
     assert batch_updates[("Overseas Cost Batch", "BATCH-001", '"status"')] == "Dirty"
     assert len(attachment_payloads) == 1
-    assert len(audit_payloads) == 1
-    assert audit_payloads[0]["field_name"] == "fx_usd_to_rmb"
+    assert len(audit_payloads) == 2
+    assert {row["field_name"] for row in audit_payloads} == {"fx_usd_to_rmb", "fx_rmb_to_mxn"}
     assert commit_count["value"] == 1
+
+
+def test_sync_tax_certificate_fx_falls_back_to_approval_finished_at(monkeypatch) -> None:
+    version_row = {"fx_usd_to_rmb": 0, "fx_rmb_to_mxn": 0, "remark": ""}
+    batch_updates = {}
+    audit_payloads = []
+
+    class FakeDoc:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def insert(self, **_kwargs):
+            audit_payloads.append(self.payload)
+            return self
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
+            if doctype == "Overseas Cost Version" and name_or_filters == "VER-001":
+                if as_dict:
+                    return dict(version_row)
+                return version_row.get(fields)
+            return None
+
+        @staticmethod
+        def set_value(doctype, name, fieldname, value=None, **_kwargs):
+            if doctype == "Overseas Cost Version" and name == "VER-001":
+                updates = fieldname if isinstance(fieldname, dict) else {fieldname: value}
+                version_row.update(updates)
+            else:
+                batch_updates[(doctype, name, json.dumps(fieldname, ensure_ascii=False, default=str))] = value
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        class session:
+            user = "tester@example.com"
+
+        @staticmethod
+        def get_doc(payload):
+            return FakeDoc(payload)
+
+    def fake_fx_context(*, payment_date=None, approval_finished_at=None):
+        assert payment_date == ""
+        assert approval_finished_at == "2026-04-21 17:16:00"
+        return {
+            "ok": True,
+            "action": "resolved",
+            "payment_date": "",
+            "approval_finished_at": approval_finished_at,
+            "normalized_payment_date": "",
+            "normalized_approval_finished_at": "2026-04-21",
+            "normalized_fx_rate_date": "2026-04-21",
+            "fx_date_source": "approval_finished_at",
+            "fx_date_source_label": "付款审批完成日（暂估）",
+            "is_estimated_rate": True,
+            "source": "fx-rate-api",
+            "fx_usd_to_rmb": 6.9,
+            "fx_mxn_to_rmb": 0.4,
+            "fx_rmb_to_mxn": 2.5,
+            "rate_snapshots": {
+                "USD": {"ok": True, "currency": "USD", "rate_date": "2026-04-21", "cny_per_unit": 6.9},
+                "MXN": {"ok": True, "currency": "MXN", "rate_date": "2026-04-21", "cny_per_unit": 0.4},
+            },
+        }
+
+    monkeypatch.setattr(attachment_parse_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(attachment_parse_service.fx_rate_service, "build_fx_context_for_costing", fake_fx_context)
+
+    result = attachment_parse_service._sync_tax_certificate_exchange_rate_to_version(
+        parsed={"header": {"payment_date": "", "exchange_rate": "17.5", "pedimento_no": "26 16 1681 6000151"}},
+        batch={"name": "BATCH-001", "current_version": "VER-001", "source_finished_at": "2026-04-21 17:16:00"},
+        source_name="PD_MZ260108.pdf",
+    )
+
+    assert result["action"] == "updated"
+    assert result["normalized_payment_date"] == ""
+    assert result["normalized_approval_finished_at"] == "2026-04-21"
+    assert result["normalized_fx_rate_date"] == "2026-04-21"
+    assert result["fx_date_source"] == "approval_finished_at"
+    assert result["fx_date_source_label"] == "付款审批完成日（暂估）"
+    assert result["is_estimated_rate"] is True
+    assert result["message"].startswith("已按付款审批完成日暂估汇率")
+    assert version_row["fx_usd_to_rmb"] == pytest.approx(6.9)
+    assert version_row["fx_rmb_to_mxn"] == pytest.approx(2.5)
+    assert "汇率日期 2026-04-21（付款审批完成日（暂估））" in version_row["remark"]
+    assert batch_updates[("Overseas Cost Batch", "BATCH-001", '"status"')] == "Dirty"
+    assert {row["field_name"] for row in audit_payloads} == {"fx_usd_to_rmb", "fx_rmb_to_mxn"}
+
+
+def test_get_tax_certificate_parse_record_enriches_missing_fx_with_version_fallback(monkeypatch) -> None:
+    parse_result_json = attachment_parse_service._json_dumps(
+        {
+            "header": {"payment_date": "01/04/2026"},
+            "fx_sync": {
+                "action": "skipped",
+                "reason": "付款日汇率缺失。",
+                "payment_date": "01/04/2026",
+                "normalized_payment_date": "2026-04-01",
+                "rate_snapshots": {
+                    "USD": {"ok": False, "action": "http_error", "message": "汇率接口 HTTP 错误：404"},
+                    "MXN": {"ok": False, "action": "http_error", "message": "汇率接口 HTTP 错误：404"},
+                },
+            },
+        }
+    )
+    mapped_result_json = attachment_parse_service._json_dumps(
+        {
+            "batch": {
+                "name": "BATCH-001",
+                "batch_no": "HPCU5155607",
+                "current_version": "VER-001",
+            }
+        }
+    )
+
+    class FakeDB:
+        @staticmethod
+        def exists(doctype, name):
+            return doctype == "Overseas Cost Attachment" and name == "ATT-001"
+
+        @staticmethod
+        def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
+            if doctype == "Overseas Cost Attachment" and name_or_filters == "ATT-001":
+                return {
+                    "name": "ATT-001",
+                    "batch": "BATCH-001",
+                    "version": "VER-001",
+                    "source_type": "Voucher",
+                    "attachment_type": "Tax Certificate",
+                    "source_doc_no": "26 16 1681 6000151",
+                    "file_name": "PD_MZ260108凭证.pdf",
+                    "file_url": "/private/files/PD_MZ260108凭证.pdf",
+                    "parse_status": "Parsed",
+                    "parse_result_json": parse_result_json,
+                    "mapped_result_json": mapped_result_json,
+                    "modified": "2026-08-06 09:01:22",
+                    "creation": "2026-08-06 09:01:22",
+                }
+            if doctype == "Overseas Cost Version" and name_or_filters == "VER-001":
+                return {"fx_usd_to_rmb": 7.178751, "fx_rmb_to_mxn": 2.6}
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        class local:
+            site = "development.localhost"
+
+    monkeypatch.setattr(attachment_parse_service, "frappe", FakeFrappe)
+
+    result = attachment_parse_service.get_tax_certificate_parse_record(record_name="ATT-001")
+
+    fx_sync = result["parse_result"]["fx_sync"]
+    assert fx_sync["usd_to_rmb"] == pytest.approx(7.178751)
+    assert fx_sync["rmb_to_mxn"] == pytest.approx(2.6)
+    assert fx_sync["fallback_rate_source_label"] == "当前版本汇率（暂用）"
+    assert "汇率库缺少 2026-04-01 的 USD/MXN 汇率" in fx_sync["fallback_message"]
+    assert fx_sync["fx_date_source_label"] == "真实付款日"
+
+
+def test_get_tax_certificate_parse_record_resolves_version_from_batch_for_legacy_record(monkeypatch) -> None:
+    parse_result_json = attachment_parse_service._json_dumps(
+        {
+            "header": {"payment_date": "01/04/2026"},
+            "fx_sync": {
+                "action": "skipped",
+                "reason": "付款日汇率缺失。",
+                "payment_date": "01/04/2026",
+                "normalized_payment_date": "2026-04-01",
+            },
+        }
+    )
+    mapped_result_json = attachment_parse_service._json_dumps(
+        {
+            "batch": {
+                "name": "BATCH-001",
+                "batch_no": "HPCU5155607",
+            }
+        }
+    )
+
+    class FakeDB:
+        @staticmethod
+        def exists(doctype, name):
+            return doctype == "Overseas Cost Attachment" and name == "ATT-001"
+
+        @staticmethod
+        def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
+            if doctype == "Overseas Cost Attachment" and name_or_filters == "ATT-001":
+                return {
+                    "name": "ATT-001",
+                    "batch": "BATCH-001",
+                    "version": "",
+                    "source_type": "Voucher",
+                    "attachment_type": "Tax Certificate",
+                    "source_doc_no": "26 16 1681 6000151",
+                    "file_name": "PD_MZ260108凭证.pdf",
+                    "file_url": "/private/files/PD_MZ260108凭证.pdf",
+                    "parse_status": "Parsed",
+                    "parse_result_json": parse_result_json,
+                    "mapped_result_json": mapped_result_json,
+                    "modified": "2026-08-06 09:01:22",
+                    "creation": "2026-08-06 09:01:22",
+                }
+            if doctype == "Overseas Cost Batch" and name_or_filters == "BATCH-001":
+                return "VER-001"
+            if doctype == "Overseas Cost Version" and name_or_filters == "VER-001":
+                return {"fx_usd_to_rmb": 7.178751, "fx_rmb_to_mxn": 2.6}
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        class local:
+            site = "development.localhost"
+
+    monkeypatch.setattr(attachment_parse_service, "frappe", FakeFrappe)
+
+    result = attachment_parse_service.get_tax_certificate_parse_record(record_name="ATT-001")
+
+    fx_sync = result["parse_result"]["fx_sync"]
+    assert fx_sync["usd_to_rmb"] == pytest.approx(7.178751)
+    assert fx_sync["fallback_rate_source"] == "current_version"
+
+
+def test_sync_saved_tax_certificate_fx_fallback_updates_snapshot_only(monkeypatch) -> None:
+    parse_result_json = attachment_parse_service._json_dumps(
+        {
+            "header": {"payment_date": "01/04/2026"},
+            "fx_sync": {
+                "action": "skipped",
+                "reason": "付款日汇率缺失。",
+                "payment_date": "01/04/2026",
+                "normalized_payment_date": "2026-04-01",
+            },
+        }
+    )
+    mapped_result_json = attachment_parse_service._json_dumps({"batch": {"name": "BATCH-001"}})
+    updates = {}
+    committed = {"value": False}
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
+            if doctype == "Overseas Cost Attachment" and name_or_filters == "ATT-001":
+                return {
+                    "name": "ATT-001",
+                    "batch": "BATCH-001",
+                    "version": "",
+                    "parse_result_json": parse_result_json,
+                    "mapped_result_json": mapped_result_json,
+                }
+            if doctype == "Overseas Cost Batch" and name_or_filters == "BATCH-001":
+                return "VER-001"
+            if doctype == "Overseas Cost Version" and name_or_filters == "VER-001":
+                return {"fx_usd_to_rmb": 7.178751, "fx_rmb_to_mxn": 2.6}
+            return None
+
+        @staticmethod
+        def set_value(doctype, name, fieldname, value, **_kwargs):
+            updates[(doctype, name, fieldname)] = value
+
+        @staticmethod
+        def commit():
+            committed["value"] = True
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        class local:
+            site = "development.localhost"
+
+    monkeypatch.setattr(attachment_parse_service, "frappe", FakeFrappe)
+
+    result = attachment_parse_service.sync_saved_tax_certificate_fx_fallback(record_name="ATT-001")
+
+    assert result["updated_count"] == 1
+    assert committed["value"] is True
+    saved = attachment_parse_service._json_loads(
+        updates[("Overseas Cost Attachment", "ATT-001", "parse_result_json")]
+    )
+    assert saved["fx_sync"]["fallback_rate_source"] == "current_version"
+    assert saved["fx_sync"]["usd_to_rmb"] == pytest.approx(7.178751)
 
 
 def test_list_tax_certificate_parse_records_returns_empty_without_frappe() -> None:

@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from overseas_costing.services import audit_service, version_service
+from overseas_costing.services import allocation_service, audit_service, version_service
 
 
 def update_item_field(item_name: str, fieldname: str, value: str, version_name: str | None = None) -> dict:
@@ -241,6 +241,7 @@ NUMERIC_ITEM_FIELDS = frozenset(
 CHECK_ITEM_FIELDS = frozenset({"manual_override_flag"})
 SELECT_ITEM_OPTIONS = {
     "transport_mode": {"SEA", "AIR", "EXPRESS"},
+    "purchase_currency": {"RMB", "USD", "MXN"},
     "parse_status": {"PENDING", "SUCCESS", "PARTIAL", "FAILED", "MANUAL"},
 }
 SELECT_ITEM_ALIASES = {
@@ -248,7 +249,18 @@ SELECT_ITEM_ALIASES = {
         "海运": "SEA",
         "空运": "AIR",
         "快递": "EXPRESS",
-    }
+    },
+    "purchase_currency": {
+        "人民币": "RMB",
+        "人民币RMB": "RMB",
+        "CNY": "RMB",
+        "美元": "USD",
+        "美金": "USD",
+        "美元Dólar": "USD",
+        "美元Dolar": "USD",
+        "比索": "MXN",
+        "墨西哥比索": "MXN",
+    },
 }
 DEFAULT_CALC_FIELDS = [
     "goods_value",
@@ -267,6 +279,10 @@ ITEM_QUERY_FIELDS = [
     "batch",
     "version",
     "row_no",
+    "material_code",
+    "product_name",
+    "spec_model",
+    "transport_mode",
     "unit_price",
     "quantity",
     "goods_value",
@@ -274,9 +290,36 @@ ITEM_QUERY_FIELDS = [
     "volume_m3",
     "mexico_customs_mxn",
     "mexico_customs_rmb",
+    "mexico_customs_usd",
     "china_misc_rmb",
+    "china_misc_mxn",
+    "china_ocean_usd",
     "china_to_mexico_freight_rmb",
+    "mexico_inland_mxn",
+    "mexico_misc_mxn",
     "mexico_inland_misc_rmb",
+    "igi_amount",
+    "iva_amount",
+    "dta",
+    "prv_duty",
+    "prv_iva",
+    "import_tax_total",
+    "revalidacion",
+    "maniobras",
+    "muellaje",
+    "entrega_mercancia",
+    "previo",
+    "service_aa",
+    "almacenajes",
+    "reconocimiento_aduanero",
+    "honorarios",
+    "complemento_maniobras",
+    "desconsolidacion",
+    "maniobra_falso",
+    "arrastre",
+    "patio_regulador",
+    "entrega_vacio",
+    "limpieza_contenedor",
 ]
 
 
@@ -453,8 +496,22 @@ def _is_rule_enabled(rule: dict) -> bool:
     return bool(rule.get("is_enabled", rule.get("is_active", 1)))
 
 
+def _normalize_currency_code(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "RMB"
+    compact = text.replace(" ", "").lower()
+    if "rmb" in compact or "cny" in compact or "人民币" in compact:
+        return "RMB"
+    if "usd" in compact or "dólar" in compact or "dolar" in compact or "美元" in compact or "美金" in compact:
+        return "USD"
+    if "mxn" in compact or "peso" in compact or "pesos" in compact or "比索" in compact or "墨西哥" in compact:
+        return "MXN"
+    return text.upper()
+
+
 def _amount_to_rmb(amount: float, currency: str | None, fx_rmb_to_mxn: float, fx_usd_to_rmb: float | None) -> float:
-    currency_code = (currency or "RMB").upper()
+    currency_code = _normalize_currency_code(currency)
     if currency_code == "MXN":
         return _safe_div(amount, fx_rmb_to_mxn)
     if currency_code == "USD" and fx_usd_to_rmb:
@@ -467,7 +524,18 @@ def _basis_value(item: dict, basis: str) -> float:
         return _to_float(item.get("gross_weight_kg"))
     if basis == "volume":
         return _to_float(item.get("volume_m3"))
+    if basis in {"chargeable_weight", "chargeable_weight_kg"}:
+        return _chargeable_weight_value(item)
     return _to_float(item.get("goods_value"))
+
+
+def _chargeable_weight_value(item: dict) -> float:
+    explicit = _to_float(item.get("chargeable_weight_kg"))
+    if explicit:
+        return explicit
+    gross_weight = _to_float(item.get("gross_weight_kg"))
+    volume_weight = _to_float(item.get("volume_weight_kg"))
+    return max(gross_weight, volume_weight)
 
 
 def _first_nonzero(items: list[dict], fieldname: str) -> float:
@@ -478,33 +546,210 @@ def _first_nonzero(items: list[dict], fieldname: str) -> float:
     return 0.0
 
 
+def _has_any_positive(items: list[dict], fieldname: str) -> bool:
+    return any(_to_float(item.get(fieldname)) for item in items)
+
+
+def _total_value(items: list[dict], fieldname: str) -> float:
+    return sum(_to_float(item.get(fieldname)) for item in items)
+
+
+def _first_transport_mode(items: list[dict]) -> str:
+    for item in items:
+        value = str(item.get("transport_mode") or "").strip().upper()
+        if value:
+            return value
+    return ""
+
+
+def _default_freight_basis(items: list[dict]) -> str:
+    if _total_value(items, "gross_weight_kg"):
+        return "gross_weight"
+    if sum(_chargeable_weight_value(item) for item in items):
+        return "chargeable_weight"
+    if _total_value(items, "volume_m3"):
+        return "volume"
+    return "goods_value"
+
+
+def _add_basic_rule(
+    specs: list[dict],
+    *,
+    items: list[dict],
+    fieldname: str,
+    rule_code: str,
+    expense_category: str,
+    allocation_basis: str,
+    currency: str,
+    remark: str,
+    priority_no: int,
+) -> None:
+    amount = _first_nonzero(items, fieldname)
+    if not amount:
+        return
+    specs.append(
+        {
+            "rule_code": rule_code,
+            "expense_category": expense_category,
+            "allocation_basis": allocation_basis,
+            "basis_field": allocation_basis,
+            "currency": currency,
+            "amount": amount,
+            "remark": remark,
+            "priority_no": priority_no,
+            "is_enabled": 1,
+            "is_system_suggestion": 1,
+        }
+    )
+
+
 def _fallback_rules_from_items(items: list[dict]) -> list[dict]:
-    return [
-        {
-            "rule_code": "china_misc_rmb",
-            "expense_category": "China misc RMB",
-            "allocation_basis": "goods_value",
-            "currency": "RMB",
-            "amount": _first_nonzero(items, "china_misc_rmb"),
-            "is_enabled": 1,
-        },
-        {
-            "rule_code": "china_to_mexico_freight_rmb",
-            "expense_category": "China to Mexico freight RMB",
-            "allocation_basis": "gross_weight",
-            "currency": "RMB",
-            "amount": _first_nonzero(items, "china_to_mexico_freight_rmb"),
-            "is_enabled": 1,
-        },
-        {
-            "rule_code": "mexico_inland_misc_rmb",
-            "expense_category": "Mexico inland and misc RMB",
-            "allocation_basis": "gross_weight",
-            "currency": "RMB",
-            "amount": _first_nonzero(items, "mexico_inland_misc_rmb"),
-            "is_enabled": 1,
-        },
-    ]
+    freight_basis = _default_freight_basis(items)
+    misc_basis = "gross_weight"
+    specs: list[dict] = []
+    _add_basic_rule(
+        specs,
+        items=items,
+        fieldname="china_misc_rmb",
+        rule_code="china_misc_rmb",
+        expense_category="中国段杂费",
+        allocation_basis=misc_basis,
+        currency="RMB",
+        remark="系统基础分摊：来自明细字段“中国运输及相关杂费 RMB”，默认先按毛重分摊并填入每行金额；如属于抛货或特殊费用，人工可改为体积/计费重或其他口径后重算。",
+        priority_no=10,
+    )
+    _add_basic_rule(
+        specs,
+        items=items,
+        fieldname="china_misc_mxn",
+        rule_code="china_misc_mxn",
+        expense_category="中国段杂费",
+        allocation_basis=misc_basis,
+        currency="MXN",
+        remark="系统基础分摊：来自明细字段“中国运输及相关杂费 MXN”，默认先按毛重分摊并填入每行金额；如属于抛货或特殊费用，人工可改为体积/计费重或其他口径后重算。",
+        priority_no=11,
+    )
+    _add_basic_rule(
+        specs,
+        items=items,
+        fieldname="china_ocean_usd",
+        rule_code="china_ocean_usd",
+        expense_category="中国海运费",
+        allocation_basis=freight_basis,
+        currency="USD",
+        remark="系统基础分摊：来自明细字段“中国海运 USD”，运输费用默认先按毛重分摊；如确认属于抛货，可人工改为体积/计费重后重算，体积小重量大仍按重量。",
+        priority_no=20,
+    )
+    _add_basic_rule(
+        specs,
+        items=items,
+        fieldname="china_to_mexico_freight_rmb",
+        rule_code="china_to_mexico_freight_rmb",
+        expense_category="中国到墨西哥运费",
+        allocation_basis=freight_basis,
+        currency="RMB",
+        remark="系统基础分摊：来自国际物流 OA、货代账单或明细字段“中国到墨西哥运费 RMB”，运输费用默认先按毛重分摊；如确认属于抛货，可人工改为体积/计费重后重算，体积小重量大仍按重量。",
+        priority_no=21,
+    )
+    _add_basic_rule(
+        specs,
+        items=items,
+        fieldname="mexico_inland_mxn",
+        rule_code="mexico_inland_mxn",
+        expense_category="墨西哥内陆运输费",
+        allocation_basis=misc_basis,
+        currency="MXN",
+        remark="系统基础分摊：来自明细字段“墨西哥内陆运输费用 MXN”，按重量分摊；缺少重量时暂停该费用分摊并提示补充数据。",
+        priority_no=30,
+    )
+    _add_basic_rule(
+        specs,
+        items=items,
+        fieldname="mexico_misc_mxn",
+        rule_code="mexico_misc_mxn",
+        expense_category="墨西哥杂费",
+        allocation_basis=misc_basis,
+        currency="MXN",
+        remark="系统基础分摊：来自明细字段“墨西哥杂费 MXN”，按重量分摊；缺少重量时暂停该费用分摊并提示补充数据。",
+        priority_no=31,
+    )
+    _add_basic_rule(
+        specs,
+        items=items,
+        fieldname="mexico_inland_misc_rmb",
+        rule_code="mexico_inland_misc_rmb",
+        expense_category="墨西哥内陆/杂费",
+        allocation_basis=misc_basis,
+        currency="RMB",
+        remark="系统基础分摊：来自清关资料、墨西哥本地费用资料或明细字段“墨西哥内陆运输+杂费 RMB”，默认按重量分摊并填入每行金额，人工可复核调整。",
+        priority_no=32,
+    )
+    return specs
+
+
+TAX_COMPONENT_FIELDS = ("igi_amount", "iva_amount", "dta", "prv_duty", "prv_iva")
+CUSTOMS_SERVICE_FIELDS = (
+    "revalidacion",
+    "maniobras",
+    "muellaje",
+    "entrega_mercancia",
+    "previo",
+    "service_aa",
+    "almacenajes",
+    "reconocimiento_aduanero",
+    "honorarios",
+    "complemento_maniobras",
+    "desconsolidacion",
+    "maniobra_falso",
+    "arrastre",
+    "patio_regulador",
+    "entrega_vacio",
+    "limpieza_contenedor",
+)
+
+
+def _direct_customs_amounts(row: dict, fx_rmb_to_mxn: float, fx_usd_to_rmb: float | None) -> tuple[float, float, dict]:
+    customs_mxn = _to_float(row.get("mexico_customs_mxn"))
+    customs_rmb = _to_float(row.get("mexico_customs_rmb"))
+    customs_usd = _to_float(row.get("mexico_customs_usd"))
+    source = "墨西哥清关费用字段"
+    source_type = "customs_total"
+    tax_mxn = 0.0
+    service_mxn = 0.0
+    policy = "采用清关费用总额，不再叠加关税、增值税和清关服务明细"
+
+    if not customs_mxn and not customs_rmb and customs_usd and fx_usd_to_rmb:
+        customs_rmb = customs_usd * fx_usd_to_rmb
+        customs_mxn = customs_rmb * fx_rmb_to_mxn
+        source = "墨西哥清关费用 USD"
+
+    if not customs_mxn and not customs_rmb:
+        source_type = "customs_components"
+        tax_mxn = _to_float(row.get("import_tax_total"))
+        if not tax_mxn:
+            tax_mxn = sum(_to_float(row.get(fieldname)) for fieldname in TAX_COMPONENT_FIELDS)
+        service_mxn = sum(_to_float(row.get(fieldname)) for fieldname in CUSTOMS_SERVICE_FIELDS)
+        customs_mxn = tax_mxn + service_mxn
+        if customs_mxn:
+            source = "税费/清关明细字段"
+            policy = "未提供清关费用总额，采用物料实际税费与清关服务明细合计"
+        else:
+            source = "未提供清关费用"
+            policy = "未识别到清关费用总额或组成明细"
+
+    if not customs_rmb and customs_mxn:
+        customs_rmb = _safe_div(customs_mxn, fx_rmb_to_mxn)
+    if not customs_mxn and customs_rmb:
+        customs_mxn = customs_rmb * fx_rmb_to_mxn
+
+    return customs_rmb, customs_mxn, {
+        "source": source,
+        "source_type": source_type,
+        "policy": policy,
+        "tax_policy": "关税按物料品类/海关编码实际税率；IVA 增值税按 CIF 价值加关税后乘 16%，最终以完税凭证或实际付款为准。",
+        "tax_mxn": _round_money(tax_mxn, 6),
+        "service_mxn": _round_money(service_mxn, 6),
+    }
 
 
 def calculate_item_rows(
@@ -530,11 +775,23 @@ def calculate_item_rows(
     total_goods_value = sum(_to_float(row.get("goods_value")) for row in rows)
     total_gross_weight = sum(_to_float(row.get("gross_weight_kg")) for row in rows)
     total_volume = sum(_to_float(row.get("volume_m3")) for row in rows)
+    total_chargeable_weight = sum(_chargeable_weight_value(row) for row in rows)
     basis_totals = {
         "goods_value": total_goods_value,
         "gross_weight": total_gross_weight,
         "volume": total_volume,
+        "chargeable_weight": total_chargeable_weight,
+        "chargeable_weight_kg": total_chargeable_weight,
     }
+    total_fee_pool_rmb = sum(
+        _amount_to_rmb(
+            _to_float(rule.get("amount")),
+            rule.get("currency"),
+            fx_rmb_to_mxn,
+            fx_usd_to_rmb,
+        )
+        for rule in enabled_rules
+    )
 
     total_cost_rmb = 0.0
     total_logistics_mxn = 0.0
@@ -543,12 +800,11 @@ def calculate_item_rows(
     for row in rows:
         goods_value = _to_float(row.get("goods_value"))
         quantity = _to_float(row.get("quantity"))
-        mexico_customs_rmb = _to_float(row.get("mexico_customs_rmb"))
-        mexico_customs_mxn = _to_float(row.get("mexico_customs_mxn"))
-        if not mexico_customs_rmb and mexico_customs_mxn:
-            mexico_customs_rmb = _safe_div(mexico_customs_mxn, fx_rmb_to_mxn)
-        if not mexico_customs_mxn and mexico_customs_rmb:
-            mexico_customs_mxn = mexico_customs_rmb * fx_rmb_to_mxn
+        mexico_customs_rmb, mexico_customs_mxn, customs_detail = _direct_customs_amounts(
+            row,
+            fx_rmb_to_mxn,
+            fx_usd_to_rmb,
+        )
 
         allocated_other_rmb = 0.0
         allocated_other_mxn = 0.0
@@ -559,7 +815,7 @@ def calculate_item_rows(
         for rule in enabled_rules:
             basis = rule.get("allocation_basis") or rule.get("basis_field") or "goods_value"
             basis_total = basis_totals.get(basis, 0.0)
-            ratio = _basis_value(row, basis) / basis_total if basis_total else _safe_div(1.0, len(rows))
+            ratio = _basis_value(row, basis) / basis_total if basis_total else 0.0
             amount_rmb = _amount_to_rmb(
                 _to_float(rule.get("amount")),
                 rule.get("currency"),
@@ -580,10 +836,16 @@ def calculate_item_rows(
             allocated_rules.append(
                 {
                     "rule_code": rule_code,
+                    "expense_category": rule.get("expense_category") or "",
+                    "amount": _round_money(_to_float(rule.get("amount")), 6),
+                    "currency": _normalize_currency_code(rule.get("currency")),
+                    "amount_rmb": _round_money(amount_rmb, 6),
                     "basis": basis,
+                    "basis_label": rule.get("allocation_basis") or rule.get("basis_field") or basis,
                     "ratio": ratio,
                     "allocated_rmb": _round_money(allocated_rmb, 6),
                     "allocated_mxn": _round_money(allocated_mxn, 6),
+                    "remark": rule.get("remark") or "",
                 }
             )
 
@@ -605,11 +867,18 @@ def calculate_item_rows(
                 "derived_json": _json_dumps(
                     {
                         "basis_totals": basis_totals,
+                        "chargeable_weight_kg": _round_money(_chargeable_weight_value(row), 6),
                         "fx_rmb_to_mxn": fx_rmb_to_mxn,
                         "fx_usd_to_rmb": fx_usd_to_rmb,
                         "allocated_rules": allocated_rules,
                         "allocated_other_rmb": _round_money(allocated_other_rmb, 6),
                         "mexico_customs_rmb": _round_money(mexico_customs_rmb, 6),
+                        "mexico_customs_mxn": _round_money(mexico_customs_mxn, 6),
+                        "direct_customs": {
+                            **customs_detail,
+                            "amount_rmb": _round_money(mexico_customs_rmb, 6),
+                            "amount_mxn": _round_money(mexico_customs_mxn, 6),
+                        },
                     }
                 ),
             }
@@ -622,12 +891,194 @@ def calculate_item_rows(
         "total_goods_value": _round_money(total_goods_value, 6),
         "total_gross_weight_kg": _round_money(total_gross_weight, 6),
         "total_volume_m3": _round_money(total_volume, 6),
+        "total_chargeable_weight_kg": _round_money(total_chargeable_weight, 6),
         "total_logistics_mxn": _round_money(total_logistics_mxn, 6),
         "total_cost_rmb": _round_money(total_cost_rmb, 6),
+        "fee_pool_rmb": _round_money(total_fee_pool_rmb, 6),
         "item_count": len(rows),
         "rule_count": len(enabled_rules),
     }
+    summary["calculation_review"] = _build_calculation_review(calculated_rows, summary, enabled_rules)
     return calculated_rows, summary
+
+
+def _build_calculation_review(
+    calculated_rows: list[dict],
+    summary_snapshot: dict,
+    rules_for_calculation: list[dict] | None = None,
+    ai_allocation: dict | None = None,
+) -> dict:
+    rows = calculated_rows or []
+    rules = rules_for_calculation or []
+    positive_rules = [
+        rule
+        for rule in rules
+        if _is_rule_enabled(rule) and (_to_float(rule.get("amount")) or _to_float(rule.get("amount_rmb")))
+    ]
+    item_count = len(rows) or int(_to_float(summary_snapshot.get("item_count")))
+    total_goods_value = _to_float(summary_snapshot.get("total_goods_value"))
+    total_cost_rmb = _to_float(summary_snapshot.get("total_cost_rmb"))
+    fee_pool_rmb = _to_float(summary_snapshot.get("fee_pool_rmb"))
+    basis_values = {str(rule.get("allocation_basis") or rule.get("basis_field") or "") for rule in positive_rules}
+    needs_weight = "gross_weight" in basis_values
+    needs_volume = "volume" in basis_values or "volume_m3" in basis_values
+
+    counts = {
+        "missing_quantity": sum(1 for row in rows if not _to_float(row.get("quantity"))),
+        "missing_unit_price": sum(1 for row in rows if not _to_float(row.get("unit_price"))),
+        "missing_goods_value": sum(1 for row in rows if not _to_float(row.get("goods_value"))),
+        "missing_gross_weight": sum(1 for row in rows if not _to_float(row.get("gross_weight_kg"))),
+        "missing_volume": sum(1 for row in rows if not _to_float(row.get("volume_m3"))),
+        "missing_total_unit_cost": sum(1 for row in rows if not _to_float(row.get("total_unit_rmb"))),
+    }
+    allocated_fee_rmb = 0.0
+    for row in rows:
+        allocated_fee_rmb += _to_float(row.get("freight_alloc_rmb"))
+        derived = _load_json_dict(row.get("derived_json"))
+        allocated_fee_rmb += _to_float(derived.get("allocated_other_rmb"))
+
+    reasons: list[str] = []
+    blocking = False
+    if item_count <= 0:
+        blocking = True
+        reasons.append("当前没有物料明细，不能试算综合成本")
+    if item_count > 0 and total_goods_value <= 0:
+        blocking = True
+        reasons.append("采购货值为空，综合成本没有计算基准")
+    basis_totals = {
+        "goods_value": sum(_to_float(row.get("goods_value")) for row in rows),
+        "gross_weight": sum(_to_float(row.get("gross_weight_kg")) for row in rows),
+        "volume": sum(_to_float(row.get("volume_m3")) for row in rows),
+        "chargeable_weight": sum(_chargeable_weight_value(row) for row in rows),
+        "chargeable_weight_kg": sum(_chargeable_weight_value(row) for row in rows),
+    }
+    basis_labels = {
+        "goods_value": "货值",
+        "gross_weight": "毛重",
+        "volume": "体积",
+        "chargeable_weight": "计费重",
+        "chargeable_weight_kg": "计费重",
+    }
+    unavailable_bases = [basis for basis in basis_values if basis in basis_totals and basis_totals[basis] <= 0]
+    if unavailable_bases:
+        blocking = True
+        missing_labels = "、".join(basis_labels.get(basis, basis) for basis in sorted(unavailable_bases))
+        reasons.append(f"当前费用规则需要按{missing_labels}分摊，但整批缺少对应数据，相关费用未分摊")
+    if counts["missing_quantity"]:
+        reasons.append(
+            f"数量缺失或为 0 的物料 {counts['missing_quantity']} 行"
+            f"{_problem_row_examples(rows, lambda row: not _to_float(row.get('quantity')))}"
+        )
+    if counts["missing_unit_price"]:
+        reasons.append(
+            f"采购单价缺失或为 0 的物料 {counts['missing_unit_price']} 行"
+            f"{_problem_row_examples(rows, lambda row: not _to_float(row.get('unit_price')))}"
+        )
+    if counts["missing_goods_value"]:
+        reasons.append(
+            f"货值缺失或为 0 的物料 {counts['missing_goods_value']} 行"
+            f"{_problem_row_examples(rows, lambda row: not _to_float(row.get('goods_value')))}"
+        )
+    if needs_weight and counts["missing_gross_weight"]:
+        reasons.append(
+            f"当前按重量分摊，毛重缺失或为 0 的物料 {counts['missing_gross_weight']} 行"
+            f"{_problem_row_examples(rows, lambda row: not _to_float(row.get('gross_weight_kg')))}"
+        )
+    if basis_values.intersection({"chargeable_weight", "chargeable_weight_kg"}):
+        missing_chargeable = sum(1 for row in rows if not _chargeable_weight_value(row))
+        if missing_chargeable:
+            reasons.append(
+                f"当前按计费重分摊，计费重/毛重/体积重均缺失或为 0 的物料 {missing_chargeable} 行"
+                f"{_problem_row_examples(rows, lambda row: not _chargeable_weight_value(row))}"
+            )
+    if needs_volume and counts["missing_volume"]:
+        reasons.append(
+            f"当前按体积分摊，体积缺失或为 0 的物料 {counts['missing_volume']} 行"
+            f"{_problem_row_examples(rows, lambda row: not _to_float(row.get('volume_m3')))}"
+        )
+    if item_count > 0 and not positive_rules:
+        reasons.append("当前没有费用池，费用分摊金额为 0")
+    elif positive_rules and allocated_fee_rmb <= 0:
+        reasons.append("费用池已识别，但分摊结果为 0，请检查分摊依据字段")
+    unallocated_fee_rmb = max(fee_pool_rmb - allocated_fee_rmb, 0.0)
+    if positive_rules and unallocated_fee_rmb > 0.01:
+        reasons.append(f"费用池仍有 {_round_money(unallocated_fee_rmb, 2):g} RMB 未分摊")
+    if total_cost_rmb <= 0 and item_count > 0:
+        reasons.append("综合成本未生成或为 0")
+
+    ai_message = ""
+    ai_notes: list[str] = []
+    if ai_allocation is not None:
+        ai_message = ai_allocation.get("message") or ai_allocation.get("reason") or ""
+        if ai_allocation.get("ok"):
+            ai_notes.append("AI已选择分摊依据，金额由系统按规则计算")
+        elif ai_message:
+            reasons.append(f"AI未返回可用分摊口径，已使用系统基础规则：{ai_message}")
+
+    if blocking:
+        status = "blocked"
+        label = "待补数据"
+    elif reasons:
+        status = "review"
+        label = "需人工复核"
+    else:
+        status = "usable"
+        label = "可先采用"
+        reasons.append("核心采购金额、费用池和分摊结果已生成，可作为演示试算结果")
+    if ai_notes:
+        reasons.extend(ai_notes)
+
+    return {
+        "status": status,
+        "label": label,
+        "reason": "；".join(reasons[:4]),
+        "reasons": reasons,
+        "counts": counts,
+        "fee_rule_count": len(positive_rules),
+        "fee_pool_rmb": _round_money(fee_pool_rmb, 6),
+        "allocated_fee_rmb": _round_money(allocated_fee_rmb, 6),
+        "unallocated_fee_rmb": _round_money(unallocated_fee_rmb, 6),
+        "total_goods_value": _round_money(total_goods_value, 6),
+        "total_cost_rmb": _round_money(total_cost_rmb, 6),
+        "ai_used": bool((ai_allocation or {}).get("ok")),
+        "ai_message": ai_message,
+    }
+
+
+def _load_json_dict(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = _json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _problem_row_examples(rows: list[dict], predicate, limit: int = 3) -> str:
+    examples = []
+    for row in rows:
+        if not predicate(row):
+            continue
+        row_no = row.get("row_no") or row.get("idx") or ""
+        material = str(row.get("material_code") or "").strip()
+        product = str(row.get("product_name") or row.get("spec_model") or "").strip()
+        parts = []
+        if row_no:
+            parts.append(f"第{row_no}行")
+        if material:
+            parts.append(material)
+        if product:
+            parts.append(product)
+        examples.append(" ".join(parts) or str(row.get("name") or "未命名物料"))
+        if len(examples) >= limit:
+            break
+    if not examples:
+        return ""
+    suffix = "等" if sum(1 for row in rows if predicate(row)) > len(examples) else ""
+    return f"（{', '.join(examples)}{suffix}）"
 
 
 def _resolve_batch_name(batch_name: str) -> str | None:
@@ -695,6 +1146,7 @@ def _get_rules(batch_doc_name: str, version_name: str) -> list[dict]:
             "basis_field",
             "currency",
             "amount",
+            "remark",
             "is_active",
             "is_enabled",
             "priority_no",
@@ -1149,11 +1601,40 @@ def recalculate_batch(batch_name: str, version_name: str | None = None) -> dict:
     fx_usd_to_rmb = _to_float(version_context.get("fx_usd_to_rmb")) or None
     items = _get_items(batch_doc_name, resolved_version_name)
     rules = _get_rules(batch_doc_name, resolved_version_name)
+    candidate_rules = [rule for rule in rules if _is_rule_enabled(rule) and _to_float(rule.get("amount"))]
+    if not candidate_rules:
+        candidate_rules = _fallback_rules_from_items(items)
+    ai_allocation = allocation_service.suggest_allocation_rules_with_ai(
+        items=items,
+        candidate_rules=candidate_rules,
+        context={
+            "batch_name": batch_doc_name,
+            "version_name": resolved_version_name,
+            "transport_mode": items[0].get("transport_mode") if items else "",
+            "fx_rmb_to_mxn": fx_rmb_to_mxn,
+            "fx_usd_to_rmb": fx_usd_to_rmb,
+        },
+    )
+    rules_for_calculation = ai_allocation.get("rules") or candidate_rules
     calculated_rows, summary_snapshot = calculate_item_rows(
         items,
-        rules,
+        rules_for_calculation,
         fx_rmb_to_mxn=fx_rmb_to_mxn,
         fx_usd_to_rmb=fx_usd_to_rmb,
+    )
+    summary_snapshot["ai_allocation"] = {
+        "ok": bool(ai_allocation.get("ok")),
+        "action": ai_allocation.get("action") or "",
+        "source": ai_allocation.get("source") or "system",
+        "model": ai_allocation.get("model") or "",
+        "message": ai_allocation.get("message") or ai_allocation.get("reason") or "",
+        "rule_count": len(rules_for_calculation),
+    }
+    summary_snapshot["calculation_review"] = _build_calculation_review(
+        calculated_rows,
+        summary_snapshot,
+        rules_for_calculation,
+        ai_allocation,
     )
 
     for row in calculated_rows:
@@ -1177,25 +1658,39 @@ def recalculate_batch(batch_name: str, version_name: str | None = None) -> dict:
         resolved_version_name,
         {
             "summary_snapshot_json": _json_dumps(summary_snapshot),
-            "rule_snapshot_json": _json_dumps(rules),
+            "rule_snapshot_json": _json_dumps(rules_for_calculation),
             "calculated_at": _now(),
         },
         update_modified=True,
     )
+    allocation_source = "AI基础分摊" if ai_allocation.get("ok") else "系统基础分摊"
     _insert_audit_log(
         batch_doc_name=batch_doc_name,
         version_name=resolved_version_name,
         action_type="RECALCULATE",
-        action_remark=f"重算完成，规则数 {summary_snapshot['rule_count']}，明细数 {summary_snapshot['item_count']}",
+        action_remark=f"重算完成，{allocation_source}规则数 {summary_snapshot['rule_count']}，明细数 {summary_snapshot['item_count']}",
     )
     _frappe.db.commit()
+
+    ai_message = ai_allocation.get("message") or ai_allocation.get("reason") or ""
+    if ai_allocation.get("ok"):
+        result_message = "整票重算完成，AI 已选择基础分摊口径并填入每行分摊金额。"
+    elif "没有可供 AI 判断的费用池" in ai_message:
+        result_message = "整票重算完成，当前没有可用费用池；已填入货值/重量比例和基础综合成本，费用分摊金额为 0。"
+    elif "未配置 AI 接口密钥" in ai_message:
+        result_message = "整票重算完成，AI 接口密钥未配置，已使用系统基础规则。"
+    elif ai_message:
+        result_message = f"整票重算完成，AI 未生成分摊口径：{ai_message}"
+    else:
+        result_message = "整票重算完成，AI 未生成分摊口径，已使用系统基础分摊规则。"
 
     return {
         "ok": True,
         "batch_name": batch_doc_name,
         "version_name": resolved_version_name,
         "summary_snapshot": summary_snapshot,
-        "message": "整票重算完成。",
+        "allocation_rules": rules_for_calculation,
+        "message": result_message,
     }
 
 

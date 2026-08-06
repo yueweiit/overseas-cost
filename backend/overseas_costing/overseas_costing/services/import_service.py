@@ -1787,6 +1787,20 @@ def get_tax_certificate_parse_record(record_name: str | None = None) -> dict:
     return attachment_parse_service.get_tax_certificate_parse_record(record_name=record_name)
 
 
+def delete_tax_certificate_parse_records(
+    batch_name: str | None = None,
+    record_name: str | None = None,
+    record_names_json: str | None = None,
+) -> dict:
+    """删除完税凭证解析快照记录。"""
+
+    return attachment_parse_service.delete_tax_certificate_parse_records(
+        batch_name=batch_name,
+        record_name=record_name,
+        record_names_json=record_names_json,
+    )
+
+
 def resolve_tax_certificate_reconciliation(
     record_name: str | None = None,
     resolution_action: str | None = None,
@@ -2474,6 +2488,7 @@ def _upsert_default_allocation_rules(
             "allocation_basis": "goods_value",
             "currency": "RMB",
             "amount": _to_float(block.get("chinaMiscRmb")),
+            "remark": "来自 Excel/OA 明细字段：中国运输及相关杂费 RMB",
             "priority_no": 10,
         },
         {
@@ -2487,6 +2502,7 @@ def _upsert_default_allocation_rules(
                     _first_mapped_value(mapped_rows, "china_to_mexico_freight_rmb", default=0),
                 )
             ),
+            "remark": "来自国际物流 OA、货代账单或明细字段：中国到墨西哥运费 RMB",
             "priority_no": 20,
         },
         {
@@ -2500,6 +2516,7 @@ def _upsert_default_allocation_rules(
                     _first_mapped_value(mapped_rows, "mexico_inland_misc_rmb", default=0),
                 )
             ),
+            "remark": "来自清关资料、墨西哥本地费用资料或明细字段：墨西哥内陆运输+杂费 RMB",
             "priority_no": 30,
         },
     ]
@@ -2900,7 +2917,11 @@ def _pull_purchase_summaries_from_dingtalk(*, linked_approvals: list[dict], env_
     token = get_access_token()
     return [
         _normalize_purchase_summary(summary)
-        for summary in pull_linked_purchase_approval_details(token=token, linked_approvals=linked_approvals)
+        for summary in pull_linked_purchase_approval_details(
+            token=token,
+            linked_approvals=linked_approvals,
+            include_running=True,
+        )
     ]
 
 
@@ -2959,6 +2980,7 @@ def _match_item(
     indexes: dict[str, dict[str, list[dict]]],
     *,
     trust_unique_material_code: bool = False,
+    keep_material_code_candidates_on_narrow_miss: bool = False,
 ) -> tuple[str, list[dict]]:
     for field in ITEM_KEY_FIELDS:
         key = _normalize_key(mapped_row.get(field))
@@ -2968,7 +2990,15 @@ def _match_item(
         if candidates:
             if field == "material_code" and trust_unique_material_code and len(candidates) == 1:
                 return field, candidates
-            return field, _narrow_item_candidates(mapped_row, candidates)
+            narrowed = _narrow_item_candidates(mapped_row, candidates)
+            if (
+                field == "material_code"
+                and keep_material_code_candidates_on_narrow_miss
+                and candidates
+                and not narrowed
+            ):
+                return field, candidates
+            return field, narrowed
     return "", []
 
 
@@ -3487,6 +3517,53 @@ def _build_purchase_updates_for_preview(mapped_row: dict, _target: dict) -> dict
     }
 
 
+def _target_purchase_quantity(target: dict) -> float:
+    actual_quantity = _to_float(target.get("actual_shipped_qty"), default=0.0)
+    if actual_quantity:
+        return actual_quantity
+    return _to_float(target.get("quantity"), default=0.0)
+
+
+def _fanout_purchase_row_by_material_code(
+    mapped_row: dict,
+    *,
+    matched_by: str,
+    candidates: list[dict],
+) -> list[dict]:
+    if matched_by != "material_code" or len(candidates) <= 1:
+        return []
+
+    material_code_key = _normalize_key(mapped_row.get("material_code"))
+    if not material_code_key:
+        return []
+    if any(_normalize_key(candidate.get("material_code")) != material_code_key for candidate in candidates):
+        return []
+
+    unit_price = _to_float(mapped_row.get("unit_price"), default=0.0)
+    if not unit_price:
+        return []
+
+    fanout_rows: list[dict] = []
+    for target in sorted(candidates, key=_candidate_sort_key):
+        target_quantity = _target_purchase_quantity(target)
+        row_for_target = {
+            **mapped_row,
+            "quantity": target_quantity or mapped_row.get("quantity"),
+            "_fanout_source_quantity": mapped_row.get("quantity"),
+            "_fanout_strategy": "material_code_split_by_target_quantity",
+        }
+        if target_quantity:
+            row_for_target["goods_value"] = round(unit_price * target_quantity, 6)
+        fanout_rows.append(
+            {
+                "target": target,
+                "mapped_row": row_for_target,
+                "disambiguation_strategy": "material_code_split_by_target_quantity",
+            }
+        )
+    return fanout_rows
+
+
 def _currency_group_key(value) -> str:
     return _normalize_key(value) or "unknown"
 
@@ -3621,6 +3698,7 @@ def _preview_item_writeback(
     fillable_message: str = "可写入匹配行的业务字段。",
     trust_unique_material_code: bool = False,
     resolve_ambiguous_by_sequence: bool = False,
+    fanout_material_code_purchase_rows: bool = False,
 ) -> dict:
     compact = compact_row or _compact_purchase_row
     if frappe is None:
@@ -3699,6 +3777,7 @@ def _preview_item_writeback(
             mapped_row,
             indexes,
             trust_unique_material_code=trust_unique_material_code,
+            keep_material_code_candidates_on_narrow_miss=fanout_material_code_purchase_rows,
         )
         raw_matches.append(
             {
@@ -3711,6 +3790,35 @@ def _preview_item_writeback(
 
     if resolve_ambiguous_by_sequence:
         _resolve_ambiguous_matches_by_sequence(raw_matches)
+
+    def append_matched_row(match: dict, target: dict, row_for_target: dict, strategy: str = "") -> None:
+        proposed_changes = _build_proposed_changes(
+            target,
+            update_builder(row_for_target, target),
+            field_labels=field_labels,
+            business_fields=business_fields,
+            numeric_zero_fillable_fields=numeric_zero_fillable_fields,
+        )
+        business_changes = [change for change in proposed_changes if change["is_business_field"]]
+        matched_rows.append(
+            {
+                "matched_by": match.get("matched_by") or "",
+                "target_item_name": target.get("name"),
+                "target_row_no": target.get("row_no"),
+                "target_material_code": target.get("material_code"),
+                "target_product_name": target.get("product_name"),
+                "target_spec_model": target.get("spec_model"),
+                "target_quantity": target.get("quantity"),
+                "mapped_row": compact(row_for_target),
+                "disambiguation_strategy": strategy or match.get("disambiguation_strategy") or "",
+                "proposed_changes": proposed_changes,
+                "business_changes": business_changes,
+                "has_fillable": any(change["status"] == "fillable" for change in business_changes),
+                "has_conflict": any(change["status"] == "conflict" for change in business_changes),
+                "all_business_same": bool(business_changes)
+                and all(change["status"] == "same" for change in business_changes),
+            }
+        )
 
     for match in raw_matches:
         mapped_row = match["mapped_row"]
@@ -3729,6 +3837,24 @@ def _preview_item_writeback(
         if match.get("assigned_candidate"):
             candidates = [match["assigned_candidate"]]
         if len(candidates) > 1:
+            fanout_rows = (
+                _fanout_purchase_row_by_material_code(
+                    mapped_row,
+                    matched_by=matched_by,
+                    candidates=candidates,
+                )
+                if fanout_material_code_purchase_rows
+                else []
+            )
+            if fanout_rows:
+                for fanout_row in fanout_rows:
+                    append_matched_row(
+                        match,
+                        fanout_row["target"],
+                        fanout_row["mapped_row"],
+                        fanout_row.get("disambiguation_strategy") or "",
+                    )
+                continue
             diagnosis = _diagnose_ambiguous_source_row(
                 mapped_row,
                 matched_by=matched_by,
@@ -3759,34 +3885,7 @@ def _preview_item_writeback(
             )
             continue
 
-        target = candidates[0]
-        proposed_changes = _build_proposed_changes(
-            target,
-            update_builder(mapped_row, target),
-            field_labels=field_labels,
-            business_fields=business_fields,
-            numeric_zero_fillable_fields=numeric_zero_fillable_fields,
-        )
-        business_changes = [change for change in proposed_changes if change["is_business_field"]]
-        matched_rows.append(
-            {
-                "matched_by": matched_by,
-                "target_item_name": target.get("name"),
-                "target_row_no": target.get("row_no"),
-                "target_material_code": target.get("material_code"),
-                "target_product_name": target.get("product_name"),
-                "target_spec_model": target.get("spec_model"),
-                "target_quantity": target.get("quantity"),
-                "mapped_row": compact(mapped_row),
-                "disambiguation_strategy": match.get("disambiguation_strategy") or "",
-                "proposed_changes": proposed_changes,
-                "business_changes": business_changes,
-                "has_fillable": any(change["status"] == "fillable" for change in business_changes),
-                "has_conflict": any(change["status"] == "conflict" for change in business_changes),
-                "all_business_same": bool(business_changes)
-                and all(change["status"] == "same" for change in business_changes),
-            }
-        )
+        append_matched_row(match, candidates[0], mapped_row)
 
     fillable_row_count = sum(1 for row in matched_rows if row["has_fillable"])
     conflict_row_count = sum(1 for row in matched_rows if row["has_conflict"])
@@ -3924,6 +4023,7 @@ def preview_linked_purchase_expense_oa(
         update_builder=build_purchase_updates,
         fillable_message="可写入匹配行的单价Precio、币种Moneda、总金额Monto Total。",
         trust_unique_material_code=True,
+        fanout_material_code_purchase_rows=True,
     )
 
     return {
@@ -4642,6 +4742,9 @@ def _create_packing_items_from_unmatched_preview(
             "product_name": values.get("product_name"),
             "spec_model": values.get("spec_model"),
             "actual_shipped_qty": values.get("actual_shipped_qty"),
+            "unit_price": values.get("unit_price"),
+            "purchase_currency": values.get("purchase_currency"),
+            "goods_value": values.get("goods_value"),
             "gross_weight_kg": values.get("gross_weight_kg"),
             "volume_m3": values.get("volume_m3"),
         }
@@ -4655,6 +4758,9 @@ def _create_packing_items_from_unmatched_preview(
                 "spec_model": values.get("spec_model"),
                 "quantity": values.get("quantity"),
                 "actual_shipped_qty": values.get("actual_shipped_qty"),
+                "unit_price": values.get("unit_price"),
+                "purchase_currency": values.get("purchase_currency"),
+                "goods_value": values.get("goods_value"),
                 "gross_weight_kg": values.get("gross_weight_kg"),
                 "volume_m3": values.get("volume_m3"),
                 "excel_row_no": values.get("excel_row_no"),
@@ -4738,17 +4844,23 @@ def _build_packing_unmatched_item_values(
         "excel_row_no": mapped_row.get("excel_row_no"),
         "material_code": mapped_row.get("material_code") or "",
         "product_name": mapped_row.get("product_name") or "",
+        "product_name_es": mapped_row.get("product_name_es") or "",
         "spec_model": mapped_row.get("spec_model") or "",
+        "unit": mapped_row.get("unit") or "",
         "quantity": _to_float(actual_qty),
         "actual_shipped_qty": _to_float(actual_qty),
+        "unit_price": _to_float(mapped_row.get("unit_price")),
+        "purchase_currency": mapped_row.get("purchase_currency") or "",
+        "goods_value": _to_float(mapped_row.get("goods_value")),
+        "import_name": mapped_row.get("import_name") or "",
+        "hs_code": mapped_row.get("hs_code") or "",
+        "purchase_order_no": mapped_row.get("purchase_order_no") or "",
         "gross_weight_kg": _to_float(mapped_row.get("gross_weight_kg")),
         "volume_m3": _to_float(mapped_row.get("volume_m3")),
         "volume_weight_kg": _to_float(mapped_row.get("volume_weight_kg")),
         "chargeable_weight_kg": _to_float(mapped_row.get("chargeable_weight_kg")),
-        "unit_price": 0,
-        "purchase_currency": "",
-        "goods_value": 0,
-        "hs_code": mapped_row.get("hs_code") or "",
+        "project_collection": mapped_row.get("project_collection") or "",
+        "transport_mode": mapped_row.get("transport_mode") or "",
         "source_type": "PACKING_LIST",
         "source_doc_no": source_doc_no or "",
         "source_file_name": source_file_name or "",

@@ -139,6 +139,55 @@ def test_sync_saved_tax_certificate_identity_reuses_parsed_snapshot(monkeypatch)
     assert commit_count["value"] == 1
 
 
+def test_delete_tax_certificate_parse_records_accepts_displayed_record_names(monkeypatch) -> None:
+    deleted_names = []
+    commit_count = {"value": 0}
+
+    class FakeDB:
+        docs = {
+            "ATT-TAX-1": {"name": "ATT-TAX-1", "source_type": "Voucher", "attachment_type": "Tax Certificate"},
+            "ATT-TAX-2": {"name": "ATT-TAX-2", "source_type": "Voucher", "attachment_type": "Tax Certificate"},
+            "ATT-PACKING": {"name": "ATT-PACKING", "source_type": "OA", "attachment_type": "Packing List"},
+        }
+
+        @classmethod
+        def exists(cls, doctype, name):
+            assert doctype == "Overseas Cost Attachment"
+            return name in cls.docs
+
+        @classmethod
+        def get_value(cls, doctype, name, _fields, as_dict=False):
+            assert doctype == "Overseas Cost Attachment"
+            assert as_dict is True
+            return dict(cls.docs.get(name) or {})
+
+        @staticmethod
+        def commit():
+            commit_count["value"] += 1
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def delete_doc(doctype, name, ignore_permissions=False):
+            assert doctype == "Overseas Cost Attachment"
+            assert ignore_permissions is True
+            deleted_names.append(name)
+
+    monkeypatch.setattr(attachment_parse_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(attachment_parse_service, "_has_frappe_db_context", lambda: True)
+
+    result = attachment_parse_service.delete_tax_certificate_parse_records(
+        record_names_json='["ATT-TAX-1","ATT-PACKING","MISSING","ATT-TAX-2","ATT-TAX-1"]'
+    )
+
+    assert result["ok"] is True
+    assert result["deleted_count"] == 2
+    assert result["skipped_count"] == 2
+    assert deleted_names == ["ATT-TAX-1", "ATT-TAX-2"]
+    assert commit_count["value"] == 1
+
+
 def test_parse_purchase_order_extracts_only_complete_price_lines() -> None:
     text = """
 PURCHASE ORDER NO: PO2026050901

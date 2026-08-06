@@ -53,7 +53,7 @@
       "fieldname": "allocation_basis",
       "fieldtype": "Select",
       "label": "分摊依据",
-      "options": "goods_value\ngross_weight\nvolume",
+      "options": "goods_value\ngross_weight\nvolume\nchargeable_weight",
       "default": "goods_value"
     },
     {

@@ -6,6 +6,7 @@ import json
 from openpyxl import load_workbook
 
 from overseas_costing.services.batch_service import (
+    EXTRA_ITEM_FIELDS,
     _build_item_query_args,
     _build_batch_source_status,
     _build_export_xlsx_content,
@@ -58,6 +59,7 @@ def test_get_batch_items_dry_run_keeps_filters() -> None:
     assert result["filters"]["product_name"] == "TPU"
     assert result["filters"]["keyword"] == "YL000098"
     assert result["columns"][0]["fieldname"] == "material_code"
+    assert "derived_json" in EXTRA_ITEM_FIELDS
 
 
 def test_create_batch_dry_run_builds_manual_batch_and_version() -> None:
@@ -124,12 +126,89 @@ def test_build_export_xlsx_content_styles_and_freezes_header() -> None:
     workbook = load_workbook(BytesIO(content))
     sheet = workbook.active
 
-    assert sheet.freeze_panes == "A2"
+    assert sheet.freeze_panes == "C2"
     assert sheet.auto_filter.ref == "A1:B2"
-    assert sheet["A1"].value == "A 物料编码"
-    assert sheet["A1"].fill.fgColor.rgb == "FF1F4E79"
-    assert sheet["A1"].font.bold is True
+    assert sheet["A1"].value == "物料编码"
+    assert sheet["A1"].fill.fgColor.rgb == "FFFFD966"
+    assert sheet["A1"].font.sz == 8
+    assert sheet["A1"].font.bold is False
+    assert sheet["A1"].font.color.rgb == "FF000000"
+    assert sheet["A1"].border.left.style == "thin"
+    assert sheet["A1"].border.left.color.rgb == "FF000000"
     assert sheet["A2"].value == "FL004106"
+
+
+def test_build_export_xlsx_content_merges_repeated_batch_level_cells() -> None:
+    content = _build_export_xlsx_content(
+        columns=[
+            {"excel_col": "A", "fieldname": "material_code", "label": "物料编码"},
+            {"excel_col": "I", "fieldname": "customs_no", "label": "报关单号"},
+            {"excel_col": "J", "fieldname": "waybill_no", "label": "中国到墨西哥运单号"},
+            {"excel_col": "K", "fieldname": "china_misc_rmb", "label": "中国运输及相关杂费 RMB"},
+        ],
+        rows=[
+            ["FL001", "26 16 1681 6000151", "HPCU5155607", 0],
+            ["FL001", "26 16 1681 6000151", "HPCU5155607", 0],
+            ["FL002", "26 16 1681 6000151", "FSCU8486789", 0],
+        ],
+    )
+
+    workbook = load_workbook(BytesIO(content))
+    sheet = workbook.active
+    merged_ranges = {str(cell_range) for cell_range in sheet.merged_cells.ranges}
+
+    assert "A2:A3" not in merged_ranges
+    assert "B2:B4" in merged_ranges
+    assert "C2:C3" in merged_ranges
+    assert "D2:D4" in merged_ranges
+    assert sheet["B2"].alignment.horizontal == "center"
+    assert sheet["B2"].alignment.vertical == "center"
+
+
+def test_build_export_xlsx_content_expands_long_text_columns() -> None:
+    content = _build_export_xlsx_content(
+        columns=[
+            {"excel_col": "BD", "fieldname": "project_collection", "label": "项目归集"},
+            {"excel_col": "BE", "fieldname": "transport_mode", "label": "运输方式"},
+        ],
+        rows=[
+            ["productos comerciales贸易产品", "海运"],
+            ["YW OEM-Tablet平板", "海运"],
+        ],
+    )
+
+    workbook = load_workbook(BytesIO(content))
+    sheet = workbook.active
+
+    assert sheet.column_dimensions["A"].width >= 36
+    assert sheet.column_dimensions["B"].width >= 14
+    assert sheet["A2"].alignment.wrap_text is True
+    assert sheet["B2"].alignment.wrap_text is True
+    assert sheet.row_dimensions[2].height >= 20
+
+
+def test_build_export_xlsx_content_uses_reference_header_color_groups() -> None:
+    content = _build_export_xlsx_content(
+        columns=[
+            {"excel_col": "N", "fieldname": "cc_rate", "label": "C.C税率"},
+            {"excel_col": "X", "fieldname": "import_tax_total", "label": "IMPUESTOS合计清关税费"},
+            {"excel_col": "AP", "fieldname": "mexico_customs_rmb", "label": "墨西哥清关费用 RMB"},
+            {"excel_col": "AX", "fieldname": "freight_alloc_rmb", "label": "运输费用分摊 RMB"},
+            {"excel_col": "BB", "fieldname": "total_cost_rmb", "label": "综合成本 RMB"},
+        ],
+        rows=[[0, 0, 0, 0, 0]],
+    )
+
+    workbook = load_workbook(BytesIO(content))
+    sheet = workbook.active
+
+    assert sheet["A1"].fill.fgColor.rgb == "FF0DF2DF"
+    assert sheet["B1"].fill.fgColor.rgb == "FFD04FCA"
+    assert sheet["C1"].fill.fgColor.rgb == "FFFCC102"
+    assert sheet["D1"].fill.fgColor.rgb == "FFFFF3CE"
+    assert sheet["E1"].fill.fgColor.rgb == "FF04B0F1"
+    assert sheet["E1"].font.bold is True
+    assert sheet["E1"].font.color.rgb == "FFFFFFFF"
 
 
 def test_check_writeback_ready_dry_run_returns_blocking_reasons() -> None:
@@ -227,18 +306,64 @@ def test_build_batch_source_status_summarizes_oa_and_voucher_records() -> None:
         [
             {"source_type": "OA", "attachment_type": "Packing List", "parse_status": "Queued"},
             {"source_type": "OA", "attachment_type": "Commercial Invoice", "parse_status": "Queued"},
-            {"source_type": "Voucher", "attachment_type": "Tax Certificate", "parse_status": "Parsed"},
+            {
+                "name": "ATT-OLD",
+                "source_type": "Voucher",
+                "attachment_type": "Tax Certificate",
+                "parse_status": "Parsed",
+                "modified": "2026-07-01 10:00:00",
+                "mapped_result_json": json.dumps(
+                    {
+                        "status": "passed",
+                        "status_label": "一致",
+                        "voucher": {"paid_total_mxn": 100},
+                        "system": {"system_import_tax_total_mxn": 100},
+                        "difference": {"tax_total_diff_mxn": 0, "direction_label": "一致"},
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+            {
+                "name": "ATT-NEW",
+                "file_name": "PD_MZ260108凭证.pdf",
+                "source_type": "Voucher",
+                "attachment_type": "Tax Certificate",
+                "parse_status": "Parsed",
+                "modified": "2026-07-20 10:00:00",
+                "parse_result_json": json.dumps({"summary": {"paid_total_mxn": 129883}}, ensure_ascii=False),
+                "mapped_result_json": json.dumps(
+                    {
+                        "status": "review",
+                        "status_label": "需复核",
+                        "system": {"system_import_tax_total_mxn": 130186},
+                        "difference": {"tax_total_diff_mxn": -303, "direction_label": "凭证金额低于系统"},
+                    },
+                    ensure_ascii=False,
+                ),
+            },
         ],
     )
 
     assert status["has_oa_logistics"] is True
     assert status["source_no"] == "202607010001"
     assert status["oa_attachment_count"] == 3
-    assert status["registered_attachment_count"] == 3
+    assert status["registered_attachment_count"] == 4
     assert status["packing_list_count"] == 1
     assert status["parsed_packing_list_count"] == 0
-    assert status["tax_certificate_count"] == 1
-    assert status["parsed_tax_certificate_count"] == 1
+    assert status["tax_certificate_count"] == 2
+    assert status["parsed_tax_certificate_count"] == 2
+    assert status["latest_tax_certificate_reconciliation"] == {
+        "name": "ATT-NEW",
+        "file_name": "PD_MZ260108凭证.pdf",
+        "modified": "2026-07-20 10:00:00",
+        "status": "review",
+        "status_label": "需复核",
+        "manual_resolution_status_label": "",
+        "paid_total_mxn": 129883,
+        "system_tax_total_mxn": 130186,
+        "tax_total_diff_mxn": -303,
+        "direction_label": "凭证金额低于系统",
+    }
 
 
 def test_build_batch_source_status_exposes_quote_candidates_without_raw_oa_text() -> None:

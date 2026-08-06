@@ -909,11 +909,15 @@ def _looks_like_oa_attachment_header(field_map: dict[str, int]) -> bool:
 def _build_attachment_header_map(normalized_headers: dict[int, str]) -> dict[str, int]:
     field_map: dict[str, int] = {}
     for fieldname, aliases in ATTACHMENT_HEADER_ALIASES.items():
-        for col_no, header in normalized_headers.items():
-            if not header:
+        for alias in aliases:
+            normalized_alias = _normalize_header(alias)
+            if not normalized_alias:
                 continue
-            if any(_normalize_header(alias) in header for alias in aliases):
-                field_map[fieldname] = col_no
+            for col_no, header in normalized_headers.items():
+                if header and normalized_alias in header:
+                    field_map[fieldname] = col_no
+                    break
+            if fieldname in field_map:
                 break
     return field_map
 
@@ -1132,7 +1136,7 @@ def _build_attachment_item(row: dict, source_sheet: str) -> list:
         row.get("unit_price"),
         quantity,
         row.get("goods_value"),
-        None,
+        declared_name,
         row.get("hs_code"),
         row.get("category"),
         None,

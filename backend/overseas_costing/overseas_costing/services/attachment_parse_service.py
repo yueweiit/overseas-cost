@@ -23,6 +23,8 @@ try:
 except Exception:  # pragma: no cover - 本地测试环境不一定有 Frappe
     frappe = None
 
+from overseas_costing.services import fx_rate_service
+
 
 PACKING_LIST_TEMPLATE_STRATEGIES = {
     "mixed_workbook_router": "多 sheet 混合工作簿，先识别 sheet 类型再分别路由解析。",
@@ -42,7 +44,6 @@ TAX_CERTIFICATE_PARSE_TARGETS = [
     "tax_totals",
     "line_items",
 ]
-DEFAULT_FX_RMB_TO_MXN = 2.6
 OCR_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 WORD_DOCUMENT_SUFFIXES = {".doc", ".docx"}
 TEXT_DOCUMENT_SUFFIXES = {".txt"}
@@ -632,6 +633,61 @@ def sync_saved_tax_certificate_identity(limit: int | None = 200) -> dict:
     }
 
 
+def sync_saved_tax_certificate_fx_fallback(record_name: str | None = None, limit: int | None = 200) -> dict:
+    """给历史完税凭证解析快照补充当前版本汇率兜底说明，不改成本字段。"""
+
+    if not _has_frappe_db_context():
+        return {"ok": False, "dry_run": True, "message": "当前未连接 Frappe，无法回填历史完税凭证汇率说明。"}
+
+    if record_name:
+        fields = [
+            "name",
+            "batch",
+            "version",
+            "parse_result_json",
+            "mapped_result_json",
+        ]
+        row = frappe.db.get_value("Overseas Cost Attachment", record_name, fields, as_dict=True)
+        rows = [row] if row else []
+    else:
+        rows = _query_tax_certificate_attachment_records(limit=max(1, min(int(limit or 200), 1000)))
+
+    updated = []
+    skipped = 0
+    for row in rows:
+        if not row:
+            skipped += 1
+            continue
+        parse_result = _json_loads(row.get("parse_result_json"))
+        mapped_result = _json_loads(row.get("mapped_result_json"))
+        enriched = _enrich_tax_certificate_fx_sync_with_version_fallback(
+            parse_result=parse_result,
+            mapped_result=mapped_result,
+            row=row,
+        )
+        if enriched == parse_result:
+            skipped += 1
+            continue
+        frappe.db.set_value(
+            "Overseas Cost Attachment",
+            row.get("name"),
+            "parse_result_json",
+            _json_dumps(enriched),
+            update_modified=False,
+        )
+        updated.append(row.get("name"))
+
+    if updated:
+        frappe.db.commit()
+    return {
+        "ok": True,
+        "updated_count": len(updated),
+        "skipped_count": skipped,
+        "record_names": updated,
+        "message": f"已回填 {len(updated)} 条完税凭证解析记录的汇率兜底说明。",
+    }
+
+
 def get_tax_certificate_parse_record(record_name: str | None = None) -> dict:
     """返回单条完税凭证解析快照详情，不暴露原始 DocType 表单给业务页面。"""
 
@@ -682,6 +738,11 @@ def get_tax_certificate_parse_record(record_name: str | None = None) -> dict:
 
     parse_result = _json_loads(row.get("parse_result_json"))
     mapped_result = _json_loads(row.get("mapped_result_json"))
+    parse_result = _enrich_tax_certificate_fx_sync_with_version_fallback(
+        parse_result=parse_result,
+        mapped_result=mapped_result,
+        row=row,
+    )
     return {
         "ok": True,
         "record_name": record_name,
@@ -689,6 +750,113 @@ def get_tax_certificate_parse_record(record_name: str | None = None) -> dict:
         "parse_result": parse_result,
         "mapped_result": mapped_result,
         "message": "完税凭证解析记录详情已返回。",
+    }
+
+
+def delete_tax_certificate_parse_records(
+    *,
+    batch_name: str | None = None,
+    record_name: str | None = None,
+    record_names_json: str | None = None,
+) -> dict:
+    """删除已保存的完税凭证解析记录，仅限 Voucher / Tax Certificate 附件记录。"""
+
+    if not _has_frappe_db_context():
+        return {
+            "ok": False,
+            "dry_run": True,
+            "batch_name": batch_name or "",
+            "record_name": record_name or "",
+            "record_names": [],
+            "deleted_count": 0,
+            "message": "当前未连接 Frappe，无法删除解析记录。",
+        }
+
+    target_names: list[str] = []
+    skipped_items: list[dict] = []
+    if record_names_json is not None:
+        try:
+            loaded_names = json.loads(record_names_json or "[]")
+        except Exception:
+            return {"ok": False, "deleted_count": 0, "message": "要删除的解析记录列表格式不正确。"}
+        if not isinstance(loaded_names, list):
+            return {"ok": False, "deleted_count": 0, "message": "要删除的解析记录列表格式不正确。"}
+
+        seen_names: set[str] = set()
+        requested_names: list[str] = []
+        for value in loaded_names:
+            name = str(value or "").strip()
+            if name and name not in seen_names:
+                seen_names.add(name)
+                requested_names.append(name)
+
+        if not requested_names:
+            return {"ok": False, "deleted_count": 0, "message": "当前列表没有可删除的解析记录。"}
+
+        for name in requested_names:
+            if not frappe.db.exists("Overseas Cost Attachment", name):
+                skipped_items.append({"name": name, "reason": "记录不存在"})
+                continue
+            row = frappe.db.get_value(
+                "Overseas Cost Attachment",
+                name,
+                ["name", "source_type", "attachment_type"],
+                as_dict=True,
+            ) or {}
+            if row.get("source_type") != "Voucher" or row.get("attachment_type") != "Tax Certificate":
+                skipped_items.append({"name": name, "reason": "不是完税凭证解析记录"})
+                continue
+            target_names.append(row.get("name") or name)
+    elif record_name:
+        if not frappe.db.exists("Overseas Cost Attachment", record_name):
+            return {"ok": False, "record_name": record_name, "deleted_count": 0, "message": "未找到对应的完税凭证解析记录。"}
+        row = frappe.db.get_value(
+            "Overseas Cost Attachment",
+            record_name,
+            ["name", "source_type", "attachment_type"],
+            as_dict=True,
+        ) or {}
+        if row.get("source_type") != "Voucher" or row.get("attachment_type") != "Tax Certificate":
+            return {"ok": False, "record_name": record_name, "deleted_count": 0, "message": "该记录不是完税凭证解析记录，未删除。"}
+        target_names = [record_name]
+    else:
+        if not batch_name:
+            return {"ok": False, "deleted_count": 0, "message": "请先选择要删除记录的批次。"}
+        resolved_batch = _find_tax_certificate_batch({}, batch_name=batch_name)
+        if not resolved_batch or not resolved_batch.get("name"):
+            return {"ok": False, "batch_name": batch_name, "deleted_count": 0, "message": "未找到对应批次，未删除解析记录。"}
+        rows = _query_tax_certificate_attachment_records(batch_name=resolved_batch.get("name"), limit=1000)
+        target_names = [row.get("name") for row in rows if row.get("name")]
+
+    if not target_names:
+        return {
+            "ok": True,
+            "batch_name": batch_name or "",
+            "record_name": record_name or "",
+            "record_names": [],
+            "deleted_count": 0,
+            "skipped_count": len(skipped_items),
+            "skipped_items": skipped_items,
+            "message": "当前没有可删除的完税凭证解析记录。",
+        }
+
+    for name in target_names:
+        frappe.delete_doc("Overseas Cost Attachment", name, ignore_permissions=True)
+    frappe.db.commit()
+    skipped_count = len(skipped_items)
+    message = f"已删除 {len(target_names)} 条完税凭证解析记录。"
+    if skipped_count:
+        message += f"另有 {skipped_count} 条已不存在或不是完税凭证记录，已跳过。"
+    return {
+        "ok": True,
+        "batch_name": batch_name or "",
+        "record_name": record_name or "",
+        "record_names": target_names,
+        "deleted_count": len(target_names),
+        "skipped_count": skipped_count,
+        "skipped_items": skipped_items,
+        "deleted_names": target_names,
+        "message": message,
     }
 
 
@@ -821,12 +989,17 @@ def parse_tax_certificate_text(text: str, source_name: str | None = None) -> dic
     dates = re.findall(r"\b\d{2}/\d{2}/\d{4}\b", normalized)
     payment_date = _search(r"FECHA DE PAGO:[\s\S]{0,80}?(\d{2}/\d{2}/\d{4})", normalized) or (dates[0] if dates else "")
     entry_date = dates[0] if dates else ""
-    exchange_match = re.search(r"\n\s*\d+\s+(\d+\.\d{4,6})\s+([\d,]+\.\d{3})\s+\d+\s*\n", normalized)
+    exchange_match = re.search(
+        r"TIPO\s+CAMBIO:\s*(\d+\.\d{4,6})[\s\S]{0,120}?PESO\s+BRUTO:\s*([\d,]+\.\d{3})",
+        normalized,
+        flags=re.IGNORECASE,
+    ) or re.search(r"\n\s*\d+\s+(\d+\.\d{4,6})\s+([\d,]+\.\d{3})\s+\d+\s*\n", normalized)
     document_match = re.search(r"\n(COVE[0-9A-Z]+)\s*\n([A-Z0-9\-]+)\s*\n(\d{2}/\d{2}/\d{4})\s+([A-Z]{3})\s+([A-Z]{3})\s+([\d,]+\.\d+)", normalized)
     header = {
         "pedimento_no": _search(r"(\d{2}\s+\d{2}\s+\d{4}\s+\d{7})", normalized),
         "pedimento_short_no": _search(r"Ped\.\s*(\d+)", normalized),
-        "pedimento_ref": _search(r"PEDIMENTO REF:\s*([A-Z0-9]+)", normalized),
+        "pedimento_ref": _search(r"PEDIMENTO\s+REF:\s*([A-Z0-9]+)", normalized)
+        or _search(r"\bREF:\s*([A-Z0-9]+)", normalized),
         "customs_section": _search(r"PEDIMENTO:\s*ADUANA:[\s\S]{0,60}?(\d{4})\s+(\d{3})", normalized),
         "importer_rfc": _search(r"\b([A-Z&Ñ]{3}\d{6}[A-Z0-9]{3})\b", normalized),
         "importer_name": _search(r"\b(YUEWEI SA DE CV)\b", normalized),
@@ -1345,16 +1518,178 @@ def _insert_fx_sync_audit_log(
     ).insert(ignore_permissions=True)
 
 
+def _batch_approval_finished_at(batch: dict) -> str:
+    for fieldname in ("source_finished_at", "source_finish_time", "finish_time", "complete_time", "completed_at"):
+        value = batch.get(fieldname)
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def _fx_sync_date_fields(fx_context: dict, *, payment_date: str, approval_finished_at: str) -> dict:
+    normalized_payment_date = fx_context.get("normalized_payment_date") or fx_rate_service.normalize_payment_date(payment_date)
+    normalized_approval_finished_at = (
+        fx_context.get("normalized_approval_finished_at") or fx_rate_service.normalize_payment_date(approval_finished_at)
+    )
+    normalized_fx_rate_date = fx_context.get("normalized_fx_rate_date") or fx_context.get("normalized_date") or ""
+    fx_date_source = fx_context.get("fx_date_source") or fx_context.get("date_source") or ""
+    if not normalized_fx_rate_date:
+        normalized_fx_rate_date = normalized_payment_date or normalized_approval_finished_at
+    if not fx_date_source:
+        if normalized_payment_date and normalized_fx_rate_date == normalized_payment_date:
+            fx_date_source = fx_rate_service.FX_DATE_SOURCE_PAYMENT
+        elif normalized_approval_finished_at and normalized_fx_rate_date == normalized_approval_finished_at:
+            fx_date_source = fx_rate_service.FX_DATE_SOURCE_APPROVAL_FINISHED
+        else:
+            fx_date_source = fx_rate_service.FX_DATE_SOURCE_MISSING
+
+    return {
+        "payment_date": payment_date,
+        "normalized_payment_date": normalized_payment_date,
+        "approval_finished_at": approval_finished_at,
+        "normalized_approval_finished_at": normalized_approval_finished_at,
+        "fx_rate_date": fx_context.get("fx_rate_date") or fx_context.get("date") or normalized_fx_rate_date,
+        "normalized_fx_rate_date": normalized_fx_rate_date,
+        "fx_date_source": fx_date_source,
+        "fx_date_source_label": fx_context.get("fx_date_source_label")
+        or fx_context.get("date_source_label")
+        or fx_rate_service.FX_DATE_SOURCE_LABELS.get(fx_date_source, "汇率日期"),
+        "is_estimated_rate": bool(fx_context.get("is_estimated_rate")),
+        "rate_date_message": fx_context.get("rate_date_message") or "",
+    }
+
+
+def _version_fx_fallback_payload(version_name: str | None, *, reason: str = "") -> dict:
+    if not version_name or not _has_frappe_db_context():
+        return {}
+    version = frappe.db.get_value(
+        "Overseas Cost Version",
+        version_name,
+        ["fx_usd_to_rmb", "fx_rmb_to_mxn"],
+        as_dict=True,
+    ) or {}
+    usd_to_rmb = _to_number(version.get("fx_usd_to_rmb"))
+    rmb_to_mxn = _to_number(version.get("fx_rmb_to_mxn"))
+    if not usd_to_rmb and not rmb_to_mxn:
+        return {}
+    return {
+        "usd_to_rmb": usd_to_rmb,
+        "rmb_to_mxn": rmb_to_mxn,
+        "fallback_usd_to_rmb": usd_to_rmb,
+        "fallback_rmb_to_mxn": rmb_to_mxn,
+        "fallback_rate_source": "current_version",
+        "fallback_rate_source_label": "当前版本汇率（暂用）",
+        "fallback_rate_reason": reason,
+        "fallback_message": "汇率库缺少付款日汇率，当前成本暂用版本汇率；后续补齐汇率库后需重新确认。",
+    }
+
+
+def _resolve_tax_certificate_version_name(*, row: dict, mapped_result: dict) -> str:
+    batch = mapped_result.get("batch") if isinstance(mapped_result.get("batch"), dict) else {}
+    version_name = str(row.get("version") or batch.get("current_version") or "").strip()
+    if version_name or not _has_frappe_db_context():
+        return version_name
+
+    batch_name = str(row.get("batch") or batch.get("name") or "").strip()
+    if not batch_name:
+        return ""
+    return str(
+        frappe.db.get_value("Overseas Cost Batch", batch_name, "current_version")
+        or ""
+    ).strip()
+
+
+def _enrich_tax_certificate_fx_sync_with_version_fallback(*, parse_result: dict, mapped_result: dict, row: dict) -> dict:
+    if not isinstance(parse_result, dict):
+        return {}
+    fx_sync = parse_result.get("fx_sync")
+    if not isinstance(fx_sync, dict):
+        return parse_result
+    if fx_sync.get("usd_to_rmb") or fx_sync.get("rmb_to_mxn"):
+        return parse_result
+
+    version_name = _resolve_tax_certificate_version_name(row=row, mapped_result=mapped_result)
+    reason = fx_sync.get("reason") or fx_sync.get("message") or "汇率库缺少付款日汇率。"
+    fallback = _version_fx_fallback_payload(version_name, reason=reason)
+    if not fallback:
+        return parse_result
+
+    normalized_payment_date = fx_sync.get("normalized_payment_date") or fx_rate_service.normalize_payment_date(fx_sync.get("payment_date"))
+    fallback_message = str(fallback.get("fallback_message") or "")
+    if normalized_payment_date:
+        fallback_message = f"汇率库缺少 {normalized_payment_date} 的 USD/MXN 汇率，当前成本暂用版本汇率；后续补齐汇率库后需重新确认。"
+    enriched = dict(parse_result)
+    enriched_fx_sync = {
+        **fx_sync,
+        **fallback,
+        "fallback_message": fallback_message,
+        "normalized_fx_rate_date": fx_sync.get("normalized_fx_rate_date") or normalized_payment_date,
+        "fx_date_source": fx_sync.get("fx_date_source") or fx_rate_service.FX_DATE_SOURCE_PAYMENT,
+        "fx_date_source_label": fx_sync.get("fx_date_source_label") or "真实付款日",
+        "message": fallback_message,
+    }
+    enriched["fx_sync"] = enriched_fx_sync
+    return enriched
+
+
 def _sync_tax_certificate_exchange_rate_to_version(*, parsed: dict, batch: dict, source_name: str | None = None) -> dict:
     header = parsed.get("header") or {}
-    usd_to_mxn = _to_number(header.get("exchange_rate"))
-    if usd_to_mxn is None:
-        return {"action": "skipped", "reason": "完税凭证未识别到汇率。"}
+    payment_date = header.get("payment_date") or ""
+    approval_finished_at = _batch_approval_finished_at(batch)
+    resolved_fx_date = fx_rate_service.resolve_fx_rate_date(
+        payment_date=payment_date,
+        approval_finished_at=approval_finished_at,
+    )
+    fx_date_fields = _fx_sync_date_fields(
+        resolved_fx_date,
+        payment_date=payment_date,
+        approval_finished_at=approval_finished_at,
+    )
+    voucher_usd_to_mxn = _to_number(header.get("exchange_rate"))
+    if not fx_date_fields["normalized_fx_rate_date"]:
+        return {
+            "action": "skipped",
+            "voucher_usd_to_mxn": voucher_usd_to_mxn,
+            "reason": resolved_fx_date.get("message") or "缺少汇率日期，未自动查询汇率。",
+            **fx_date_fields,
+        }
 
     version_name = batch.get("current_version") or ""
     batch_name = batch.get("name") or ""
     if not version_name or not batch_name:
-        return {"action": "skipped", "reason": "当前批次没有可更新的版本。", "usd_to_mxn": usd_to_mxn}
+        return {
+            "action": "skipped",
+            "reason": "当前批次没有可更新的版本。",
+            "voucher_usd_to_mxn": voucher_usd_to_mxn,
+            **fx_date_fields,
+        }
+
+    fx_context = fx_rate_service.build_fx_context_for_costing(
+        payment_date=payment_date,
+        approval_finished_at=approval_finished_at,
+    )
+    fx_date_fields = _fx_sync_date_fields(
+        fx_context,
+        payment_date=payment_date,
+        approval_finished_at=approval_finished_at,
+    )
+    if not fx_context.get("fx_usd_to_rmb") and not fx_context.get("fx_rmb_to_mxn"):
+        reason = fx_context.get("message") or "付款日汇率缺失，未更新版本汇率。"
+        fallback = _version_fx_fallback_payload(version_name, reason=reason)
+        normalized_rate_date = fx_date_fields.get("normalized_fx_rate_date") or ""
+        if fallback and normalized_rate_date:
+            fallback["fallback_message"] = (
+                f"汇率库缺少 {normalized_rate_date} 的 USD/MXN 汇率，当前成本暂用版本汇率；后续补齐汇率库后需重新确认。"
+            )
+        return {
+            "action": "skipped",
+            "reason": reason,
+            "voucher_usd_to_mxn": voucher_usd_to_mxn,
+            "rate_snapshots": fx_context.get("rate_snapshots") or {},
+            "errors": fx_context.get("errors") or [],
+            **fx_date_fields,
+            **fallback,
+        }
 
     version = frappe.db.get_value(
         "Overseas Cost Version",
@@ -1364,32 +1699,36 @@ def _sync_tax_certificate_exchange_rate_to_version(*, parsed: dict, batch: dict,
     ) or {}
     old_usd_to_rmb = _to_number(version.get("fx_usd_to_rmb"))
     old_rmb_to_mxn = _to_number(version.get("fx_rmb_to_mxn"))
-    rmb_to_mxn = old_rmb_to_mxn or DEFAULT_FX_RMB_TO_MXN
-    usd_to_rmb = _round_money(float(usd_to_mxn) / float(rmb_to_mxn), 6)
+    usd_to_rmb = _to_number(fx_context.get("fx_usd_to_rmb"))
+    rmb_to_mxn = _to_number(fx_context.get("fx_rmb_to_mxn"))
 
     updates = {}
     changed_fields = []
-    if not _numbers_close(old_usd_to_rmb, usd_to_rmb):
+    if usd_to_rmb is not None and not _numbers_close(old_usd_to_rmb, usd_to_rmb):
         updates["fx_usd_to_rmb"] = usd_to_rmb
         changed_fields.append({"field_name": "fx_usd_to_rmb", "old_value": old_usd_to_rmb, "new_value": usd_to_rmb})
-    if old_rmb_to_mxn is None:
+    if rmb_to_mxn is not None and not _numbers_close(old_rmb_to_mxn, rmb_to_mxn):
         updates["fx_rmb_to_mxn"] = rmb_to_mxn
         changed_fields.append({"field_name": "fx_rmb_to_mxn", "old_value": old_rmb_to_mxn, "new_value": rmb_to_mxn})
 
     source_label = source_name or header.get("pedimento_ref") or header.get("pedimento_no") or "完税凭证"
+    date_label = fx_date_fields["fx_date_source_label"]
+    normalized_fx_rate_date = fx_date_fields["normalized_fx_rate_date"]
     remark = (
-        f"完税凭证汇率同步：来源 {source_label}，USD→MXN {usd_to_mxn}，"
-        f"RMB→MXN {rmb_to_mxn}，推导 USD→RMB {usd_to_rmb}"
+        f"完税凭证汇率同步：来源 {source_label}，汇率日期 {normalized_fx_rate_date}（{date_label}），"
+        f"USD→RMB {usd_to_rmb or '缺失'}，RMB→MXN {rmb_to_mxn or '缺失'}"
     )
 
     if not updates:
         return {
             "action": "unchanged",
             "version_name": version_name,
-            "usd_to_mxn": usd_to_mxn,
+            "voucher_usd_to_mxn": voucher_usd_to_mxn,
+            "rate_snapshots": fx_context.get("rate_snapshots") or {},
             "rmb_to_mxn": rmb_to_mxn,
             "usd_to_rmb": usd_to_rmb,
-            "message": "凭证汇率与当前版本汇率一致，未更新版本。",
+            "message": f"{date_label}汇率与当前版本汇率一致，未更新版本。",
+            **fx_date_fields,
         }
 
     updates["remark"] = _append_version_remark(version.get("remark"), remark)
@@ -1408,11 +1747,17 @@ def _sync_tax_certificate_exchange_rate_to_version(*, parsed: dict, batch: dict,
     return {
         "action": "updated",
         "version_name": version_name,
-        "usd_to_mxn": usd_to_mxn,
+        "voucher_usd_to_mxn": voucher_usd_to_mxn,
+        "rate_snapshots": fx_context.get("rate_snapshots") or {},
         "rmb_to_mxn": rmb_to_mxn,
         "usd_to_rmb": usd_to_rmb,
         "changed_fields": changed_fields,
-        "message": "已按完税凭证汇率更新当前版本，批次已标记为待重算。",
+        "message": (
+            "已按付款审批完成日暂估汇率更新当前版本，批次已标记为待重算；后续拿到真实付款日后需重算确认。"
+            if fx_date_fields.get("is_estimated_rate")
+            else "已按真实付款日汇率更新当前版本，批次已标记为待重算。"
+        ),
+        **fx_date_fields,
     }
 
 
@@ -1465,12 +1810,18 @@ def _refresh_costing_after_fx_sync(*, fx_sync: dict | None, batch: dict) -> dict
 def _tax_certificate_save_message(fx_sync: dict | None = None, cost_refresh: dict | None = None) -> str:
     fx_sync = fx_sync or {}
     cost_refresh = cost_refresh or {}
+    date_label = fx_sync.get("fx_date_source_label") or "汇率日期"
     if fx_sync.get("action") == "updated":
+        date_note = (
+            "付款审批完成日暂估汇率"
+            if fx_sync.get("is_estimated_rate")
+            else f"{date_label}汇率"
+        )
         if cost_refresh.get("action") == "refreshed" and cost_refresh.get("recalculated"):
-            return "完税凭证解析结果已保存；凭证汇率已同步到当前版本，并已尝试重新同步采购字段和重算。"
-        return "完税凭证解析结果已保存；凭证汇率已同步到当前版本，批次已标记为待重算。"
+            return f"完税凭证解析结果已保存；{date_note}已同步到当前版本，并已尝试重新同步采购字段和重算。"
+        return f"完税凭证解析结果已保存；{date_note}已同步到当前版本，批次已标记为待重算。"
     if fx_sync.get("action") == "unchanged":
-        return "完税凭证解析结果已保存；凭证汇率与当前版本一致。"
+        return f"完税凭证解析结果已保存；{date_label}汇率与当前版本一致。"
     return "完税凭证解析结果已保存到附件记录，未写入成本字段。"
 
 
@@ -1700,6 +2051,7 @@ def _find_tax_certificate_batch(header: dict, batch_name: str | None = None) -> 
         "waybill_no",
         "container_no",
         "current_version",
+        "source_finished_at",
         "item_count",
         "total_goods_value",
         "estimated_total_cost_rmb",
@@ -1756,6 +2108,7 @@ def _public_batch_snapshot(batch: dict | None) -> dict:
         "waybill_no": batch.get("waybill_no") or "",
         "container_no": batch.get("container_no") or "",
         "current_version": batch.get("current_version") or "",
+        "source_finished_at": batch.get("source_finished_at") or "",
         "item_count": batch.get("item_count") or 0,
         "total_goods_value": batch.get("total_goods_value"),
         "estimated_total_cost_rmb": batch.get("estimated_total_cost_rmb"),
@@ -1841,31 +2194,28 @@ def _parse_declared_item_count(text: str) -> int | None:
 def _parse_pedimento_items(text: str) -> list[dict]:
     lines = [line.strip() for line in text.splitlines()]
     items: list[dict] = []
-    item_pattern = re.compile(
-        r"^(\d{11})\s+(\d{2})\s+\d+\s+\d+\s+\d+\s+([\d,]+\.\d{3})\s+\d+\s+([\d,]+\.\d{5})\s+([A-Z]{3})\s+([A-Z]{3})$"
-    )
     index = 0
     while index < len(lines):
-        match = item_pattern.match(lines[index])
-        if not match:
+        item_match = _match_pedimento_item_line(lines[index])
+        if not item_match:
             index += 1
             continue
 
-        raw_fraction = match.group(1)
         description = _next_description(lines, index + 1)
         tax_lines = _collect_item_tax_lines(lines, index + 1)
+        tax_lines.update(_parse_item_tax_fields(lines[index]))
         value_line = _next_value_line(lines, index + 1)
         items.append(
             {
                 "row_no": len(items) + 1,
-                "fraction_raw": raw_fraction,
-                "hs_code": raw_fraction[:8],
-                "item_seq": raw_fraction[8:],
-                "nico": match.group(2),
-                "quantity_umc": _to_number(match.group(3)),
-                "quantity_umt": _to_number(match.group(4)),
-                "origin_country": match.group(5),
-                "seller_country": match.group(6),
+                "fraction_raw": item_match["fraction_raw"],
+                "hs_code": item_match["hs_code"],
+                "item_seq": item_match["item_seq"],
+                "nico": item_match["nico"],
+                "quantity_umc": item_match["quantity_umc"],
+                "quantity_umt": item_match["quantity_umt"],
+                "origin_country": item_match["origin_country"],
+                "seller_country": item_match["seller_country"],
                 "import_name": description,
                 "taxes": tax_lines,
                 "value_line_raw": value_line,
@@ -1876,6 +2226,39 @@ def _parse_pedimento_items(text: str) -> list[dict]:
     return items
 
 
+def _match_pedimento_item_line(line: str) -> dict | None:
+    patterns = (
+        re.compile(
+            r"^(?P<seq>\d{3})\s+(?P<hs>\d{8})\s+(?P<nico>\d{2})\s+\d+\s+\d+\s+\d+\s+"
+            r"(?P<quantity_umc>[\d,]+\.\d{3})\s+\d+\s+(?P<quantity_umt>[\d,]+\.\d{5})\s+"
+            r"(?P<origin>[A-Z]{3})\s+(?P<seller>[A-Z]{3})(?:\s+.*)?$"
+        ),
+        re.compile(
+            r"^(?P<raw_fraction>\d{11})\s+(?P<nico>\d{2})\s+\d+\s+\d+\s+\d+\s+"
+            r"(?P<quantity_umc>[\d,]+\.\d{3})\s+\d+\s+(?P<quantity_umt>[\d,]+\.\d{5})\s+"
+            r"(?P<origin>[A-Z]{3})\s+(?P<seller>[A-Z]{3})(?:\s+.*)?$"
+        ),
+    )
+    for pattern in patterns:
+        match = pattern.match(line)
+        if not match:
+            continue
+        groups = match.groupdict()
+        raw_fraction = groups.get("raw_fraction") or f"{groups.get('hs')}{groups.get('seq') or ''}"
+        hs_code = groups.get("hs") or raw_fraction[:8]
+        return {
+            "fraction_raw": raw_fraction,
+            "hs_code": hs_code,
+            "item_seq": groups.get("seq") or raw_fraction[8:],
+            "nico": groups.get("nico"),
+            "quantity_umc": _to_number(groups.get("quantity_umc")),
+            "quantity_umt": _to_number(groups.get("quantity_umt")),
+            "origin_country": groups.get("origin"),
+            "seller_country": groups.get("seller"),
+        }
+    return None
+
+
 def _next_description(lines: list[str], start: int) -> str:
     for line in lines[start : start + 5]:
         if not line or _is_noise_line(line):
@@ -1884,7 +2267,9 @@ def _next_description(lines: list[str], start: int) -> str:
             continue
         if re.match(r"^\d", line):
             continue
-        return line
+        cleaned = _clean_item_description(line)
+        if cleaned:
+            return cleaned
     return ""
 
 
@@ -1893,22 +2278,28 @@ def _collect_item_tax_lines(lines: list[str], start: int) -> dict:
     for line in lines[start : start + 8]:
         if _is_item_start_line(line):
             break
-        match = re.match(r"^(IGI|IVA)\s+([\d.]+)\s+\d+\s+\d+\s+([\d,]+(?:\.\d+)?)$", line)
-        if not match:
-            continue
-        key = match.group(1).lower()
-        taxes[f"{key}_rate"] = _to_number(match.group(2))
-        taxes[f"{key}_amount_mxn"] = _to_number(match.group(3))
+        taxes.update(_parse_item_tax_fields(line))
     return taxes
 
 
 def _is_item_start_line(line: str) -> bool:
-    return bool(
-        re.match(
-            r"^\d{11}\s+\d{2}\s+\d+\s+\d+\s+\d+\s+[\d,]+\.\d{3}\s+\d+\s+[\d,]+\.\d{5}\s+[A-Z]{3}\s+[A-Z]{3}$",
-            line,
-        )
-    )
+    return _match_pedimento_item_line(line) is not None
+
+
+def _parse_item_tax_fields(line: str) -> dict:
+    match = re.search(r"\b(IGI|IVA)\s+([\d.]+)\s+\d+\s+\d+\s+([\d,]+(?:\.\d+)?)\b", line)
+    if not match:
+        return {}
+    key = match.group(1).lower()
+    return {
+        f"{key}_rate": _to_number(match.group(2)),
+        f"{key}_amount_mxn": _to_number(match.group(3)),
+    }
+
+
+def _clean_item_description(line: str) -> str:
+    text = re.split(r"\s{2,}(?:IGI|IVA)\s+[\d.]+\s+\d+\s+\d+\s+[\d,]+(?:\.\d+)?", line, maxsplit=1)[0]
+    return _clean_spaces(text)
 
 
 def _next_value_line(lines: list[str], start: int) -> str:

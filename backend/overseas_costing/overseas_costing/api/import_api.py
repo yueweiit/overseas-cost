@@ -359,6 +359,21 @@ def get_tax_certificate_parse_record(record_name: str | None = None) -> dict:
 
 
 @frappe.whitelist()
+def delete_tax_certificate_parse_records(
+    batch_name: str | None = None,
+    record_name: str | None = None,
+    record_names_json: str | None = None,
+) -> dict:
+    """删除已保存的完税凭证解析记录。"""
+
+    return import_service.delete_tax_certificate_parse_records(
+        batch_name=batch_name,
+        record_name=record_name,
+        record_names_json=record_names_json,
+    )
+
+
+@frappe.whitelist()
 def resolve_tax_certificate_reconciliation(
     record_name: str | None = None,
     resolution_action: str | None = None,
@@ -612,6 +627,34 @@ def refresh_existing_oa_logistics_details(
         env_file=env_file,
         api_style=api_style,
         include_non_sea=include_non_sea_flag,
+        access_token=access_token or "",
+    )
+
+
+@frappe.whitelist()
+def sync_existing_oa_finished_times(limit: int | None = 200) -> dict:
+    """从已保存 OA 快照回填批次来源完成时间，仅补空值。"""
+
+    from overseas_costing.scripts import import_oa_logistics
+
+    return import_oa_logistics.sync_existing_oa_finished_times(limit=limit)
+
+
+@frappe.whitelist()
+def refresh_missing_oa_finished_times(
+    limit: int | None = 200,
+    env_file: str | None = None,
+    api_style: str = "auto",
+    access_token: str | None = None,
+) -> dict:
+    """回钉钉重拉详情，只补缺失的来源完成时间和审批状态。"""
+
+    from overseas_costing.scripts import import_oa_logistics
+
+    return import_oa_logistics.refresh_missing_oa_finished_times(
+        limit=limit,
+        env_file=env_file,
+        api_style=api_style,
         access_token=access_token or "",
     )
 

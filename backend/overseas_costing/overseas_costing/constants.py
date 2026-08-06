@@ -36,7 +36,7 @@ BATCH_WRITEBACK_STATUSES = ("Not Started", "Pending", "Failed", "Success")
 VERSION_TYPES = ("Estimated", "Actual", "Adjustment")
 VERSION_SOURCE_TYPES = ("Import", "Clone", "Manual")
 
-ALLOCATION_BASES = ("goods_value", "gross_weight", "volume")
+ALLOCATION_BASES = ("goods_value", "gross_weight", "volume", "chargeable_weight")
 
 AUDIT_ACTION_TYPES = (
     "IMPORT",

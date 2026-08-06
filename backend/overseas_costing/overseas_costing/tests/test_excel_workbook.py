@@ -253,7 +253,7 @@ def test_parse_oa_attachment_detail_sheet_auto_detects_non_yuewei_sheet() -> Non
     assert first_item[2] == 1.2
     assert first_item[3] == 500
     assert first_item[4] == 600
-    assert first_item[5] is None
+    assert first_item[5] == "钢化膜"
     assert first_item[7] is None
     assert first_item[11]["purchaseOrderNo"] == "202606220952000179521"
     assert first_item[11]["actualShippedQty"] == 500

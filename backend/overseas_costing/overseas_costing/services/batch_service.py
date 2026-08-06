@@ -257,6 +257,7 @@ EXTRA_ITEM_FIELDS = [
     "manual_override_flag",
     "dingtalk_instance_id",
     "dingtalk_official_url",
+    "derived_json",
 ]
 ITEM_FILTER_FIELDS = (
     "customs_no",
@@ -508,6 +509,63 @@ def _is_parsed_attachment(row: dict) -> bool:
     return _source_status_key(row.get("parse_status")) == "parsed"
 
 
+def _json_loads_dict(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    try:
+        payload = json.loads(value or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _latest_tax_certificate_reconciliation(attachment_rows: list[dict]) -> dict:
+    tax_rows = [
+        row
+        for row in attachment_rows
+        if row.get("attachment_type") == "Tax Certificate" or row.get("source_type") == "Voucher"
+    ]
+    if not tax_rows:
+        return {}
+
+    sorted_rows = sorted(
+        tax_rows,
+        key=lambda row: str(row.get("modified") or row.get("creation") or ""),
+        reverse=True,
+    )
+    for row in sorted_rows:
+        mapped_result = _json_loads_dict(row.get("mapped_result_json"))
+        if not mapped_result:
+            continue
+        parse_result = _json_loads_dict(row.get("parse_result_json"))
+        summary = parse_result.get("summary") if isinstance(parse_result.get("summary"), dict) else {}
+        voucher = mapped_result.get("voucher") if isinstance(mapped_result.get("voucher"), dict) else {}
+        system = mapped_result.get("system") if isinstance(mapped_result.get("system"), dict) else {}
+        difference = mapped_result.get("difference") if isinstance(mapped_result.get("difference"), dict) else {}
+        manual_resolution = (
+            mapped_result.get("manual_resolution")
+            if isinstance(mapped_result.get("manual_resolution"), dict)
+            else {}
+        )
+        return {
+            "name": row.get("name") or "",
+            "file_name": row.get("file_name") or "",
+            "modified": row.get("modified") or "",
+            "status": mapped_result.get("status") or "",
+            "status_label": mapped_result.get("status_label") or "",
+            "manual_resolution_status_label": manual_resolution.get("status_label") or "",
+            "paid_total_mxn": (
+                voucher.get("paid_total_mxn")
+                if voucher.get("paid_total_mxn") is not None
+                else summary.get("paid_total_mxn")
+            ),
+            "system_tax_total_mxn": system.get("system_import_tax_total_mxn"),
+            "tax_total_diff_mxn": difference.get("tax_total_diff_mxn"),
+            "direction_label": difference.get("direction_label") or "",
+        }
+    return {}
+
+
 def _get_oa_logistics_trace(extra_json) -> dict:
     if isinstance(extra_json, dict):
         payload = dict(extra_json)
@@ -593,6 +651,7 @@ def _build_batch_source_status(batch: dict, attachments: list[dict] | None = Non
         "logistics_quote_candidates": quote_candidates,
         "confirmed_logistics_quote": confirmed_quote,
         "has_confirmed_logistics_quote": bool(confirmed_quote.get("amount")),
+        "latest_tax_certificate_reconciliation": _latest_tax_certificate_reconciliation(attachment_rows),
     }
 
 
@@ -607,7 +666,17 @@ def _attach_batch_source_status(items: list[dict]) -> list[dict]:
             attachment_rows = frappe.get_all(
                 "Overseas Cost Attachment",
                 filters={"batch": ["in", batch_names]},
-                fields=["batch", "source_type", "attachment_type", "parse_status"],
+                fields=[
+                    "name",
+                    "batch",
+                    "source_type",
+                    "attachment_type",
+                    "parse_status",
+                    "file_name",
+                    "parse_result_json",
+                    "mapped_result_json",
+                    "modified",
+                ],
                 limit_page_length=10000,
             )
         except Exception:
@@ -625,6 +694,34 @@ def _attach_batch_source_status(items: list[dict]) -> list[dict]:
             item,
             attachments_by_batch.get(item.get("name"), []),
         )
+    return items
+
+
+def _attach_batch_calculation_snapshot(items: list[dict]) -> list[dict]:
+    """把当前版本的 AI/分摊快照附加到批次列表，供右下角复核面板展示。"""
+
+    if not items:
+        return items
+
+    version_names = [item.get("current_version") for item in items if item.get("current_version")]
+    if not version_names:
+        return items
+
+    versions = frappe.get_all(
+        "Overseas Cost Version",
+        filters={"name": ["in", version_names]},
+        fields=["name", "summary_snapshot_json", "rule_snapshot_json", "calculated_at"],
+        limit_page_length=len(version_names),
+    )
+    versions_by_name = {version["name"]: version for version in versions}
+    for item in items:
+        version = versions_by_name.get(item.get("current_version")) or {}
+        summary = _load_json(version.get("summary_snapshot_json"))
+        rules = _load_json(version.get("rule_snapshot_json"))
+        item["summary_snapshot"] = summary
+        item["ai_allocation"] = summary.get("ai_allocation") or {}
+        item["allocation_rule_snapshot"] = rules if isinstance(rules, list) else []
+        item["calculated_at"] = version.get("calculated_at")
     return items
 
 
@@ -692,6 +789,7 @@ def get_batch_list(filters: dict) -> dict:
         if not is_hidden_approval_status(item.get("source_approval_status"))
     ]
     items = _attach_batch_source_status(items)
+    items = _attach_batch_calculation_snapshot(items)
     for item in items:
         item.pop("extra_json", None)
     return {
@@ -779,7 +877,7 @@ def get_batch_detail(batch_name: str, version_name: str | None = None) -> dict:
         rules = frappe.get_all(
             "Overseas Cost Allocation Rule",
             filters={"batch": batch_doc_name, "version": resolved_version_name},
-            fields=["name", "rule_code", "expense_category", "allocation_basis", "currency", "amount", "is_enabled"],
+            fields=["name", "rule_code", "expense_category", "allocation_basis", "currency", "amount", "remark", "is_enabled"],
             order_by="priority_no asc, modified asc",
             limit_page_length=1000,
         )
@@ -955,6 +1053,113 @@ EXPORT_BATCH_FALLBACK_FIELDS = [
     "current_version",
 ]
 TRANSPORT_MODE_LABELS = {"SEA": "海运", "AIR": "空运", "EXPRESS": "快递"}
+EXPORT_MERGE_FIELDNAMES = {
+    "customs_no",
+    "waybill_no",
+    "china_misc_rmb",
+    "china_misc_mxn",
+    "china_ocean_usd",
+    "china_to_mexico_freight_rmb",
+    "project_collection",
+    "transport_mode",
+}
+EXPORT_MIN_COLUMN_WIDTHS = {
+    "material_code": 14,
+    "product_name": 28,
+    "import_name": 34,
+    "hs_code": 16,
+    "category": 20,
+    "customs_no": 24,
+    "waybill_no": 24,
+    "project_collection": 36,
+    "transport_mode": 14,
+}
+EXPORT_MAX_COLUMN_WIDTHS = {
+    "product_name": 42,
+    "import_name": 48,
+    "category": 34,
+    "customs_no": 30,
+    "waybill_no": 30,
+    "project_collection": 52,
+    "transport_mode": 18,
+}
+EXPORT_WRAP_FIELDNAMES = {
+    "product_name",
+    "import_name",
+    "category",
+    "customs_no",
+    "waybill_no",
+    "project_collection",
+    "transport_mode",
+}
+EXPORT_HEADER_LABELS = {
+    "waybill_no": "中国到墨西哥\n运单号",
+    "china_misc_rmb": "中国运输及\n相关杂费\nRMB",
+    "china_misc_mxn": "中国运输及\n相关杂费\n折合MXN PESOS",
+    "china_ocean_usd": "中国海运\n(USD)",
+    "goods_value_ratio": "分摊比例\n(货值比）",
+    "import_tax_total": "IMPUESTOS\n合计清关税费",
+    "revalidacion": "REVALIDACION\n文件验证费",
+    "maniobras": "MANIOBRAS\n码头操作费",
+    "entrega_mercancia": "ENTREGA DE \nMERCANCIA\n配送费用",
+    "previo": "PREVIO\n预检费用",
+    "service_aa": "Servicios A.A.\n货代服务费",
+    "complemento_maniobras": "COMPLEMENTO DE MANIOBRAS\n（操作辅助装置）",
+    "desconsolidacion": "DESCONSOLIDACION\n拆箱分货费用",
+    "maniobra_falso": "MANIOBRA EN FALSO\n虚假操作费",
+    "limpieza_contenedor": "LIMPIEZA DE CONTENEDOR\n集装箱清洁",
+    "mexico_customs_mxn": "墨西哥\n清关费用\n(MXN)",
+    "mexico_customs_rmb": "墨西哥\n清关费用\n(RMB )",
+    "mexico_customs_usd": "墨西哥\n清关费用\n（USD）",
+    "mexico_inland_mxn": "墨西哥\n内陆运输\n费用\n（MXN）",
+    "mexico_misc_mxn": "墨西哥杂费\n（MXN）",
+    "mexico_inland_misc_rmb": "墨西哥\n内陆运输+杂费\n费用\n（RMB）",
+    "china_to_mexico_freight_rmb": "中国到\n墨西哥运费\n（RMB）",
+    "gross_weight_kg": "货重毛重\n（kg）",
+    "weight_ratio": "分摊比例\n（重量比）",
+    "freight_alloc_rmb": "中国到墨西哥\n运输费用分摊\nRMB",
+    "freight_alloc_mxn": "中国到墨西哥\n运输费用分摊\nMXN PESOS",
+    "total_logistics_mxn": "中国到墨西哥\n运输+清关+杂费\nMXN PESOS",
+    "alloc_price_mxn": "分摊运输+物流+杂费\n到产品的价格\nMXN PESOS",
+    "total_cost_rmb": "综合成本\nRMB",
+    "total_unit_rmb": "综合物品单价\nRMB",
+}
+EXPORT_HEADER_COLOR_GROUPS = {
+    "tax": {
+        "cc_rate",
+        "cc_anti_dumping",
+        "igi_rate",
+        "igi_amount",
+        "iva_rate",
+        "iva_amount",
+        "goods_value_ratio",
+        "dta",
+        "prv_duty",
+        "prv_iva",
+    },
+    "customs_fee": {
+        "import_tax_total",
+        "revalidacion",
+        "maniobras",
+        "muellaje",
+        "entrega_mercancia",
+        "previo",
+        "service_aa",
+        "almacenajes",
+        "reconocimiento_aduanero",
+        "honorarios",
+        "complemento_maniobras",
+        "desconsolidacion",
+        "maniobra_falso",
+        "arrastre",
+        "patio_regulador",
+        "entrega_vacio",
+        "limpieza_contenedor",
+    },
+    "mexico_customs": {"mexico_customs_mxn", "mexico_customs_rmb"},
+    "allocation": {"gross_weight_kg", "weight_ratio", "freight_alloc_rmb", "freight_alloc_mxn"},
+    "result": {"total_logistics_mxn", "alloc_price_mxn", "total_cost_rmb", "total_unit_rmb"},
+}
 
 
 def _normalize_export_batch_names(batch_names_json) -> list[str]:
@@ -1013,6 +1218,81 @@ def _display_width(value) -> int:
     return sum(2 if ord(char) > 127 else 1 for char in text)
 
 
+def _export_column_width(fieldname: str, header: str, values: list) -> int:
+    max_width = _display_width(header) + 2
+    for value in values[:500]:
+        max_width = max(max_width, _display_width(value) + 2)
+    min_width = EXPORT_MIN_COLUMN_WIDTHS.get(fieldname, 12)
+    max_limit = EXPORT_MAX_COLUMN_WIDTHS.get(fieldname, 40)
+    return min(max(max_width, min_width), max_limit)
+
+
+def _export_header_label(column: dict) -> str:
+    fieldname = column.get("fieldname") or ""
+    return EXPORT_HEADER_LABELS.get(fieldname) or str(column.get("label") or fieldname or "").strip()
+
+
+def _export_header_fill_color(fieldname: str) -> str:
+    if fieldname in EXPORT_HEADER_COLOR_GROUPS["tax"]:
+        return "FF0DF2DF"
+    if fieldname in EXPORT_HEADER_COLOR_GROUPS["customs_fee"]:
+        return "FFD04FCA"
+    if fieldname in EXPORT_HEADER_COLOR_GROUPS["mexico_customs"]:
+        return "FFFCC102"
+    if fieldname in EXPORT_HEADER_COLOR_GROUPS["allocation"]:
+        return "FFFFF3CE"
+    if fieldname in EXPORT_HEADER_COLOR_GROUPS["result"]:
+        return "FF04B0F1"
+    if fieldname in {"project_collection", "transport_mode"}:
+        return "FFFFFFFF"
+    return "FFFFD966"
+
+
+def _export_header_font(fieldname: str):
+    from openpyxl.styles import Font
+
+    if fieldname in EXPORT_HEADER_COLOR_GROUPS["result"]:
+        return Font(name="宋体", size=8, bold=True, color="FFFFFFFF")
+    if fieldname in {"project_collection", "transport_mode"}:
+        return Font(name="宋体", size=8, bold=True, color="FF000000")
+    return Font(name="宋体", size=8, bold=False, color="FF000000")
+
+
+def _merge_repeated_export_cells(sheet, columns: list[dict], rows: list[list], merge_alignment, cell_border) -> None:
+    """把连续相同的整票字段纵向合并，保留 SKU 行级字段逐行展示。"""
+
+    if len(rows) < 2:
+        return
+
+    merge_column_indexes = [
+        index
+        for index, column in enumerate(columns, start=1)
+        if column.get("fieldname") in EXPORT_MERGE_FIELDNAMES
+    ]
+    if not merge_column_indexes:
+        return
+
+    for column_index in merge_column_indexes:
+        start_row = 2
+        previous_value = sheet.cell(row=start_row, column=column_index).value
+        for row_index in range(3, len(rows) + 3):
+            current_value = sheet.cell(row=row_index, column=column_index).value if row_index <= len(rows) + 1 else None
+            if current_value == previous_value:
+                continue
+            if previous_value not in (None, "") and row_index - start_row > 1:
+                sheet.merge_cells(
+                    start_row=start_row,
+                    start_column=column_index,
+                    end_row=row_index - 1,
+                    end_column=column_index,
+                )
+                merged_cell = sheet.cell(row=start_row, column=column_index)
+                merged_cell.alignment = merge_alignment
+                merged_cell.border = cell_border
+            start_row = row_index
+            previous_value = current_value
+
+
 def _build_export_xlsx_content(columns: list[dict], rows: list[list]) -> bytes:
     try:
         from openpyxl import Workbook
@@ -1024,12 +1304,9 @@ def _build_export_xlsx_content(columns: list[dict], rows: list[list]) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "综合成本核算"
-    sheet.freeze_panes = "A2"
+    sheet.freeze_panes = "C2"
 
-    headers = [
-        f"{column.get('excel_col') or ''} {column.get('label') or column.get('fieldname') or ''}".strip()
-        for column in columns
-    ]
+    headers = [_export_header_label(column) for column in columns]
     sheet.append(headers)
     for row in rows:
         sheet.append(row)
@@ -1037,33 +1314,46 @@ def _build_export_xlsx_content(columns: list[dict], rows: list[list]) -> bytes:
     last_column_letter = get_column_letter(len(headers))
     sheet.auto_filter.ref = f"A1:{last_column_letter}{max(sheet.max_row, 1)}"
 
-    header_fill = PatternFill(fill_type="solid", fgColor="FF1F4E79")
-    header_font = Font(name="Arial", bold=True, color="FFFFFF")
     header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    body_alignment = Alignment(vertical="center")
-    thin_side = Side(style="thin", color="D9E2F3")
+    body_font = Font(name="等线", size=10, bold=False, color="FF000000")
+    small_body_font = Font(name="等线", size=8, bold=False, color="FF000000")
+    body_alignment = Alignment(horizontal="center", vertical="center")
+    center_wrap_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left_wrap_alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    merged_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    thin_side = Side(style="thin", color="FF000000")
     cell_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
-    sheet.row_dimensions[1].height = 28
-    for cell in sheet[1]:
-        cell.fill = header_fill
-        cell.font = header_font
+    sheet.row_dimensions[1].height = 53.25
+    for column_index, cell in enumerate(sheet[1], start=1):
+        fieldname = columns[column_index - 1].get("fieldname") if column_index <= len(columns) else ""
+        cell.fill = PatternFill(fill_type="solid", fgColor=_export_header_fill_color(fieldname))
+        cell.font = _export_header_font(fieldname)
         cell.alignment = header_alignment
         cell.border = cell_border
 
-    for row in sheet.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = body_alignment
+    sheet.sheet_view.showGridLines = True
+    for row_index, row in enumerate(sheet.iter_rows(min_row=2), start=2):
+        sheet.row_dimensions[row_index].height = 20
+        for column_index, cell in enumerate(row, start=1):
+            fieldname = columns[column_index - 1].get("fieldname") if column_index <= len(columns) else ""
+            cell.font = small_body_font if fieldname == "import_name" else body_font
+            if fieldname in {"product_name", "project_collection"}:
+                cell.alignment = left_wrap_alignment
+            elif fieldname in EXPORT_WRAP_FIELDNAMES:
+                cell.alignment = center_wrap_alignment
+            else:
+                cell.alignment = body_alignment
             cell.border = cell_border
             if isinstance(cell.value, (int, float)):
                 cell.number_format = '#,##0.######'
 
+    _merge_repeated_export_cells(sheet, columns, rows, merged_alignment, cell_border)
+
     for index, header in enumerate(headers, start=1):
-        max_width = _display_width(header) + 2
-        for row in rows[:300]:
-            value = row[index - 1] if index - 1 < len(row) else ""
-            max_width = max(max_width, _display_width(value) + 2)
-        sheet.column_dimensions[get_column_letter(index)].width = min(max(max_width, 10), 34)
+        fieldname = columns[index - 1].get("fieldname") if index - 1 < len(columns) else ""
+        values = [row[index - 1] if index - 1 < len(row) else "" for row in rows]
+        sheet.column_dimensions[get_column_letter(index)].width = _export_column_width(fieldname, header, values)
 
     output = BytesIO()
     workbook.save(output)

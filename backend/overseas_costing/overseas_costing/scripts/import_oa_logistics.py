@@ -3591,6 +3591,274 @@ def _set_oa_trace_in_extra(root: dict, trace: dict, is_root_trace: bool) -> str:
     return _json_dumps(merged)
 
 
+def _trace_finish_time_candidates(row: dict, trace: dict) -> list[Any]:
+    candidates = [
+        row.get("source_finished_at"),
+        trace.get("finish_time"),
+        trace.get("finishTime"),
+        trace.get("source_finished_at"),
+        trace.get("finished_at"),
+        trace.get("completed_at"),
+        trace.get("complete_time"),
+        trace.get("approval_finished_at"),
+    ]
+    raw_instance = trace.get("raw_instance") if isinstance(trace.get("raw_instance"), dict) else {}
+    if raw_instance:
+        candidates.extend(
+            [
+                raw_instance.get("finish_time"),
+                raw_instance.get("finishTime"),
+                raw_instance.get("completed_at"),
+                raw_instance.get("complete_time"),
+            ]
+        )
+    return candidates
+
+
+def _resolve_trace_finished_at(row: dict, trace: dict) -> tuple[str, str]:
+    for candidate in _trace_finish_time_candidates(row, trace):
+        normalized = _to_frappe_datetime(candidate)
+        if normalized:
+            return normalized, _clean(candidate)
+    return "", ""
+
+
+def sync_existing_oa_finished_times(limit: int | None = 200) -> dict:
+    """从已保存的 OA 快照回填批次来源完成时间，仅补空值。"""
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，无法回填历史批次来源完成时间。",
+        }
+
+    page_length = max(1, min(int(limit or 200), 1000))
+    rows = frappe.get_all(
+        "Overseas Cost Batch",
+        filters={"source_type": "oa_logistics"},
+        fields=[
+            "name",
+            "batch_no",
+            "source_approval_no",
+            "source_instance_id",
+            "source_finished_at",
+            "extra_json",
+        ],
+        limit_page_length=page_length,
+        order_by="modified desc",
+    )
+
+    updated_items: list[dict] = []
+    skipped_items: list[dict] = []
+    for row in rows:
+        existing_finished_at = _to_frappe_datetime(row.get("source_finished_at"))
+        if existing_finished_at:
+            skipped_items.append(
+                {
+                    "batch_name": row.get("name"),
+                    "batch_no": row.get("batch_no"),
+                    "reason": "已有来源完成时间",
+                }
+            )
+            continue
+
+        _root, trace, _is_root_trace = _get_oa_trace_from_extra(row.get("extra_json"))
+        finished_at, raw_finished_at = _resolve_trace_finished_at(row, trace)
+        if not finished_at:
+            skipped_items.append(
+                {
+                    "batch_name": row.get("name"),
+                    "batch_no": row.get("batch_no"),
+                    "source_approval_no": row.get("source_approval_no") or trace.get("source_approval_no") or "",
+                    "source_instance_id": row.get("source_instance_id") or trace.get("source_instance_id") or "",
+                    "reason": "已保存 OA 快照里没有完成时间，需要重拉钉钉详情",
+                }
+            )
+            continue
+
+        frappe.db.set_value(
+            "Overseas Cost Batch",
+            row.get("name"),
+            "source_finished_at",
+            finished_at,
+            update_modified=False,
+        )
+        _insert_batch_audit_log(
+            batch_name=row.get("name"),
+            field_name="source_finished_at",
+            old_value=row.get("source_finished_at"),
+            new_value=finished_at,
+            remark="从已保存钉钉 OA 快照回填来源完成时间，用于缺真实付款日时暂估汇率",
+        )
+        updated_items.append(
+            {
+                "batch_name": row.get("name"),
+                "batch_no": row.get("batch_no"),
+                "source_approval_no": row.get("source_approval_no") or trace.get("source_approval_no") or "",
+                "source_instance_id": row.get("source_instance_id") or trace.get("source_instance_id") or "",
+                "source_finished_at": finished_at,
+                "raw_finished_at": raw_finished_at,
+            }
+        )
+
+    if updated_items and hasattr(frappe.db, "commit"):
+        frappe.db.commit()
+
+    return {
+        "ok": True,
+        "dry_run": False,
+        "scanned_count": len(rows),
+        "updated_count": len(updated_items),
+        "skipped_count": len(skipped_items),
+        "items": updated_items,
+        "skipped_items": skipped_items,
+        "message": (
+            f"已从本地 OA 快照回填 {len(updated_items)} 条批次来源完成时间；"
+            f"{len(skipped_items)} 条未处理，缺快照完成时间的需重拉钉钉详情。"
+        ),
+    }
+
+
+def refresh_missing_oa_finished_times(
+    limit: int | None = 200,
+    *,
+    env_file: str | None = None,
+    api_style: str = "auto",
+    access_token: str = "",
+) -> dict:
+    """回钉钉重拉详情，只补缺失的来源完成时间和审批状态。"""
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，无法重拉钉钉详情补来源完成时间。",
+        }
+
+    resolved_env_file = resolve_dingtalk_env_file(env_file)
+    if resolved_env_file:
+        load_env_file(resolved_env_file)
+    resolved_api_style = _resolve_api_style(api_style)
+    token = get_access_token(api_style=resolved_api_style, access_token=access_token)
+
+    page_length = max(1, min(int(limit or 200), 1000))
+    rows = frappe.get_all(
+        "Overseas Cost Batch",
+        filters={"source_type": "oa_logistics", "source_finished_at": ["in", ["", None]]},
+        fields=[
+            "name",
+            "batch_no",
+            "source_approval_no",
+            "source_instance_id",
+            "source_dingtalk_url",
+            "source_approval_status",
+            "source_finished_at",
+            "extra_json",
+        ],
+        limit_page_length=page_length,
+        order_by="modified desc",
+    )
+
+    updated_items: list[dict] = []
+    skipped_items: list[dict] = []
+    failed_items: list[dict] = []
+    for row in rows:
+        root, trace, is_root_trace = _get_oa_trace_from_extra(row.get("extra_json"))
+        instance_id = _resolve_batch_source_instance_id(row, trace)
+        if not instance_id:
+            skipped_items.append(
+                {
+                    "batch_name": row.get("name"),
+                    "batch_no": row.get("batch_no"),
+                    "reason": "缺少钉钉审批实例 ID，无法重拉详情",
+                }
+            )
+            continue
+
+        try:
+            detail = get_process_instance_detail(
+                token=token,
+                process_instance_id=instance_id,
+                api_style=resolved_api_style,
+            )
+            summary = summarize_approval(detail, process_instance_id=instance_id)
+        except Exception as exc:
+            failed_items.append(
+                {
+                    "batch_name": row.get("name"),
+                    "batch_no": row.get("batch_no"),
+                    "source_instance_id": instance_id,
+                    "reason": str(exc),
+                }
+            )
+            continue
+
+        finished_at = _to_frappe_datetime(summary.get("finish_time"))
+        approval_status = _clean(summary.get("approval_status"))
+        if not finished_at:
+            skipped_items.append(
+                {
+                    "batch_name": row.get("name"),
+                    "batch_no": row.get("batch_no"),
+                    "source_instance_id": instance_id,
+                    "approval_status": approval_status,
+                    "reason": "钉钉详情未返回完成时间",
+                }
+            )
+            continue
+
+        updates: dict[str, Any] = {"source_finished_at": finished_at}
+        if approval_status and not _values_match(row.get("source_approval_status"), approval_status):
+            updates["source_approval_status"] = approval_status
+
+        trace_updates = {
+            "source_instance_id": summary.get("source_instance_id") or instance_id,
+            "source_approval_no": summary.get("source_approval_no") or row.get("source_approval_no") or trace.get("source_approval_no") or "",
+            "source_dingtalk_url": summary.get("source_dingtalk_url") or row.get("source_dingtalk_url") or trace.get("source_dingtalk_url") or "",
+            "approval_status": approval_status,
+            "finish_time": summary.get("finish_time") or "",
+        }
+        updates["extra_json"] = _set_oa_trace_in_extra(root, {**trace, **trace_updates}, is_root_trace)
+        frappe.db.set_value("Overseas Cost Batch", row.get("name"), updates, update_modified=False)
+        _insert_batch_audit_log(
+            batch_name=row.get("name"),
+            field_name="source_finished_at",
+            old_value=row.get("source_finished_at"),
+            new_value=updates.get("source_finished_at") or "",
+            remark="从钉钉审批详情补充来源完成时间，用于缺真实付款日时暂估汇率",
+        )
+        updated_items.append(
+            {
+                "batch_name": row.get("name"),
+                "batch_no": row.get("batch_no"),
+                "source_approval_no": trace_updates["source_approval_no"],
+                "source_instance_id": instance_id,
+                "source_approval_status": approval_status,
+                "source_finished_at": finished_at,
+                "changed_fields": list(updates.keys()),
+            }
+        )
+
+    if updated_items and hasattr(frappe.db, "commit"):
+        frappe.db.commit()
+
+    return {
+        "ok": not failed_items,
+        "dry_run": False,
+        "env_file_loaded": bool(resolved_env_file),
+        "api_style": resolved_api_style,
+        "scanned_count": len(rows),
+        "updated_count": len(updated_items),
+        "skipped_count": len(skipped_items),
+        "failed_count": len(failed_items),
+        "items": updated_items,
+        "skipped_items": skipped_items,
+        "failed_items": failed_items,
+        "message": f"已重拉钉钉详情补充 {len(updated_items)} 条来源完成时间；失败 {len(failed_items)} 条。",
+    }
+
+
 def supplement_empty_oa_goods_items(batch_name: str) -> dict:
     """只为没有 SKU 的指定 OA 批次补建表单货物明细，不覆盖已有明细。"""
 

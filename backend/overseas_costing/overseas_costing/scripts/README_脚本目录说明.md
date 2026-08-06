@@ -10,6 +10,8 @@
 | `import_excel_workbook.py` | 通用Excel工作簿导入脚本 | 预览/导入真实 xlsx，支持自动识别 `2026年YUEWEI` 或国际物流审批附件明细 |
 | `import_parsed_excel_blocks.py` | 已解析Excel块导入脚本 | 从 `frontend-demo/excel-imported-blocks.js` 导入 `2026年YUEWEI` 普通海运批次；默认排除“海运双清” |
 | `recalculate_batch.py` | 批次重算脚本 | 调用正式重算服务，支持 bench execute 或命令行调试单个批次 |
+| `compare_manual_excel_baseline.py` | 人工Excel对照脚本 | 读取人工核算表指定批次，与系统当前批次试算结果生成 xlsx 对照表 |
+| `restore_hpcu_demo.py` | HPCU5155607演示批次恢复脚本 | `restore` 按装箱单解析恢复；`restore_manual_baseline` 按人工核算表 22 行恢复经理演示基准版 |
 | `test_dingtalk_order_link.py` | 钉钉跳转测试脚本 | 本地验证审批实例链接和钉钉唤起链接生成 |
 
 ## 当前约定
@@ -19,6 +21,8 @@
 3. 一期普通海运解析数据可先执行 `preview_2026_yuewei_sea` 预览，再执行 `import_2026_yuewei_sea` 导入
 4. 单批次重算可执行 `OVERSEAS_COST_BATCH=HPCU5155607 bench --site development.localhost execute overseas_costing.scripts.recalculate_batch.recalculate_from_env`
 5. 任意真实 Excel 可先执行 `OVERSEAS_COST_EXCEL_FILE=/path/to/file.xlsx bench --site development.localhost execute overseas_costing.scripts.import_excel_workbook.preview_from_env` 预览，再执行 `import_from_env` 导入
+6. 演示对照表可执行 `OVERSEAS_COST_BATCH=HPCU5155607 bench --site development.localhost execute overseas_costing.scripts.compare_manual_excel_baseline.build_hpcu_manual_comparison_from_env`
+7. 如果经理演示需要和历史人工核算表口径一致，可执行 `bench --site development.localhost execute overseas_costing.scripts.restore_hpcu_demo.restore_manual_baseline`，它会把 HPCU5155607 恢复为人工核算表 22 行基准版，同时保留装箱单、完税凭证和人工表作为追溯附件。
 
 ## 钉钉国际物流审批拉取
 
