@@ -1605,33 +1605,16 @@
   align-items: center;
   gap: 6px;
   min-width: 0;
-  font-family: var(--ocw-mono);
+  color: var(--ocw-ink);
+  font-size: 11px;
+  font-weight: 800;
 }
 
-.ocw-audit-values em {
-  max-width: 180px;
-  padding: 2px 6px;
-  font-style: normal;
-  border-radius: 5px;
+.ocw-audit-values span {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.ocw-audit-values i {
-  color: var(--ocw-muted);
-  font-style: normal;
-  font-weight: 900;
-}
-
-.ocw-audit-old {
-  color: #8a3417;
-  background: #fff0ea;
-}
-
-.ocw-audit-new {
-  color: var(--ocw-brand);
-  background: var(--ocw-brand-soft);
 }
 
 .ocw-diff-wrap {

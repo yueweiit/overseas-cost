@@ -12,6 +12,8 @@ from datetime import datetime
 from io import BytesIO
 import json
 
+from overseas_costing.services import source_priority_service
+
 try:
     import frappe
 except Exception:  # pragma: no cover - 本地无 Frappe 环境时保持可导入
@@ -652,6 +654,8 @@ def _build_batch_source_status(batch: dict, attachments: list[dict] | None = Non
         "confirmed_logistics_quote": confirmed_quote,
         "has_confirmed_logistics_quote": bool(confirmed_quote.get("amount")),
         "latest_tax_certificate_reconciliation": _latest_tax_certificate_reconciliation(attachment_rows),
+        "source_priority_policy": source_priority_service.get_source_priority_policy(),
+        "source_priority_summary": source_priority_service.get_source_priority_summary(),
     }
 
 

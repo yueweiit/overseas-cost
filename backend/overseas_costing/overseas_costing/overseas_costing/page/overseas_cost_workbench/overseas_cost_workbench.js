@@ -260,10 +260,11 @@ class OverseasCostWorkbench {
         $(event.currentTarget).attr("data-item-label")
       );
     });
-    this.$root.on("dblclick", "[data-editable-cell='1']", (event) => this.startCellEdit($(event.currentTarget), event));
-    this.$root.on("click", "[data-editable-cell='1'][data-fieldname='purchase_currency']", (event) => {
+    this.$root.on("click", "[data-editable-cell='1']", (event) => {
       if ($(event.target).closest(".ocw-cell-editor").length) return;
-      this.startCellEdit($(event.currentTarget), event, true);
+      const $cell = $(event.currentTarget);
+      const autoOpenSelect = Boolean(this.selectOptions[$cell.attr("data-fieldname")]);
+      this.startCellEdit($cell, event, autoOpenSelect);
     });
     this.$root.on("keydown", ".ocw-cell-editor", (event) => {
       if (event.key === "Enter") {
@@ -4727,6 +4728,7 @@ class OverseasCostWorkbench {
 
   renderAllocationOverview(batch, items = []) {
     const rows = this.buildAllocationOverviewRows(batch, items);
+    const sourcePrioritySummary = this.getSourcePrioritySummary(batch);
     const body = rows.length
       ? rows
           .map(
@@ -4757,7 +4759,7 @@ class OverseasCostWorkbench {
         </div>
         <div class="ocw-allocation-policy">
           <strong>当前口径</strong>
-          <span>物流费、清关费、税费、仓储费、罚款、杂费等有来源的费用原则上都进综合成本；系统默认先按毛重分摊。确认属于抛货时，可人工改为体积/计费重后重新试算；税费最终以完税凭证为准。</span>
+          <span>物流费、清关费、税费、仓储费、罚款、杂费等有来源的费用原则上都进综合成本；系统默认先按毛重分摊。确认属于抛货时，可人工改为体积/计费重后重新试算；${this.escape(sourcePrioritySummary)}</span>
         </div>
         <div class="ocw-allocation-grid">
           <div class="ocw-allocation-head">
@@ -4802,6 +4804,17 @@ class OverseasCostWorkbench {
     }
 
     return rows;
+  }
+
+  getSourcePrioritySummary(batch = {}) {
+    const sourceStatus = batch.source_status || {};
+    const summary = batch.summary_snapshot || {};
+    const policy = sourceStatus.source_priority_policy || summary.source_priority_policy || {};
+    return (
+      sourceStatus.source_priority_summary ||
+      policy.short_summary ||
+      "税费听完税凭证；采购价听采购支出 OA；物流/清关/杂费听国际物流 OA；附件和 OCR 只做补充；人工调整保留记录。"
+    );
   }
 
   addAllocationRuleBucket(buckets, rule = {}, item = {}, batch = {}) {
@@ -5340,6 +5353,7 @@ class OverseasCostWorkbench {
 
   auditSummaryKey(event) {
     if (!event || event.actionType === "RECALCULATE") return "";
+    if (event.change) return "";
     if (!event.change && !["IMPORT", "EDIT", "BATCH_EDIT", "WRITEBACK", "UPLOAD_ATTACHMENT"].includes(event.actionType || "")) {
       return "";
     }
@@ -5520,6 +5534,8 @@ class OverseasCostWorkbench {
     ]
       .filter(Boolean)
       .join(" ");
+    const oldValue = this.escape(this.formatAuditValue(change.oldValue));
+    const newValue = this.escape(this.formatAuditValue(change.newValue));
     return `
       <li class="ocw-audit-change-row">
         <span class="ocw-audit-time">${this.escape(event.time)}</span>
@@ -5527,9 +5543,7 @@ class OverseasCostWorkbench {
         <div class="ocw-audit-change">
           <strong>${this.escape(title)}</strong>
           <div class="ocw-audit-values">
-            <em class="ocw-audit-old">${this.escape(this.formatAuditValue(change.oldValue))}</em>
-            <i>→</i>
-            <em class="ocw-audit-new">${this.escape(this.formatAuditValue(change.newValue))}</em>
+            <span>“${oldValue}”改成“${newValue}”</span>
           </div>
         </div>
       </li>
@@ -5562,6 +5576,12 @@ class OverseasCostWorkbench {
         status: "当前批次",
         statusClass: "ocw-check-info",
         suggestion: targetLabel,
+      },
+      {
+        label: "取数优先级",
+        status: "已确认",
+        statusClass: "ocw-check-ok",
+        suggestion: this.getSourcePrioritySummary(batch),
       },
       ...rows,
     ];

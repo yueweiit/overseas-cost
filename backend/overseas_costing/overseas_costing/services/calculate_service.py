@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from overseas_costing.services import allocation_service, audit_service, version_service
+from overseas_costing.services import allocation_service, audit_service, source_priority_service, version_service
 
 
 def update_item_field(item_name: str, fieldname: str, value: str, version_name: str | None = None) -> dict:
@@ -897,6 +897,7 @@ def calculate_item_rows(
         "fee_pool_rmb": _round_money(total_fee_pool_rmb, 6),
         "item_count": len(rows),
         "rule_count": len(enabled_rules),
+        "source_priority_policy": source_priority_service.get_source_priority_policy(),
     }
     summary["calculation_review"] = _build_calculation_review(calculated_rows, summary, enabled_rules)
     return calculated_rows, summary
