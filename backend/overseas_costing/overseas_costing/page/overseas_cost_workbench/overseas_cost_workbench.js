@@ -24,6 +24,10 @@ class OverseasCostWorkbench {
     this.batchColumns = [];
     this.expandedBatchNames = new Set();
     this.activeBatchName = "";
+    this.drawerBatchName = "";
+    this.drawerTab = "overview";
+    this.focusedBatchName = "";
+    this.batchClickTimer = null;
     this.exportPinnedBatchName = "";
     this.dataCheckBatchName = "";
     this.filters = {
@@ -173,6 +177,7 @@ class OverseasCostWorkbench {
 
               <div class="ocw-table-toolbar">
                 <div class="ocw-table-toolbar-left">
+                  <button class="ocw-outline-btn ocw-mini-btn" data-action="clear-batch-focus" hidden>返回全部批次</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="expand-current">+ 全部展开</button>
                   <button class="ocw-outline-btn ocw-mini-btn" data-action="collapse-current">- 全部收起</button>
                   <strong data-area="table-title">明细</strong>
@@ -183,19 +188,28 @@ class OverseasCostWorkbench {
               <div class="ocw-hierarchy-wrap" data-area="table"></div>
             </section>
 
-            <section class="ocw-bottom-grid">
-              <article class="ocw-bottom-panel">
-                <h2>修改记录</h2>
-                <ul class="ocw-audit-list" data-area="audit-list"></ul>
-              </article>
-            <article class="ocw-bottom-panel">
-              <div class="ocw-bottom-panel-head">
-                <h2>AI 分摊填入</h2>
-                <select class="form-control ocw-batch-select" data-role="data-check-batch-select" aria-label="选择 AI 分摊填入批次"></select>
+            <div class="ocw-batch-drawer-mask" data-area="batch-drawer-mask" data-action="close-batch-drawer"></div>
+            <aside class="ocw-batch-drawer" data-area="batch-drawer" aria-hidden="true">
+              <div class="ocw-batch-drawer-head">
+                <div>
+                  <span>批次详情</span>
+                  <strong data-area="batch-drawer-title">双击批次查看详情</strong>
+                </div>
+                <div class="ocw-batch-drawer-head-actions">
+                  <button class="ocw-outline-btn ocw-mini-btn" data-action="export-drawer-batch">导出当前批次</button>
+                  <button class="ocw-outline-btn ocw-mini-btn" data-action="open-batch-drawer-dingtalk">钉钉原单</button>
+                  <button class="ocw-outline-btn ocw-mini-btn" data-action="open-batch-drawer-recalculate">重新试算</button>
+                  <button class="ocw-icon-btn" data-action="close-batch-drawer" aria-label="关闭">×</button>
+                </div>
               </div>
-              <div class="ocw-diff-wrap" data-area="diff-panel"></div>
-            </article>
-            </section>
+              <div class="ocw-batch-drawer-tabs">
+                <button class="ocw-batch-drawer-tab active" data-action="switch-batch-drawer-tab" data-tab="overview">概览</button>
+                <button class="ocw-batch-drawer-tab" data-action="switch-batch-drawer-tab" data-tab="audit">修改记录</button>
+                <button class="ocw-batch-drawer-tab" data-action="switch-batch-drawer-tab" data-tab="allocation">AI 分摊</button>
+              </div>
+              <div class="ocw-batch-drawer-body" data-area="batch-drawer-body"></div>
+            </aside>
+
           </main>
         </div>
       </div>
@@ -209,6 +223,7 @@ class OverseasCostWorkbench {
 
   bindEvents() {
     this.$root.on("click", "[data-batch-name]", (event) => {
+      if ($(event.currentTarget).hasClass("ocw-parent-row")) return;
       const batchName = $(event.currentTarget).attr("data-batch-name");
       if (batchName) {
         this.activeBatchName = batchName;
@@ -245,6 +260,28 @@ class OverseasCostWorkbench {
     this.$root.on("click", "[data-action='oa-attachments']", (event) => this.openOaAttachmentDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='source-center']", (event) => this.openSourceCenterDialog($(event.currentTarget).attr("data-batch-name")));
     this.$root.on("click", "[data-action='row-more']", (event) => this.openRowMoreDialog($(event.currentTarget).attr("data-batch-name")));
+    this.$root.on("click", ".ocw-parent-row", (event) => {
+      if ($(event.target).closest("button, input, select, textarea, a").length) return;
+      const batchName = $(event.currentTarget).attr("data-batch-name");
+      window.clearTimeout(this.batchClickTimer);
+      this.batchClickTimer = window.setTimeout(() => {
+        this.focusBatch(batchName).catch((error) => this.showError(error));
+      }, 220);
+    });
+    this.$root.on("dblclick", ".ocw-parent-row", (event) => {
+      if ($(event.target).closest("button, input, select, textarea, a").length) return;
+      window.clearTimeout(this.batchClickTimer);
+      this.batchClickTimer = null;
+      this.openBatchDrawer($(event.currentTarget).attr("data-batch-name"));
+    });
+    this.$root.on("click", "[data-action='clear-batch-focus']", () => this.clearBatchFocus());
+    this.$root.on("click", "[data-action='close-batch-drawer']", () => this.closeBatchDrawer());
+    this.$root.on("click", "[data-action='switch-batch-drawer-tab']", (event) =>
+      this.switchBatchDrawerTab($(event.currentTarget).attr("data-tab"))
+    );
+    this.$root.on("click", "[data-action='export-drawer-batch']", () => this.exportDrawerBatch().catch((error) => this.showError(error)));
+    this.$root.on("click", "[data-action='open-batch-drawer-dingtalk']", () => this.openDingtalkOrder(this.drawerBatchName));
+    this.$root.on("click", "[data-action='open-batch-drawer-recalculate']", () => this.recalculate(this.drawerBatchName));
     this.$root.on("click", "[data-action='open-generic-link']", (event) => this.openDingtalkLink($(event.currentTarget).attr("data-open-url")));
     this.$root.on("click", "[data-action='add-batch']", () => this.openAddBatchDialog());
     this.$root.on("click", "[data-action='toggle-batch']", (event) => this.toggleBatch($(event.currentTarget).attr("data-batch-name")));
@@ -293,6 +330,9 @@ class OverseasCostWorkbench {
       const field = $(event.currentTarget).attr("data-filter");
       this.filters[field] = $(event.currentTarget).val();
     });
+    $(window)
+      .off("popstate.ocwBatchFocus")
+      .on("popstate.ocwBatchFocus", () => this.applyBatchFocusFromUrl().catch((error) => this.showError(error)));
   }
 
   async call(method, args = {}, freeze = false) {
@@ -311,10 +351,11 @@ class OverseasCostWorkbench {
       this.expandedBatchNames.clear();
       await this.prefetchBatchItems(this.visibleBatches);
       this.visibleBatches = this.filterBatches();
+      const urlBatch = this.restoreBatchFocusStateFromUrl();
       this.renderTransportWorkbench();
       if (this.batches.length) {
         this.syncActiveSelectionWithVisible();
-        const activeBatch = this.getVisibleActiveBatch();
+        const activeBatch = urlBatch || this.getVisibleActiveBatch();
         if (activeBatch) {
           await this.loadAuditLogs(activeBatch.name, activeBatch.current_version);
         } else {
@@ -324,6 +365,9 @@ class OverseasCostWorkbench {
         this.renderTable();
         this.updateSearchResult();
         this.updateRecalculateAction();
+        if (urlBatch && this.getBatchViewFromUrl() === "drawer") {
+          await this.openBatchDrawer(urlBatch.name, { updateUrl: false });
+        }
       } else {
         this.renderEmpty();
       }
@@ -384,6 +428,9 @@ class OverseasCostWorkbench {
     }
     this.setTableLoading();
     try {
+      this.focusedBatchName = "";
+      this.closeBatchDrawer({ updateUrl: false });
+      this.updateBatchUrl("", { replace: true });
       this.exportPinnedBatchName = "";
       this.batchItems = {};
       await this.prefetchBatchItems(this.batches);
@@ -407,6 +454,9 @@ class OverseasCostWorkbench {
 
   async setTransportFilter(mode = "") {
     this.filters.transport_mode = this.normalizeTransportMode(mode);
+    this.focusedBatchName = "";
+    this.closeBatchDrawer({ updateUrl: false });
+    this.updateBatchUrl("", { replace: true });
     this.exportPinnedBatchName = "";
     if (!this.batches.length) {
       await this.loadBatches();
@@ -430,9 +480,13 @@ class OverseasCostWorkbench {
   syncActiveSelectionWithVisible() {
     if (!this.visibleBatches.length) {
       this.activeBatchName = "";
+      this.focusedBatchName = "";
       this.exportPinnedBatchName = "";
       this.dataCheckBatchName = "";
       return;
+    }
+    if (this.focusedBatchName && !this.visibleBatches.some((batch) => batch.name === this.focusedBatchName)) {
+      this.focusedBatchName = "";
     }
     if (!this.visibleBatches.some((batch) => batch.name === this.activeBatchName)) {
       this.activeBatchName = this.visibleBatches[0].name;
@@ -477,6 +531,9 @@ class OverseasCostWorkbench {
       this.renderTable();
       this.lastRecalculateResult = { batch_name: batch.name, summary };
       this.renderRecalculateResult(batch.name, summary);
+      if (this.drawerBatchName === batch.name && this.$root.find("[data-area='batch-drawer']").hasClass("is-open")) {
+        this.renderBatchDrawer();
+      }
       frappe.show_alert({ message: result.message || "重新试算完成", indicator: summary.ai_allocation?.ok ? "green" : "orange" });
     } catch (error) {
       this.showError(error);
@@ -492,6 +549,9 @@ class OverseasCostWorkbench {
       await this.loadBatchItems(batch.name, batch.current_version, true);
       await this.loadAuditLogs(batch.name, batch.current_version);
       this.renderTable();
+      if (this.drawerBatchName === batch.name && this.$root.find("[data-area='batch-drawer']").hasClass("is-open")) {
+        this.renderBatchDrawer();
+      }
     } catch (error) {
       this.showError(error);
     }
@@ -4453,16 +4513,18 @@ class OverseasCostWorkbench {
   renderTable() {
     this.renderTransportWorkbench();
     const labels = this.parentTableLabels();
+    const displayBatches = this.getDisplayedBatches();
     this.$root.find("[data-area='table-title']").text(labels.title);
-    this.$root.find("[data-area='table-count']").text(`${this.visibleBatches.length} 个${labels.blockName}`);
+    this.$root.find("[data-area='table-count']").text(`${displayBatches.length} 个${labels.blockName}`);
+    this.renderBatchFocusControls();
     this.updateHierarchySummary();
 
-    if (!this.visibleBatches.length) {
+    if (!displayBatches.length) {
       this.$root.find("[data-area='table']").html(`<div class="ocw-muted ocw-table-empty">暂无匹配的报关/来源单块</div>`);
       return;
     }
 
-    const rows = this.visibleBatches.map((batch) => this.renderBatchRows(batch)).join("");
+    const rows = displayBatches.map((batch) => this.renderBatchRows(batch)).join("");
     this.$root.find("[data-area='table']").html(`
       <table class="ocw-hierarchy-table">
         <colgroup>
@@ -4555,7 +4617,7 @@ class OverseasCostWorkbench {
     const importedClass = this.lastImportedBatchNames.has(batch.name) ? "imported" : "";
     this.activeBatchName = this.activeBatchName || batch.name;
     return `
-      <tr class="ocw-parent-row ${isExpanded ? "expanded" : ""} ${importedClass}">
+      <tr class="ocw-parent-row ${isExpanded ? "expanded" : ""} ${importedClass}" data-batch-name="${this.escape(batch.name)}" title="双击查看批次详情">
         <td>
           <button class="ocw-tree-toggle" data-action="toggle-batch" data-batch-name="${this.escape(batch.name)}" aria-expanded="${isExpanded ? "true" : "false"}">
             ${isExpanded ? "-" : "+"}
@@ -5186,6 +5248,177 @@ class OverseasCostWorkbench {
     frappe.show_alert({ message: result.message || `已导出 ${result.total || 0} 行 SKU 明细。`, indicator: "green" });
   }
 
+  async exportDrawerBatch() {
+    const batch = this.drawerBatchName ? this.findBatch(this.drawerBatchName) : null;
+    if (!batch) {
+      frappe.msgprint("当前没有可导出的批次。");
+      return;
+    }
+    const result = await this.call(
+      "overseas_costing.api.batch.export_current_result_xlsx",
+      {
+        batch_names_json: JSON.stringify([batch.name]),
+        transport_label: this.batchReferenceLabel(batch),
+      },
+      true
+    );
+    if (!result.ok) throw new Error(result.message || "导出失败");
+    this.downloadBase64File(result.content_base64, result.file_name, result.mime_type);
+    frappe.show_alert({ message: result.message || `已导出当前批次 ${result.total || 0} 行 SKU 明细。`, indicator: "green" });
+  }
+
+  async openBatchDrawer(batchName = "", options = {}) {
+    const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
+    if (!batch) {
+      this.showPendingFeature("当前没有可查看详情的批次。");
+      return;
+    }
+    this.activeBatchName = batch.name;
+    this.exportPinnedBatchName = batch.name;
+    this.dataCheckBatchName = batch.name;
+    this.drawerBatchName = batch.name;
+    this.drawerTab = "overview";
+    if (options.updateUrl !== false) {
+      this.updateBatchUrl(this.batchUrlKey(batch), { view: "drawer" });
+    }
+    const $drawer = this.$root.find("[data-area='batch-drawer']");
+    const $mask = this.$root.find("[data-area='batch-drawer-mask']");
+    $drawer.attr("aria-hidden", "false").addClass("is-open");
+    $mask.addClass("is-visible");
+    this.renderBatchDrawerLoading();
+    try {
+      await this.loadBatchItems(batch.name, batch.current_version);
+      await this.loadAuditLogs(batch.name, batch.current_version);
+      this.renderBatchDrawer();
+    } catch (error) {
+      this.renderBatchDrawerError(error);
+      this.showError(error);
+    }
+  }
+
+  closeBatchDrawer(options = {}) {
+    const $drawer = this.$root.find("[data-area='batch-drawer']");
+    const $mask = this.$root.find("[data-area='batch-drawer-mask']");
+    $drawer.attr("aria-hidden", "true").removeClass("is-open");
+    $mask.removeClass("is-visible");
+    if (options.updateUrl !== false) {
+      const batch = this.findBatch(this.focusedBatchName) || this.findBatch(this.drawerBatchName);
+      this.updateBatchUrl(this.batchUrlKey(batch), { view: "" });
+    }
+  }
+
+  switchBatchDrawerTab(tab = "overview") {
+    const allowedTabs = new Set(["overview", "audit", "allocation"]);
+    this.drawerTab = allowedTabs.has(tab) ? tab : "overview";
+    this.renderBatchDrawer();
+  }
+
+  renderBatchDrawerLoading() {
+    this.$root.find("[data-area='batch-drawer-body']").html(`
+      <div class="ocw-batch-drawer-loading">
+        <span class="spinner-border spinner-border-sm"></span>
+        <span>正在加载批次详情...</span>
+      </div>
+    `);
+  }
+
+  renderBatchDrawerError(error) {
+    this.$root.find("[data-area='batch-drawer-body']").html(`
+      <div class="ocw-batch-drawer-empty">
+        <strong>批次详情加载失败</strong>
+        <span>${this.escape(error && error.message ? error.message : "请刷新后重试")}</span>
+      </div>
+    `);
+  }
+
+  renderBatchDrawer() {
+    const batch = this.findBatch(this.drawerBatchName);
+    if (!batch) return;
+    const items = this.batchItems[batch.name] || [];
+    const $drawer = this.$root.find("[data-area='batch-drawer']");
+    const title = batch.waybill_no || batch.customs_no || batch.batch_no || batch.name;
+    $drawer.find("[data-area='batch-drawer-title']").text(title);
+    $drawer.find("[data-action='switch-batch-drawer-tab']").each((_, node) => {
+      $(node).toggleClass("active", $(node).attr("data-tab") === this.drawerTab);
+    });
+    $drawer.find("[data-area='batch-drawer-body']").html(this.renderBatchDrawerTab(batch, items));
+  }
+
+  renderBatchDrawerTab(batch, items) {
+    if (this.drawerTab === "audit") {
+      const auditHtml = this.auditEvents.length
+        ? this.buildAuditSummaryEvents(this.auditEvents).map((event) => this.renderAuditEvent(event)).join("")
+        : `<li class="ocw-audit-empty"><span class="ocw-audit-text">当前批次暂无修改记录</span></li>`;
+      return `<ul class="ocw-audit-list ocw-batch-drawer-audit-list">${auditHtml}</ul>`;
+    }
+    if (this.drawerTab === "allocation") {
+      return this.renderBatchDrawerAllocation(batch, items);
+    }
+    return this.renderBatchDrawerOverview(batch, items);
+  }
+
+  renderBatchDrawerOverview(batch, items) {
+    const sourceStatus = batch.source_status || {};
+    const summary = batch.summary_snapshot || {};
+    const itemCount = items.length || Number(batch.item_count || 0);
+    const goodsValue = items.length ? this.sumRowsNumber(items, "goods_value") : Number(batch.total_goods_value || 0);
+    const totalCost = items.length
+      ? this.sumRowsNumber(items, "total_cost_rmb")
+      : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+    const fields = [
+      ["报关/来源单号", batch.customs_no || batch.source_approval_no || batch.batch_no || "--"],
+      ["运单/柜号", batch.waybill_no || "--"],
+      ["运输方式", this.transportLabel(batch.transport_mode)],
+      ["状态", this.batchStatusInfo(batch.status, batch, itemCount).label],
+      ["物料行数", itemCount],
+      ["采购货值", `${this.formatNumber(goodsValue)} RMB`],
+      ["综合成本", `${this.formatNumber(totalCost || summary.total_cost_rmb)} RMB`],
+      ["资料情况", this.sourceStatusLabel(sourceStatus, batch)],
+    ];
+    const previewRows = items.slice(0, 8).map((item, index) => `
+      <tr>
+        <td>${this.escape(String(index + 1))}</td>
+        <td>${this.escape(this.formatValue(item.material_code || "--"))}</td>
+        <td>${this.escape(this.formatValue(item.product_name || item.product_name_es || "--"))}</td>
+        <td>${this.escape(this.formatValue(item.quantity))}</td>
+        <td>${this.escape(this.formatValue(item.unit_price))}</td>
+        <td>${this.escape(this.formatValue(item.purchase_currency || "--"))}</td>
+      </tr>
+    `).join("");
+    return `
+      <div class="ocw-batch-drawer-section">
+        <div class="ocw-batch-drawer-field-grid">
+          ${fields.map(([label, value]) => `<div><span>${this.escape(label)}</span><strong>${this.escape(this.formatValue(value))}</strong></div>`).join("")}
+        </div>
+      </div>
+      <div class="ocw-batch-drawer-section">
+        <div class="ocw-batch-drawer-section-head"><h4>物料明细预览</h4><span>${items.length > 8 ? `显示前 8 行，共 ${items.length} 行` : `${items.length} 行`}</span></div>
+        ${previewRows ? `
+          <div class="ocw-batch-drawer-table-wrap"><table class="ocw-batch-drawer-table"><thead><tr><th>#</th><th>物料编码</th><th>物料名称</th><th>数量</th><th>单价</th><th>币种</th></tr></thead><tbody>${previewRows}</tbody></table></div>
+        ` : `<div class="ocw-batch-drawer-empty"><span>当前批次暂无物料明细</span></div>`}
+      </div>
+    `;
+  }
+
+  renderBatchDrawerAllocation(batch, items) {
+    const rows = this.buildAiReviewRows(batch, items);
+    return `
+      <div class="ocw-batch-drawer-section">
+        <div class="ocw-batch-drawer-section-head"><h4>AI 分摊填入</h4><span>基础金额可在明细中人工调整</span></div>
+        <div class="ocw-diff-table ocw-batch-drawer-diff-table">
+          <div class="ocw-diff-head"><span>复核项</span><span>当前状态</span><span>说明</span></div>
+          ${rows.map((row) => `<div><span>${this.escape(row.label)}</span><b class="${this.escape(row.statusClass)}">${this.escape(row.status)}</b><strong>${this.escape(row.suggestion)}</strong></div>`).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  sourceStatusLabel(sourceStatus, batch) {
+    if (Number(sourceStatus.oa_attachment_count || batch.source_attachment_count || 0) > 0) return "已有关联资料";
+    if (batch.source_approval_no || batch.source_instance_id || batch.source_dingtalk_url) return "已关联钉钉审批单";
+    return "待补资料";
+  }
+
   downloadBase64File(contentBase64, fileName, mimeType) {
     const binary = atob(contentBase64 || "");
     const bytes = new Uint8Array(binary.length);
@@ -5298,12 +5531,32 @@ class OverseasCostWorkbench {
   }
 
   updateHierarchySummary() {
-    const batchCount = this.visibleBatches.length;
+    const displayBatches = this.getDisplayedBatches();
+    const batchCount = displayBatches.length;
+    if (this.focusedBatchName && displayBatches.length) {
+      const batch = displayBatches[0];
+      this.$root
+        .find("[data-area='hierarchy-summary']")
+        .text(`当前批次：${this.batchReferenceLabel(batch)} · 已展开物料明细`);
+      return;
+    }
     const modeLabel = this.filters.transport_mode ? `${this.transportLabel(this.filters.transport_mode)} · ` : "";
     const label = this.hasActiveFilters()
       ? `${modeLabel}筛出 ${batchCount} 个报关/运单块 · 点击 + 展开 SKU 明细`
       : `${batchCount} 个报关/运单块 · 点击 + 展开 SKU 明细`;
     this.$root.find("[data-area='hierarchy-summary']").text(label);
+  }
+
+  getDisplayedBatches() {
+    if (!this.focusedBatchName) return this.visibleBatches;
+    const focusedBatch = this.visibleBatches.find((batch) => batch.name === this.focusedBatchName);
+    return focusedBatch ? [focusedBatch] : this.visibleBatches;
+  }
+
+  renderBatchFocusControls() {
+    const isFocused = Boolean(this.focusedBatchName && this.getDisplayedBatches().length === 1);
+    this.$root.find("[data-action='clear-batch-focus']").prop("hidden", !isFocused);
+    this.$root.find("[data-action='expand-current'], [data-action='collapse-current']").prop("hidden", isFocused);
   }
 
   renderAuditList() {
@@ -5965,6 +6218,131 @@ class OverseasCostWorkbench {
     this.renderDiffPanel();
   }
 
+  async focusBatch(batchName, options = {}) {
+    if (!batchName) return;
+    const batch = this.findBatch(batchName);
+    if (!batch) return;
+    this.activeBatchName = batch.name;
+    this.exportPinnedBatchName = batch.name;
+    this.dataCheckBatchName = batch.name;
+    this.focusedBatchName = batch.name;
+    await Promise.all([
+      this.loadBatchItems(batch.name, batch.current_version),
+      this.loadAuditLogs(batch.name, batch.current_version),
+    ]);
+    this.expandedBatchNames = new Set([batch.name]);
+    this.renderTable();
+    this.renderDiffPanel();
+    if (options.updateUrl !== false) this.updateBatchUrl(this.batchUrlKey(batch), { view: "" });
+  }
+
+  clearBatchFocus(options = {}) {
+    const hadFocus = Boolean(this.focusedBatchName);
+    this.focusedBatchName = "";
+    this.expandedBatchNames.clear();
+    this.closeBatchDrawer({ updateUrl: false });
+    if (hadFocus) {
+      this.renderTable();
+      this.updateSearchResult();
+    }
+    if (options.updateUrl !== false) this.updateBatchUrl("", { view: "" });
+  }
+
+  getBatchNameFromUrl() {
+    try {
+      return String(new URL(window.location.href).searchParams.get("batch") || "").trim();
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  getBatchViewFromUrl() {
+    try {
+      return String(new URL(window.location.href).searchParams.get("view") || "").trim();
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  updateBatchUrl(batchKey = "", options = {}) {
+    const replace = Boolean(options && options.replace);
+    const view = batchKey && options && options.view === "drawer" ? "drawer" : "";
+    const url = new URL(window.location.href);
+    const normalizedBatchKey = String(batchKey || "").trim();
+    if (normalizedBatchKey) {
+      url.searchParams.set("batch", normalizedBatchKey);
+    } else {
+      url.searchParams.delete("batch");
+    }
+    if (view) {
+      url.searchParams.set("view", view);
+    } else {
+      url.searchParams.delete("view");
+    }
+    const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextUrl === currentUrl) return;
+    const state = {
+      ...(window.history.state || {}),
+      overseasCostBatch: normalizedBatchKey,
+      overseasCostView: view,
+    };
+    if (replace) {
+      window.history.replaceState(state, "", nextUrl);
+    } else {
+      window.history.pushState(state, "", nextUrl);
+    }
+  }
+
+  restoreBatchFocusStateFromUrl() {
+    const batchKey = this.getBatchNameFromUrl();
+    if (!batchKey) return null;
+    const batch = this.findBatchByUrlKey(batchKey);
+    if (!batch) {
+      this.updateBatchUrl("", { replace: true });
+      frappe.show_alert({ message: `链接中的批次不存在或已删除：${batchKey}`, indicator: "orange" });
+      return null;
+    }
+    if (batchKey !== this.batchUrlKey(batch)) {
+      this.updateBatchUrl(this.batchUrlKey(batch), { replace: true, view: this.getBatchViewFromUrl() });
+    }
+    if (!this.visibleBatches.some((row) => row.name === batch.name)) {
+      this.resetFilterValues();
+      this.visibleBatches = this.batches.slice();
+    }
+    this.activeBatchName = batch.name;
+    this.exportPinnedBatchName = batch.name;
+    this.dataCheckBatchName = batch.name;
+    this.focusedBatchName = batch.name;
+    this.expandedBatchNames = new Set([batch.name]);
+    return batch;
+  }
+
+  async applyBatchFocusFromUrl() {
+    const batchKey = this.getBatchNameFromUrl();
+    const view = this.getBatchViewFromUrl();
+    if (!batchKey) {
+      this.clearBatchFocus({ updateUrl: false });
+      return;
+    }
+    const batch = this.findBatchByUrlKey(batchKey);
+    if (!batch) {
+      frappe.show_alert({ message: `链接中的批次不存在或已删除：${batchKey}`, indicator: "orange" });
+      return;
+    }
+    if (!this.visibleBatches.some((row) => row.name === batch.name)) {
+      this.resetFilterValues();
+      this.visibleBatches = this.batches.slice();
+      this.renderTransportWorkbench();
+    }
+    await this.focusBatch(batch.name, { updateUrl: false });
+    if (view === "drawer") {
+      await this.openBatchDrawer(batch.name, { updateUrl: false });
+    } else {
+      this.closeBatchDrawer({ updateUrl: false });
+    }
+  }
+
   async setAllExpanded(expanded) {
     if (expanded) {
       await this.prefetchBatchItems(this.visibleBatches);
@@ -6604,6 +6982,23 @@ class OverseasCostWorkbench {
 
   findBatch(batchName) {
     return this.batches.find((batch) => batch.name === batchName);
+  }
+
+  batchUrlKey(batch) {
+    if (!batch) return "";
+    return String(batch.batch_no || batch.customs_no || batch.waybill_no || batch.name || "").trim();
+  }
+
+  findBatchByUrlKey(value) {
+    const key = String(value || "").trim();
+    if (!key) return null;
+    return (
+      this.batches.find((batch) => String(batch.batch_no || "").trim() === key) ||
+      this.batches.find((batch) => String(batch.customs_no || "").trim() === key) ||
+      this.batches.find((batch) => String(batch.waybill_no || "").trim() === key) ||
+      this.findBatch(key) ||
+      null
+    );
   }
 
   versionLabel(version) {
