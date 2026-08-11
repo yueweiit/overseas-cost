@@ -2909,17 +2909,28 @@ def _pull_purchase_summaries_from_dingtalk(*, linked_approvals: list[dict], env_
         get_access_token,
         load_env_file,
         pull_linked_purchase_approval_details,
+        _runtime_config_value,
     )
 
     resolved_env_file = _resolve_dingtalk_env_file(env_file)
     if resolved_env_file:
         load_env_file(resolved_env_file)
-    token = get_access_token()
+    api_style = _runtime_config_value("DINGTALK_API_STYLE", "overseas_costing_dingtalk_api_style", default="auto")
+    token = get_access_token(
+        api_style=api_style,
+        access_token=_runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"),
+        corp_id=_runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id"),
+        client_id=_runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id"),
+        client_secret=_runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret"),
+        app_key=_runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key"),
+        app_secret=_runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret"),
+    )
     return [
         _normalize_purchase_summary(summary)
         for summary in pull_linked_purchase_approval_details(
             token=token,
             linked_approvals=linked_approvals,
+            api_style=api_style,
             include_running=True,
         )
     ]

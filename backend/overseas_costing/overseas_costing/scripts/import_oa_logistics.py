@@ -294,10 +294,10 @@ def resolve_logistics_process_code(process_code: str | None = "") -> str:
     预算系统 .env 里的 DINGTALK_PROCESS_CODE 可能是预算审批流，不能当成本模块的默认值。
     """
 
-    return (
-        _clean(process_code)
-        or _clean(os.environ.get("DINGTALK_LOGISTICS_PROCESS_CODE"))
-        or DEFAULT_LOGISTICS_PROCESS_CODE
+    return _clean(process_code) or _runtime_config_value(
+        "DINGTALK_LOGISTICS_PROCESS_CODE",
+        "overseas_costing_dingtalk_logistics_process_code",
+        default=DEFAULT_LOGISTICS_PROCESS_CODE,
     )
 
 
@@ -307,15 +307,20 @@ def resolve_purchase_process_code(process_code: str | None = "") -> str:
     采购支出流程没有安全默认值，必须显式传入或配置环境变量，避免误把预算/其它审批流当采购来源。
     """
 
-    process_codes = _parse_json_text(_clean(os.environ.get("DINGTALK_PROCESS_CODES")))
+    process_codes = _parse_json_text(
+        _runtime_config_value("DINGTALK_PROCESS_CODES", "overseas_costing_dingtalk_process_codes")
+    )
     purchase_code_from_list = ""
     if isinstance(process_codes, list) and len(process_codes) > 1:
         purchase_code_from_list = _clean(process_codes[1])
 
     return (
         _clean(process_code)
-        or _clean(os.environ.get("DINGTALK_PURCHASE_PROCESS_CODE"))
-        or _clean(os.environ.get("DINGTALK_PURCHASE_EXPENSE_PROCESS_CODE"))
+        or _runtime_config_value("DINGTALK_PURCHASE_PROCESS_CODE", "overseas_costing_dingtalk_purchase_process_code")
+        or _runtime_config_value(
+            "DINGTALK_PURCHASE_EXPENSE_PROCESS_CODE",
+            "overseas_costing_dingtalk_purchase_expense_process_code",
+        )
         or purchase_code_from_list
     )
 
@@ -329,7 +334,11 @@ def _oapi_url() -> str:
 
 
 def _resolve_api_style(api_style: str = "auto") -> str:
-    requested = (_clean(api_style) or "auto").lower()
+    requested = (
+        _clean(api_style)
+        or _runtime_config_value("DINGTALK_API_STYLE", "overseas_costing_dingtalk_api_style", default="auto")
+        or "auto"
+    ).lower()
     if requested in ("legacy", "old"):
         return "legacy"
     if requested == "new":
@@ -337,8 +346,14 @@ def _resolve_api_style(api_style: str = "auto") -> str:
     if requested != "auto":
         raise ValueError(f"不支持的钉钉接口风格：{api_style}")
 
-    has_new = bool(_clean(os.environ.get("DINGTALK_CORP_ID")) and _clean(os.environ.get("DINGTALK_CLIENT_ID")))
-    has_legacy = bool(_clean(os.environ.get("DINGTALK_APP_KEY")) and _clean(os.environ.get("DINGTALK_APP_SECRET")))
+    has_new = bool(
+        _runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id")
+        and _runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id")
+    )
+    has_legacy = bool(
+        _runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key")
+        and _runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret")
+    )
     if has_legacy:
         return "legacy"
     if has_new:
@@ -489,15 +504,23 @@ def get_access_token(
     3. 旧版 OpenAPI：app_key + app_secret
     """
 
-    token = _clean(access_token) or _clean(os.environ.get("DINGTALK_ACCESS_TOKEN"))
+    token = _clean(access_token) or _runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token")
     if token:
         return token
 
     resolved_api_style = _resolve_api_style(api_style)
 
     if resolved_api_style == "legacy":
-        resolved_app_key = _clean(app_key) or _clean(os.environ.get("DINGTALK_APP_KEY"))
-        resolved_app_secret = _clean(app_secret) or _clean(os.environ.get("DINGTALK_APP_SECRET"))
+        resolved_app_key = _clean(app_key) or _runtime_config_value(
+            "DINGTALK_APP_KEY",
+            "DINGTALK_APPKEY",
+            "overseas_costing_dingtalk_app_key",
+        )
+        resolved_app_secret = _clean(app_secret) or _runtime_config_value(
+            "DINGTALK_APP_SECRET",
+            "DINGTALK_APPSECRET",
+            "overseas_costing_dingtalk_app_secret",
+        )
         if not resolved_app_key or not resolved_app_secret:
             raise ValueError("旧版钉钉接口需要 DINGTALK_APP_KEY 和 DINGTALK_APP_SECRET。")
         query = urlencode({"appkey": resolved_app_key, "appsecret": resolved_app_secret})
@@ -505,9 +528,15 @@ def get_access_token(
         _ensure_dingtalk_success(result, api_style="legacy")
         return _clean(result.get("access_token"))
 
-    resolved_corp_id = _clean(corp_id) or _clean(os.environ.get("DINGTALK_CORP_ID"))
-    resolved_client_id = _clean(client_id) or _clean(os.environ.get("DINGTALK_CLIENT_ID")) or _clean(os.environ.get("DINGTALK_APP_KEY"))
-    resolved_client_secret = _clean(client_secret) or _clean(os.environ.get("DINGTALK_CLIENT_SECRET")) or _clean(os.environ.get("DINGTALK_APP_SECRET"))
+    resolved_corp_id = _clean(corp_id) or _runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id")
+    resolved_client_id = _clean(client_id) or _runtime_config_value(
+        "DINGTALK_CLIENT_ID",
+        "overseas_costing_dingtalk_client_id",
+    ) or _runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key")
+    resolved_client_secret = _clean(client_secret) or _runtime_config_value(
+        "DINGTALK_CLIENT_SECRET",
+        "overseas_costing_dingtalk_client_secret",
+    ) or _runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret")
     if not resolved_corp_id or not resolved_client_id or not resolved_client_secret:
         raise ValueError("新版钉钉接口需要 DINGTALK_CORP_ID、DINGTALK_CLIENT_ID、DINGTALK_CLIENT_SECRET。")
 
@@ -586,7 +615,11 @@ def list_process_instance_ids(
 
 
 def _resolve_list_api_mode(list_api: str = "auto", api_style: str = "auto") -> str:
-    requested = (_clean(list_api) or _clean(os.environ.get("DINGTALK_LIST_API")) or "auto").lower()
+    requested = (
+        _clean(list_api)
+        or _runtime_config_value("DINGTALK_LIST_API", "overseas_costing_dingtalk_list_api", default="auto")
+        or "auto"
+    ).lower()
     if requested == "legacy":
         requested = "old"
     if requested in ("old", "new", "both"):
@@ -3740,7 +3773,15 @@ def refresh_missing_oa_finished_times(
     if resolved_env_file:
         load_env_file(resolved_env_file)
     resolved_api_style = _resolve_api_style(api_style)
-    token = get_access_token(api_style=resolved_api_style, access_token=access_token)
+    token = get_access_token(
+        api_style=resolved_api_style,
+        access_token=access_token or _runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"),
+        corp_id=_runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id"),
+        client_id=_runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id"),
+        client_secret=_runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret"),
+        app_key=_runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key"),
+        app_secret=_runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret"),
+    )
 
     page_length = max(1, min(int(limit or 200), 1000))
     rows = frappe.get_all(
@@ -4040,7 +4081,15 @@ def refresh_existing_oa_logistics_details(
     if resolved_env_file:
         load_env_file(resolved_env_file)
     resolved_api_style = _resolve_api_style(api_style)
-    token = get_access_token(api_style=resolved_api_style, access_token=access_token)
+    token = get_access_token(
+        api_style=resolved_api_style,
+        access_token=access_token or _runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"),
+        corp_id=_runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id"),
+        client_id=_runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id"),
+        client_secret=_runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret"),
+        app_key=_runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key"),
+        app_secret=_runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret"),
+    )
 
     page_length = max(1, min(int(limit or 200), 1000))
     rows = frappe.get_all(
@@ -4185,7 +4234,15 @@ def detect_purchase_process_codes_from_existing_links(
     if resolved_env_file:
         load_env_file(resolved_env_file)
     resolved_api_style = _resolve_api_style(api_style)
-    token = get_access_token(api_style=resolved_api_style, access_token=access_token)
+    token = get_access_token(
+        api_style=resolved_api_style,
+        access_token=access_token or _runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"),
+        corp_id=_runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id"),
+        client_id=_runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id"),
+        client_secret=_runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret"),
+        app_key=_runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key"),
+        app_secret=_runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret"),
+    )
 
     page_length = max(1, min(int(limit or 50), 1000))
     rows = frappe.get_all(
@@ -4771,14 +4828,19 @@ def sync_purchase_expenses_from_process(
         process_code=resolved_process_code,
         start=start,
         end=end,
-        api_style=api_style,
-        list_api=list_api,
+        api_style=_runtime_config_value("DINGTALK_API_STYLE", "overseas_costing_dingtalk_api_style", default=api_style),
+        list_api=_runtime_config_value("DINGTALK_LIST_API", "overseas_costing_dingtalk_list_api", default=list_api),
         page_size=page_size,
         max_pages=max_pages,
         chunk_days=chunk_days,
         limit=limit,
         include_running=include_running,
-        access_token=access_token,
+        access_token=access_token or _runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"),
+        corp_id=_runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id"),
+        client_id=_runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id"),
+        client_secret=_runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret"),
+        app_key=_runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key"),
+        app_secret=_runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret"),
     )
     purchase_summaries = pull_result.get("items") or []
     if not purchase_summaries:
@@ -4906,14 +4968,19 @@ def preview_purchase_expenses_from_process(
         process_code=resolved_process_code,
         start=start,
         end=end,
-        api_style=api_style,
-        list_api=list_api,
+        api_style=_runtime_config_value("DINGTALK_API_STYLE", "overseas_costing_dingtalk_api_style", default=api_style),
+        list_api=_runtime_config_value("DINGTALK_LIST_API", "overseas_costing_dingtalk_list_api", default=list_api),
         page_size=page_size,
         max_pages=max_pages,
         chunk_days=chunk_days,
         limit=limit,
         include_running=include_running,
-        access_token=access_token,
+        access_token=access_token or _runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"),
+        corp_id=_runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id"),
+        client_id=_runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id"),
+        client_secret=_runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret"),
+        app_key=_runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key"),
+        app_secret=_runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret"),
     )
     purchase_summaries = pull_result.get("items") or []
     purchase_rows_preview: list[dict] = []
@@ -5189,13 +5256,19 @@ def pull_purchase_expenses_from_env() -> dict:
         process_code=resolve_purchase_process_code(),
         start=start,
         end=end,
-        api_style=_clean(os.environ.get("DINGTALK_API_STYLE")) or "auto",
-        list_api=_clean(os.environ.get("DINGTALK_LIST_API")) or "auto",
-        page_size=int(os.environ.get("DINGTALK_PAGE_SIZE") or 20),
-        max_pages=int(os.environ.get("DINGTALK_MAX_PAGES") or 20),
-        chunk_days=int(os.environ.get("DINGTALK_CHUNK_DAYS") or 30),
+        api_style=_runtime_config_value("DINGTALK_API_STYLE", "overseas_costing_dingtalk_api_style", default="auto"),
+        list_api=_runtime_config_value("DINGTALK_LIST_API", "overseas_costing_dingtalk_list_api", default="auto"),
+        page_size=_runtime_config_int("DINGTALK_PAGE_SIZE", default=20),
+        max_pages=_runtime_config_int("DINGTALK_MAX_PAGES", default=20),
+        chunk_days=_runtime_config_int("DINGTALK_CHUNK_DAYS", default=30),
         limit=limit or None,
         include_running=include_running,
+        access_token=_runtime_config_value("DINGTALK_ACCESS_TOKEN", "overseas_costing_dingtalk_access_token"),
+        corp_id=_runtime_config_value("DINGTALK_CORP_ID", "overseas_costing_dingtalk_corp_id"),
+        client_id=_runtime_config_value("DINGTALK_CLIENT_ID", "overseas_costing_dingtalk_client_id"),
+        client_secret=_runtime_config_value("DINGTALK_CLIENT_SECRET", "overseas_costing_dingtalk_client_secret"),
+        app_key=_runtime_config_value("DINGTALK_APP_KEY", "DINGTALK_APPKEY", "overseas_costing_dingtalk_app_key"),
+        app_secret=_runtime_config_value("DINGTALK_APP_SECRET", "DINGTALK_APPSECRET", "overseas_costing_dingtalk_app_secret"),
     )
     return {
         **result,

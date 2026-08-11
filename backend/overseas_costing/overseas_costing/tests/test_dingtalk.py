@@ -30,6 +30,7 @@ from overseas_costing.scripts.import_oa_logistics import (
     extract_form_fields,
     extract_linked_purchase_approvals,
     extract_purchase_expense_rows,
+    get_access_token,
     get_process_attachment_download_url,
     is_completed_approval_status,
     is_hidden_approval_status,
@@ -806,6 +807,57 @@ def test_purchase_process_code_requires_purchase_specific_env(monkeypatch) -> No
     monkeypatch.setenv("DINGTALK_PROCESS_CODES", '["PROC-OPERATION","PROC-PURCHASE-LIST"]')
 
     assert resolve_purchase_process_code() == "PROC-PURCHASE-LIST"
+
+
+def test_purchase_process_code_reads_frappe_site_config(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from overseas_costing.scripts import import_oa_logistics
+
+    monkeypatch.delenv("DINGTALK_PURCHASE_PROCESS_CODE", raising=False)
+    monkeypatch.delenv("DINGTALK_PURCHASE_EXPENSE_PROCESS_CODE", raising=False)
+    monkeypatch.delenv("DINGTALK_PROCESS_CODES", raising=False)
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "frappe",
+        SimpleNamespace(conf={"overseas_costing_dingtalk_purchase_process_code": "PROC-PURCHASE-SITE"}),
+    )
+
+    assert resolve_purchase_process_code() == "PROC-PURCHASE-SITE"
+
+
+def test_get_access_token_reads_legacy_credentials_from_frappe_site_config(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from overseas_costing.scripts import import_oa_logistics
+
+    captured = {}
+
+    def fake_request_json(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return {"errcode": 0, "access_token": "SITE-TOKEN"}
+
+    monkeypatch.delenv("DINGTALK_APP_KEY", raising=False)
+    monkeypatch.delenv("DINGTALK_APP_SECRET", raising=False)
+    monkeypatch.delenv("DINGTALK_APPKEY", raising=False)
+    monkeypatch.delenv("DINGTALK_APPSECRET", raising=False)
+    monkeypatch.delenv("DINGTALK_ACCESS_TOKEN", raising=False)
+    monkeypatch.setattr(import_oa_logistics, "_request_json", fake_request_json)
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "frappe",
+        SimpleNamespace(
+            conf={
+                "overseas_costing_dingtalk_app_key": "SITE-APP-KEY",
+                "overseas_costing_dingtalk_app_secret": "SITE-APP-SECRET",
+            }
+        ),
+    )
+
+    assert get_access_token(api_style="legacy") == "SITE-TOKEN"
+    assert "appkey=SITE-APP-KEY" in captured["url"]
+    assert "appsecret=SITE-APP-SECRET" in captured["url"]
 
 
 def test_completed_approval_status_filters_running() -> None:

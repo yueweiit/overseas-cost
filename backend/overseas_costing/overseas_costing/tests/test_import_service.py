@@ -600,6 +600,45 @@ def test_pull_linked_purchase_summaries_includes_running(monkeypatch) -> None:
     assert result[0]["mapped_preview_items"][0]["unit_price"] == 1.23
 
 
+def test_pull_linked_purchase_summaries_passes_runtime_credentials(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+    from overseas_costing.services import import_service
+
+    captured_token_kwargs = {}
+    captured_detail_kwargs = {}
+
+    monkeypatch.setattr(import_service, "_resolve_dingtalk_env_file", lambda _env_file=None: "")
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "_runtime_config_value",
+        lambda *keys, default="": {
+            "DINGTALK_API_STYLE": "legacy",
+            "DINGTALK_APP_KEY": "APP-KEY",
+            "DINGTALK_APP_SECRET": "APP-SECRET",
+        }.get(keys[0], default),
+    )
+
+    def fake_get_access_token(**kwargs):
+        captured_token_kwargs.update(kwargs)
+        return "TOKEN"
+
+    def fake_pull_linked_purchase_approval_details(**kwargs):
+        captured_detail_kwargs.update(kwargs)
+        return [{"ok": True, "approval_status": "COMPLETED", "mapped_preview_items": []}]
+
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", fake_get_access_token)
+    monkeypatch.setattr(import_oa_logistics, "pull_linked_purchase_approval_details", fake_pull_linked_purchase_approval_details)
+
+    import_service._pull_purchase_summaries_from_dingtalk(
+        linked_approvals=[{"approval_no": "202606220952000179521", "source_instance_id": "PROC-PURCHASE"}]
+    )
+
+    assert captured_token_kwargs["api_style"] == "legacy"
+    assert captured_token_kwargs["app_key"] == "APP-KEY"
+    assert captured_token_kwargs["app_secret"] == "APP-SECRET"
+    assert captured_detail_kwargs["api_style"] == "legacy"
+
+
 def test_preview_linked_purchase_expense_splits_aggregated_price_by_material_code(monkeypatch) -> None:
     from overseas_costing.services import import_service
 
