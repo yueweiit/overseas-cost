@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 import json
 
@@ -20,6 +20,9 @@ except Exception:  # pragma: no cover - 本地无 Frappe 环境时保持可导�
     frappe = None
 
 from overseas_costing.utils.dingtalk import build_dingtalk_order_payload, extract_dingtalk_instance_id
+
+
+DEFAULT_BATCH_RECENT_DAYS = 30
 
 
 def _get_batch_source_meta(batch_name: str) -> dict:
@@ -729,6 +732,32 @@ def _attach_batch_calculation_snapshot(items: list[dict]) -> list[dict]:
     return items
 
 
+def _to_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _to_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_recent_batch_filters(filters: dict) -> tuple[list, int, bool]:
+    recent_days = max(_to_int(filters.get("recent_days"), DEFAULT_BATCH_RECENT_DAYS), 1)
+    include_history = _to_bool(filters.get("include_history"))
+    has_keyword = bool(str(filters.get("keyword") or "").strip())
+    if include_history or has_keyword:
+        return [], recent_days, False
+
+    start_date = (datetime.now() - timedelta(days=recent_days)).strftime("%Y-%m-%d %H:%M:%S")
+    return [["source_created_at", ">=", start_date]], recent_days, True
+
+
 def get_batch_list(filters: dict) -> dict:
     if frappe is None:
         return {
@@ -745,6 +774,8 @@ def get_batch_list(filters: dict) -> dict:
         db_filters.append(["transport_mode", "=", filters["transport_mode"]])
     if filters.get("status"):
         db_filters.append(["status", "=", filters["status"]])
+    recent_filters, recent_days, recent_only = _build_recent_batch_filters(filters)
+    db_filters.extend(recent_filters)
 
     keyword = filters.get("keyword")
     query_kwargs = {
@@ -765,6 +796,7 @@ def get_batch_list(filters: dict) -> dict:
             "source_dingtalk_url",
             "source_approval_status",
             "source_attachment_count",
+            "source_created_at",
             "status",
             "current_version",
             "item_count",
@@ -784,6 +816,8 @@ def get_batch_list(filters: dict) -> dict:
             ["batch_no", "like", like_keyword],
             ["customs_no", "like", like_keyword],
             ["waybill_no", "like", like_keyword],
+            ["source_approval_no", "like", like_keyword],
+            ["source_instance_id", "like", like_keyword],
             ["project_collection", "like", like_keyword],
         ]
 

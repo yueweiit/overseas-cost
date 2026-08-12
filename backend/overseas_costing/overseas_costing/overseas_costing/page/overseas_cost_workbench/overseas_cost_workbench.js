@@ -52,6 +52,7 @@ class OverseasCostWorkbench {
     this.lastImportedBatchNames = new Set();
     this.isOpeningDingtalk = false;
     this.isParsingManualDocuments = false;
+    this.defaultRecentDays = 30;
   }
 
   init() {
@@ -343,8 +344,11 @@ class OverseasCostWorkbench {
   async loadBatches() {
     this.setTableLoading();
     try {
+      const urlBatchKey = this.getBatchNameFromUrl();
       const result = await this.call("overseas_costing.api.batch.get_batch_list", {
         transport_mode: "",
+        recent_days: this.defaultRecentDays,
+        keyword: urlBatchKey || "",
       });
       this.batches = result.items || [];
       this.visibleBatches = this.batches.slice();
@@ -422,10 +426,6 @@ class OverseasCostWorkbench {
   }
 
   async applyFilters() {
-    if (!this.batches.length) {
-      await this.loadBatches();
-      return;
-    }
     this.setTableLoading();
     try {
       this.focusedBatchName = "";
@@ -433,6 +433,11 @@ class OverseasCostWorkbench {
       this.updateBatchUrl("", { replace: true });
       this.exportPinnedBatchName = "";
       this.batchItems = {};
+      const searchedServer = await this.reloadBatchesForServerSearch();
+      if (!this.batches.length && !searchedServer) {
+        await this.loadBatches();
+        return;
+      }
       await this.prefetchBatchItems(this.batches);
       this.visibleBatches = this.filterBatches();
       this.renderTransportWorkbench();
@@ -447,9 +452,29 @@ class OverseasCostWorkbench {
     }
   }
 
+  getServerSearchKeyword() {
+    return [this.filters.customs_no, this.filters.waybill_no]
+      .map((value) => String(value || "").trim())
+      .find(Boolean) || "";
+  }
+
+  async reloadBatchesForServerSearch() {
+    const keyword = this.getServerSearchKeyword();
+    if (!keyword) return false;
+    const result = await this.call("overseas_costing.api.batch.get_batch_list", {
+      transport_mode: "",
+      recent_days: this.defaultRecentDays,
+      keyword,
+    });
+    this.batches = result.items || [];
+    this.visibleBatches = this.batches.slice();
+    return true;
+  }
+
   clearFilters() {
     this.resetFilterValues();
-    this.applyFilters();
+    this.batchItems = {};
+    this.loadBatches();
   }
 
   async setTransportFilter(mode = "") {
@@ -6941,7 +6966,9 @@ class OverseasCostWorkbench {
   }
 
   scopedBatchHint() {
-    return this.hasActiveFilters() ? "仅显示当前筛选范围内的批次。" : "未筛选物流方式时显示全部批次。";
+    return this.hasActiveFilters()
+      ? "仅显示当前筛选范围内的批次；输入报关单号/运单号可查询历史批次。"
+      : `默认显示最近 ${this.defaultRecentDays} 天批次；输入报关单号/运单号可查询历史批次。`;
   }
 
   renderVisibleBatchOptions(selectedBatchName = "") {

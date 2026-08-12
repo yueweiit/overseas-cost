@@ -16,7 +16,13 @@ from overseas_costing.services import batch_service
 
 
 @frappe.whitelist()
-def get_batch_list(transport_mode: str = "SEA", status: str | None = None, keyword: str | None = None) -> dict:
+def get_batch_list(
+    transport_mode: str = "SEA",
+    status: str | None = None,
+    keyword: str | None = None,
+    recent_days: int | str | None = None,
+    include_history: int | str | bool | None = None,
+) -> dict:
     """返回批次列表。"""
 
     return batch_service.get_batch_list(
@@ -24,6 +30,8 @@ def get_batch_list(transport_mode: str = "SEA", status: str | None = None, keywo
             "transport_mode": transport_mode,
             "status": status,
             "keyword": keyword,
+            "recent_days": recent_days,
+            "include_history": include_history,
         }
     )
 
