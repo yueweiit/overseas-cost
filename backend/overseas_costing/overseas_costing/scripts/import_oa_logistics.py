@@ -118,6 +118,14 @@ LOGISTICS_CURRENCY_FIELD_ALIASES = (
     "币种",
     "Moneda",
 )
+LOGISTICS_WEIGHT_FIELD_ALIASES = (
+    "重量Peso（KG）",
+    "重量Peso(KG)",
+    "重量Peso",
+    "重量",
+    "Peso",
+    "Peso KG",
+)
 GOODS_TABLE_FIELD_ALIASES = ("货物信息", "Bienes")
 PURCHASE_DETAIL_TABLE_FIELD_ALIASES = (
     "需求明细",
@@ -1832,6 +1840,53 @@ def _parse_quote_total_amount(value: Any) -> float | None:
     return amount if amount > 0 else None
 
 
+def _looks_like_quote_amount_line(line: str) -> bool:
+    """识别物流报价里的金额行，避免把重量、日期、型号误当成费用。"""
+
+    text = _clean(line)
+    if not text:
+        return False
+    if re.search(r"(?:合计|总计|总费用|总价)", text, re.IGNORECASE):
+        return True
+    if "=" not in text:
+        return False
+    if not re.search(r"(?:元|rmb|cny|¥|￥|usd|美金|美元|mxn|peso|比索)", text, re.IGNORECASE):
+        return False
+    return bool(re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", text.rsplit("=", 1)[1]))
+
+
+def _parse_direct_quote_line(line: str) -> dict | None:
+    """识别“飞力达PIL：5850USD/40HQ+杂费”这类报价比较行。"""
+
+    text = _clean(line)
+    if not text:
+        return None
+    match = re.search(
+        r"^(?P<carrier>.+?)[:：]\s*(?P<amount>[-+]?\d[\d,]*(?:\.\d+)?)\s*(?P<currency>usd|美金|美元|rmb|cny|元|mxn|peso|比索)(?P<tail>.*)$",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    carrier = _clean(match.group("carrier")).strip("：:")
+    if not carrier or len(carrier) > 40:
+        return None
+    if any(skip in carrier for skip in ("合计", "总计", "总费用", "总价", "单价", "每kg", "每KG", "运费", "卸货费", "装货费", "仓租", "免租期", "超期")):
+        return None
+    try:
+        amount = float(match.group("amount").replace(",", ""))
+    except ValueError:
+        return None
+    if amount <= 0:
+        return None
+    return {
+        "carrier": carrier,
+        "amount": amount,
+        "currency": _normalize_currency_code(match.group("currency")) or _normalize_currency_code(text) or "RMB",
+        "remark": _clean(match.group("tail")),
+    }
+
+
 def extract_logistics_quote_candidates_from_approval(item: dict) -> list[dict]:
     """从物流报价文字中提取待确认候选，不生成任何费用分摊。"""
 
@@ -1849,10 +1904,27 @@ def extract_logistics_quote_candidates_from_approval(item: dict) -> list[dict]:
         line = _clean(raw_line)
         if not line:
             continue
-        carrier_match = re.search(r"^\s*\d+\s*[.、]?\s*(.+?)报价", line)
+        carrier_match = re.search(r"^\s*(?:\d+\s*[.、]?\s*)?(.+?)报价", line)
         if carrier_match:
             carrier = _clean(carrier_match.group(1)).strip("：:")
-        if not re.search(r"(?:合计|总计|总费用|总价)", line, re.IGNORECASE):
+        direct_quote = _parse_direct_quote_line(line)
+        if direct_quote:
+            candidates.append(
+                {
+                    "carrier": direct_quote["carrier"],
+                    "amount": direct_quote["amount"],
+                    "currency": direct_quote["currency"],
+                    "volume_m3": volume_m3,
+                    "source_field": source_field,
+                    "source_value": text,
+                    "evidence_line": line,
+                    "evidence_line_no": line_no,
+                    "status": "待确认",
+                    "remark": direct_quote.get("remark") or "",
+                }
+            )
+            continue
+        if not _looks_like_quote_amount_line(line):
             continue
         amount = _parse_quote_total_amount(line)
         if amount is None:
@@ -2236,6 +2308,8 @@ def extract_form_attachments(instance: dict) -> list[dict]:
             or component.get("id")
         )
         component_type = _clean(component.get("componentType") or component.get("component_type"))
+        if component_type and "attachment" not in component_type.lower():
+            continue
         records.extend(
             _extract_attachments_from_value(
                 component.get("value"),
@@ -2259,7 +2333,11 @@ def extract_attachments_from_form_fields(form_fields: dict[str, Any]) -> list[di
     """从已拍平的表单字段中兜底提取附件清单。"""
 
     records: list[dict] = []
+    normalized_aliases = tuple(_normalize_key(alias) for alias in ATTACHMENT_FIELD_ALIASES)
     for fieldname, value in (form_fields or {}).items():
+        normalized_fieldname = _normalize_key(fieldname)
+        if normalized_fieldname and not any(alias in normalized_fieldname for alias in normalized_aliases):
+            continue
         records.extend(
             _extract_attachments_from_value(
                 value,
@@ -2963,6 +3041,8 @@ def build_oa_item_values_from_approval(item: dict) -> list[dict]:
     source_instance_id = _clean(item.get("source_instance_id"))
     source_dingtalk_url = _clean(item.get("source_dingtalk_url"))
     rows = extract_oa_goods_rows(item)
+    form_fields = item.get("form_fields") or {}
+    total_gross_weight = _to_number_or_none(_find_field_value(form_fields, LOGISTICS_WEIGHT_FIELD_ALIASES))
     values: list[dict] = []
     for index, row in enumerate(rows, start=1):
         mapped = map_oa_row_to_item(row)
@@ -2987,6 +3067,12 @@ def build_oa_item_values_from_approval(item: dict) -> list[dict]:
             }
         )
         values.append(mapped)
+    if total_gross_weight and values and not any(_to_number_or_none(row.get("gross_weight_kg")) for row in values):
+        total_quantity = sum(_to_number_or_none(row.get("quantity")) or 0 for row in values)
+        if total_quantity > 0:
+            for mapped in values:
+                quantity = _to_number_or_none(mapped.get("quantity")) or 0
+                mapped["gross_weight_kg"] = round(total_gross_weight * quantity / total_quantity, 6) if quantity else 0
     return values
 
 

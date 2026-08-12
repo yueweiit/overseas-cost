@@ -543,6 +543,65 @@ def test_extract_logistics_fee_from_approval_only_reads_explicit_amount() -> Non
     ]
 
 
+def test_extract_logistics_quote_candidates_reads_formula_amount_line() -> None:
+    candidates = extract_logistics_quote_candidates_from_approval(
+        {
+            "form_fields": {
+                "物流报价Cotización de logística": (
+                    "DHL报价：\n"
+                    "运费=4075*（1+燃油附加费）+重量+155*（1+燃油附加费）+超过25kg的箱数+附加费\n"
+                    "50.22*1.3825*33.2+155*1.3825*1+155*1=2674.33528元\n"
+                    "每kg单价：80.5522674元"
+                )
+            }
+        }
+    )
+
+    assert candidates == [
+        {
+            "carrier": "DHL",
+            "amount": 2674.33528,
+            "currency": "RMB",
+            "volume_m3": None,
+            "source_field": "物流报价Cotización de logística",
+            "source_value": (
+                "DHL报价：\n"
+                "运费=4075*（1+燃油附加费）+重量+155*（1+燃油附加费）+超过25kg的箱数+附加费\n"
+                "50.22*1.3825*33.2+155*1.3825*1+155*1=2674.33528元\n"
+                "每kg单价：80.5522674元"
+            ),
+            "evidence_line": "50.22*1.3825*33.2+155*1.3825*1+155*1=2674.33528元",
+            "evidence_line_no": 3,
+            "status": "待确认",
+        }
+    ]
+
+
+def test_extract_logistics_quote_candidates_reads_direct_40hq_quote_lines() -> None:
+    candidates = extract_logistics_quote_candidates_from_approval(
+        {
+            "form_fields": {
+                "物流报价Cotización de logística": (
+                    "本周报价：\n"
+                    "华运PIL：6050USD/40HQ+杂费\n"
+                    "登泰PIL：5850USD/40HQ+杂费\n"
+                    "彩虹捷运PIL：5850USD/40HQ+杂费\n"
+                    "飞力达PIL：5850USD/40HQ+杂费\n"
+                    "建议选择飞力达，可以借用货代仓库装柜"
+                )
+            }
+        }
+    )
+
+    assert [(item["carrier"], item["amount"], item["currency"], item["remark"]) for item in candidates] == [
+        ("华运PIL", 6050.0, "USD", "/40HQ+杂费"),
+        ("登泰PIL", 5850.0, "USD", "/40HQ+杂费"),
+        ("彩虹捷运PIL", 5850.0, "USD", "/40HQ+杂费"),
+        ("飞力达PIL", 5850.0, "USD", "/40HQ+杂费"),
+    ]
+    assert all(item["status"] == "待确认" for item in candidates)
+
+
 def test_extract_linked_purchase_approvals_from_relate_field_ext_value() -> None:
     instance = {
         "processInstanceId": "PROC-SEA-001",
@@ -641,6 +700,14 @@ def test_extract_form_attachments_ignores_comment_attachments() -> None:
         "processInstanceId": "PROC-SEA-ATTACH",
         "businessId": "202607220001",
         "formComponentValues": [
+            {
+                "componentType": "DepartmentField",
+                "name": "业务主体Entidad comercial",
+                "extValue": json.dumps(
+                    {"deptName": "YW MOLDES MX模具", "itemId": "1089528309", "name": "YW MOLDES MX模具"},
+                    ensure_ascii=False,
+                ),
+            },
             {
                 "componentType": "DDAttachment",
                 "name": "Adjunto物品清单/运费报价等附件信息",
@@ -1229,6 +1296,42 @@ def test_extract_oa_goods_text_rows_and_skip_summary() -> None:
     assert rows[2]["quantity"] == "100"
     assert [item["quantity"] for item in items] == [8.0, 30.0, 100.0]
     assert items[2]["material_code"] is None
+
+
+def test_build_oa_item_values_allocates_header_weight_by_quantity() -> None:
+    approval = {
+        "source_approval_no": "202608111418000558262",
+        "source_instance_id": "PROC-EXPRESS-WEIGHT",
+        "transport_mode_raw": "Express快递",
+        "form_fields": {
+            "重量Peso（KG）": "33.2",
+            "货物信息Bienes": [
+                {
+                    "rowValue": [
+                        {"label": "物料编码 Código de material", "value": "MHA101290"},
+                        {"label": "物料名称（中文）Nombre del material (chino)", "value": "超队TPU模具"},
+                        {"label": "规格型号Especificación / Modelo", "value": "Honor X8D 4G"},
+                        {"label": "数量Cantidad", "value": "1"},
+                    ],
+                    "rowNumber": "ROW-1",
+                },
+                {
+                    "rowValue": [
+                        {"label": "物料编码 Código de material", "value": "MHA201290"},
+                        {"label": "物料名称（中文）Nombre del material (chino)", "value": "超队PC模具"},
+                        {"label": "规格型号Especificación / Modelo", "value": "Honor X8D 4G"},
+                        {"label": "数量Cantidad", "value": "1"},
+                    ],
+                    "rowNumber": "ROW-2",
+                },
+            ],
+        },
+    }
+
+    items = build_oa_item_values_from_approval(approval)
+
+    assert [item["material_code"] for item in items] == ["MHA101290", "MHA201290"]
+    assert [item["gross_weight_kg"] for item in items] == [16.6, 16.6]
 
 
 def test_save_sea_approvals_to_erp_dry_run_returns_trace_preview() -> None:
