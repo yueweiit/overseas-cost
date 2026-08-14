@@ -35,10 +35,12 @@ from overseas_costing.utils.excel_blocks import (
 )
 from overseas_costing.utils.excel_workbook import parse_yuewei_excel_workbook
 from overseas_costing.utils.field_mapper import (
+    map_oa_row_to_item,
     map_packing_list_row_to_item,
     map_purchase_expense_row_to_item,
     map_yuewei_excel_block_item_to_item,
     normalize_transport_mode,
+    normalize_unit,
 )
 
 ITEM_KEY_FIELDS = ("material_code", "product_name", "spec_model")
@@ -2290,10 +2292,118 @@ def _filter_doctype_values(doctype: str, values: dict, *, keep_doctype: bool = F
 
 def _coerce_item_numeric_defaults(values: dict) -> dict:
     normalized = dict(values)
+    if normalized.get("unit"):
+        normalized["unit"] = normalize_unit(normalized.get("unit"))
     for fieldname in NUMERIC_ITEM_FIELDS:
         if normalized.get(fieldname) in (None, ""):
             normalized[fieldname] = 0
     return normalized
+
+
+def normalize_existing_item_units() -> dict:
+    """把历史明细里的外语单位清洗成系统统一中文单位，可重复执行。"""
+
+    if frappe is None:
+        return {"updated_count": 0, "scanned_count": 0, "changed_units": []}
+
+    rows = frappe.get_all(
+        "Overseas Cost Item",
+        filters=[["unit", "!=", ""]],
+        fields=["name", "unit"],
+        limit_page_length=0,
+    )
+    changed_units: list[dict] = []
+    for row in rows:
+        old_unit = row.get("unit")
+        new_unit = normalize_unit(old_unit)
+        if not new_unit or new_unit == old_unit:
+            continue
+        frappe.db.set_value(
+            "Overseas Cost Item",
+            row["name"],
+            "unit",
+            new_unit,
+            update_modified=True,
+        )
+        changed_units.append({"name": row["name"], "old_unit": old_unit, "new_unit": new_unit})
+
+    if changed_units:
+        frappe.db.commit()
+
+    return {
+        "updated_count": len(changed_units),
+        "scanned_count": len(rows),
+        "changed_units": changed_units[:50],
+    }
+
+
+def backfill_oa_item_quantity_unit_from_raw() -> dict:
+    """从钉钉 OA 原始行快照补回历史明细漏掉的数量和单位。"""
+
+    if frappe is None:
+        return {"updated_count": 0, "scanned_count": 0, "changed_rows": []}
+
+    rows = frappe.get_all(
+        "Overseas Cost Item",
+        filters={"source_type": "oa_logistics"},
+        fields=[
+            "name",
+            "row_no",
+            "material_code",
+            "product_name",
+            "product_name_es",
+            "spec_model",
+            "recipient",
+            "quantity",
+            "unit",
+            "raw_excel_json",
+        ],
+        limit_page_length=0,
+    )
+    changed_rows: list[dict] = []
+    for row in rows:
+        raw_payload = _json_loads_dict(row.get("raw_excel_json"))
+        if not isinstance(raw_payload, dict):
+            continue
+
+        mapped = map_oa_row_to_item(raw_payload)
+        updates: dict = {}
+        source_quantity = _to_float(mapped.get("quantity"), default=0.0)
+        current_quantity = _to_float(row.get("quantity"), default=0.0)
+        if source_quantity and not current_quantity:
+            updates["quantity"] = source_quantity
+            updates["actual_shipped_qty"] = source_quantity
+
+        source_unit = normalize_unit(mapped.get("unit"))
+        current_unit = normalize_unit(row.get("unit"))
+        if source_unit and source_unit != current_unit:
+            updates["unit"] = source_unit
+        for fieldname in ("product_name", "product_name_es", "spec_model", "recipient"):
+            source_value = mapped.get(fieldname)
+            current_value = row.get(fieldname)
+            if source_value not in (None, "") and str(source_value or "").strip() != str(current_value or "").strip():
+                updates[fieldname] = source_value
+
+        if not updates:
+            continue
+        frappe.db.set_value("Overseas Cost Item", row["name"], updates, update_modified=True)
+        changed_rows.append(
+            {
+                "name": row["name"],
+                "row_no": row.get("row_no"),
+                "material_code": row.get("material_code"),
+                "updates": updates,
+            }
+        )
+
+    if changed_rows:
+        frappe.db.commit()
+
+    return {
+        "updated_count": len(changed_rows),
+        "scanned_count": len(rows),
+        "changed_rows": changed_rows[:50],
+    }
 
 
 def _values_equal_for_import(old_value, new_value) -> bool:
@@ -2619,7 +2729,11 @@ def _build_preview_rows(
     raw_rows: list[dict],
     mapper: Callable[[dict], dict],
 ) -> list[dict]:
-    return [mapper(row) for row in raw_rows]
+    rows = [mapper(row) for row in raw_rows]
+    for row in rows:
+        if row.get("unit"):
+            row["unit"] = normalize_unit(row.get("unit"))
+    return rows
 
 
 def _resolve_batch_name(batch_name: str) -> str | None:
@@ -4857,7 +4971,7 @@ def _build_packing_unmatched_item_values(
         "product_name": mapped_row.get("product_name") or "",
         "product_name_es": mapped_row.get("product_name_es") or "",
         "spec_model": mapped_row.get("spec_model") or "",
-        "unit": mapped_row.get("unit") or "",
+        "unit": normalize_unit(mapped_row.get("unit")) or "",
         "quantity": _to_float(actual_qty),
         "actual_shipped_qty": _to_float(actual_qty),
         "unit_price": _to_float(mapped_row.get("unit_price")),

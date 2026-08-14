@@ -6,16 +6,19 @@ import json
 from openpyxl import load_workbook
 
 from overseas_costing.services.batch_service import (
+    EXCEL_COLUMNS,
     EXTRA_ITEM_FIELDS,
     _build_item_query_args,
     _build_batch_source_status,
     _build_export_xlsx_content,
     _build_writeback_readiness,
+    _export_cell_value,
     _normalize_item_query_filters,
     _normalize_limit,
     check_writeback_ready,
     create_batch,
     get_audit_logs,
+    get_batch_list,
     get_batch_items,
     is_hidden_approval_status,
 )
@@ -60,6 +63,110 @@ def test_get_batch_items_dry_run_keeps_filters() -> None:
     assert result["filters"]["keyword"] == "YL000098"
     assert result["columns"][0]["fieldname"] == "material_code"
     assert "derived_json" in EXTRA_ITEM_FIELDS
+
+
+def test_excel_columns_include_spec_model_after_product_name() -> None:
+    fieldnames = [column["fieldname"] for column in EXCEL_COLUMNS]
+    spec_column = next(column for column in EXCEL_COLUMNS if column["fieldname"] == "spec_model")
+    quantity_column = next(column for column in EXCEL_COLUMNS if column["fieldname"] == "quantity")
+    unit_column = next(column for column in EXCEL_COLUMNS if column["fieldname"] == "unit")
+    total_unit_column = next(column for column in EXCEL_COLUMNS if column["fieldname"] == "total_unit_rmb")
+
+    assert fieldnames.index("spec_model") == fieldnames.index("product_name") + 1
+    assert fieldnames.index("unit") == fieldnames.index("quantity") + 1
+    assert "Especificación / Modelo" in spec_column["label"]
+    assert quantity_column["label"] == "采购数量"
+    assert unit_column["label"] == "单位"
+    assert total_unit_column["label"] == "综合单价 RMB"
+
+
+def test_sea_air_express_share_same_item_columns() -> None:
+    fieldnames = [column["fieldname"] for column in EXCEL_COLUMNS]
+
+    assert fieldnames[:8] == [
+        "material_code",
+        "product_name",
+        "spec_model",
+        "unit_price",
+        "purchase_currency",
+        "quantity",
+        "unit",
+        "goods_value",
+    ]
+    assert fieldnames == [column["fieldname"] for column in EXCEL_COLUMNS]
+    assert {"spec_model", "product_name_es", "unit", "purchase_currency"}.issubset(set(EXTRA_ITEM_FIELDS + fieldnames))
+
+
+def test_get_batch_list_defaults_to_recent_days_without_classic_samples(monkeypatch) -> None:
+    from overseas_costing.services import batch_service
+
+    calls = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            calls.append((doctype, kwargs))
+            return [
+                {
+                    "name": "BATCH-RECENT",
+                    "batch_no": "202608051608000144099",
+                    "transport_mode": "SEA",
+                    "source_created_at": "2026-08-05 16:08:00",
+                    "source_approval_status": "RUNNING",
+                    "extra_json": "{}",
+                    "modified": "2026-08-05 16:08:00",
+                }
+            ]
+
+    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(batch_service, "_recent_start", lambda recent_days: "2026-07-15 00:00:00")
+    monkeypatch.setattr(batch_service, "_attach_batch_source_status", lambda items: items)
+    monkeypatch.setattr(batch_service, "_attach_batch_calculation_snapshot", lambda items: items)
+
+    result = get_batch_list({"transport_mode": "", "recent_days": 30})
+
+    assert result["ok"] is True
+    assert result["total"] == 1
+    assert len(calls) == 1
+    assert calls[0][1]["filters"] == [["source_created_at", ">=", "2026-07-15 00:00:00"]]
+    assert all(not item.get("is_classic_sample") for item in result["items"])
+
+
+def test_get_batch_list_keyword_can_find_history_batch_by_item_field(monkeypatch) -> None:
+    from overseas_costing.services import batch_service
+
+    calls = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            calls.append((doctype, kwargs))
+            if doctype == "Overseas Cost Item":
+                return [{"batch": "HISTORY-BATCH"}]
+            if doctype == "Overseas Cost Batch" and kwargs.get("filters") and ["name", "in", ["HISTORY-BATCH"]] in kwargs["filters"]:
+                return [
+                    {
+                        "name": "HISTORY-BATCH",
+                        "batch_no": "202606010001",
+                        "transport_mode": "SEA",
+                        "source_created_at": "2026-06-01 10:00:00",
+                        "source_approval_status": "COMPLETED",
+                        "extra_json": "{}",
+                        "modified": "2026-06-01 10:00:00",
+                    }
+                ]
+            return []
+
+    monkeypatch.setattr(batch_service, "frappe", FakeFrappe)
+    monkeypatch.setattr(batch_service, "_attach_batch_source_status", lambda items: items)
+    monkeypatch.setattr(batch_service, "_attach_batch_calculation_snapshot", lambda items: items)
+
+    result = get_batch_list({"transport_mode": "", "recent_days": 30, "keyword": "墨镜"})
+
+    assert result["ok"] is True
+    assert result["total"] == 1
+    assert result["items"][0]["name"] == "HISTORY-BATCH"
+    assert any(call[0] == "Overseas Cost Item" for call in calls)
 
 
 def test_create_batch_dry_run_builds_manual_batch_and_version() -> None:
@@ -136,6 +243,14 @@ def test_build_export_xlsx_content_styles_and_freezes_header() -> None:
     assert sheet["A1"].border.left.style == "thin"
     assert sheet["A1"].border.left.color.rgb == "FF000000"
     assert sheet["A2"].value == "FL004106"
+
+
+def test_export_cell_value_hides_default_zero_cleaning_fee() -> None:
+    column = {"fieldname": "limpieza_contenedor"}
+
+    assert _export_cell_value({"limpieza_contenedor": 0}, {}, column) == ""
+    assert _export_cell_value({"limpieza_contenedor": "0.00"}, {}, column) == ""
+    assert _export_cell_value({"limpieza_contenedor": 25}, {}, column) == 25
 
 
 def test_build_export_xlsx_content_merges_repeated_batch_level_cells() -> None:
@@ -409,3 +524,32 @@ def test_build_batch_source_status_exposes_quote_candidates_without_raw_oa_text(
     ]
     assert status["has_confirmed_logistics_quote"] is True
     assert "source_value" not in status["logistics_quote_candidates"][0]
+
+
+def test_build_batch_source_status_exposes_logistics_text_summary() -> None:
+    status = _build_batch_source_status(
+        {
+            "name": "BATCH-DHL-001",
+            "source_type": "oa_logistics",
+            "extra_json": json.dumps(
+                {
+                    "source": "dingtalk_oa_logistics",
+                    "form_fields": {
+                        "物流报价Cotización de logística": "DHL报价：\n50.22*1.3825*43.2+155*1.3825*1+155*1=3368.62678元",
+                        "物流方式Camino Envío": "Express快递",
+                        "预计发货日期Fecha de Pre-entrega": "2026/8/12",
+                        "目标地区Países destinatarios": "MANZANILLO Mexico",
+                        "重量Peso（KG）": "43.2",
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        }
+    )
+
+    assert status["logistics_text_summary"]["transport_mode"] == "EXPRESS"
+    assert status["logistics_text_summary"]["logistics_quote_carrier"] == "DHL"
+    assert status["logistics_text_summary"]["logistics_quote_amount"] == 3368.62678
+    assert status["logistics_text_summary"]["pre_delivery_date"] == "2026/8/12"
+    assert status["logistics_text_summary"]["destination"] == "MANZANILLO Mexico"
+    assert "logistics_quote_text" not in status["logistics_text_summary"]

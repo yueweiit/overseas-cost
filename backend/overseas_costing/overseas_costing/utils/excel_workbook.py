@@ -7,6 +7,8 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
+from overseas_costing.utils.field_mapper import normalize_unit
+
 try:
     from openpyxl import load_workbook
 except Exception:  # pragma: no cover - 只在真实解析 xlsx 时才需要报错
@@ -936,6 +938,8 @@ def _read_attachment_row(worksheet, row_no: int, header_map: dict[str, int]) -> 
     for fieldname, col_no in header_map.items():
         value, merged_range = _attachment_cell_value(worksheet, row_no, col_no)
         row[fieldname] = _normalize_cell_value(value)
+        if fieldname == "unit":
+            row[fieldname] = normalize_unit(row[fieldname])
         if merged_range and fieldname in {"unit_price", "goods_value"}:
             row[f"_{fieldname}_merge_range"] = merged_range
     export_mode = row.get("export_mode")
@@ -1116,7 +1120,7 @@ def _build_attachment_item(row: dict, source_sheet: str) -> list:
         "purchaseOrderNo": row.get("purchase_order_no"),
         "productNameEs": row.get("product_name_es"),
         "specModel": row.get("spec_model"),
-        "unit": row.get("unit"),
+        "unit": normalize_unit(row.get("unit")),
         "actualShippedQty": quantity,
         "grossWeightKg": row.get("gross_weight_kg"),
         "volumeM3": row.get("volume_m3"),

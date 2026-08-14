@@ -25,6 +25,7 @@ from overseas_costing.scripts.import_oa_logistics import (
     build_purchase_expense_item_values_from_approval,
     extract_logistics_fee_from_approval,
     extract_logistics_quote_candidates_from_approval,
+    extract_logistics_text_summary_from_approval,
     extract_form_attachments,
     extract_oa_goods_rows,
     extract_form_fields,
@@ -37,6 +38,7 @@ from overseas_costing.scripts.import_oa_logistics import (
     is_sea_approval,
     load_env_file,
     refresh_missing_oa_finished_times,
+    refresh_oa_logistics_detail,
     resolve_logistics_process_code,
     resolve_purchase_process_code,
     refresh_existing_oa_logistics_details,
@@ -575,6 +577,81 @@ def test_extract_logistics_quote_candidates_reads_formula_amount_line() -> None:
             "status": "待确认",
         }
     ]
+
+
+def test_extract_logistics_text_summary_reads_dhl_express_text_block() -> None:
+    summary = extract_logistics_text_summary_from_approval(
+        {
+            "form_fields": {
+                "物流报价Cotización de logística": (
+                    "DHL报价：\n"
+                    "运费=4075*（1+燃油附加费）*重量+155*（1+燃油附加费）*超过25kg的箱数+附加费*重量*附加费25折+超过25kg搬运费*超重箱数\n"
+                    "50.22*1.3825*43.2+155*1.3825*1+155*1=3368.62678元\n"
+                    "每kg单价：77.9774717592593元（含超重费用1箱）"
+                ),
+                "物流方式Camino Envío": "Express快递",
+                "预计发货日期Fecha de Pre-entrega": "2026/8/12",
+                "目标地区Países destinatarios": "MANZANILLO Mexico",
+                "重量Peso（KG）": "43.2",
+            }
+        }
+    )
+
+    assert summary["transport_mode"] == "EXPRESS"
+    assert summary["transport_mode_raw"] == "Express快递"
+    assert summary["pre_delivery_date"] == "2026/8/12"
+    assert summary["destination"] == "MANZANILLO Mexico"
+    assert summary["gross_weight_kg"] == 43.2
+    assert summary["logistics_quote_carrier"] == "DHL"
+    assert summary["logistics_quote_amount"] == 3368.62678
+    assert summary["logistics_quote_currency"] == "RMB"
+    assert "50.22*1.3825*43.2" in summary["logistics_quote_evidence"]
+    assert not summary.get("ai_used")
+
+
+def test_extract_logistics_text_summary_uses_ai_fallback_without_overwriting_rule_values(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    monkeypatch.setattr(import_oa_logistics, "_runtime_config_bool", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "_call_ai_logistics_text_summary",
+        lambda source_text, base_summary: {
+            "transport_mode": "EXPRESS",
+            "transport_mode_raw": "Express快递",
+            "destination": "MANZANILLO Mexico",
+            "gross_weight_kg": 43.2,
+            "logistics_quote_amount": 9999,
+            "logistics_quote_currency": "RMB",
+            "logistics_quote_carrier": "DHL",
+            "logistics_quote_evidence": "AI返回的金额不应覆盖规则金额",
+            "ai_used": True,
+            "ai_model": "deepseek-test",
+            "ai_confidence": 0.76,
+            "ai_reason": "字段名不规范，使用 AI 兜底识别。",
+        },
+    )
+
+    summary = extract_logistics_text_summary_from_approval(
+        {
+            "form_fields": {
+                "物流报价Cotización de logística": (
+                    "DHL报价：\n"
+                    "50.22*1.3825*43.2+155*1.3825*1+155*1=3368.62678元\n"
+                    "每kg单价：77.9774717592593元"
+                ),
+                "业务备注": "目的地 MANZANILLO Mexico，重量 43.2KG，物流方式 Express快递",
+            }
+        }
+    )
+
+    assert summary["logistics_quote_amount"] == 3368.62678
+    assert summary["logistics_quote_evidence"].startswith("50.22*1.3825*43.2")
+    assert summary["transport_mode"] == "EXPRESS"
+    assert summary["destination"] == "MANZANILLO Mexico"
+    assert summary["gross_weight_kg"] == 43.2
+    assert summary["ai_used"] is True
+    assert summary["ai_model"] == "deepseek-test"
 
 
 def test_extract_logistics_quote_candidates_reads_direct_40hq_quote_lines() -> None:
@@ -1288,7 +1365,7 @@ def test_extract_oa_goods_text_rows_and_skip_summary() -> None:
     assert rows[0]["material_code"] == "GJ003786"
     assert rows[0]["product_name"] == "灯管"
     assert rows[0]["quantity"] == "8"
-    assert rows[0]["unit"].lower() == "pcs"
+    assert rows[0]["unit"] == "个"
     assert rows[1]["material_code"] == "FL002598"
     assert rows[1]["product_name"] == "灯管+连接线"
     assert "material_code" not in rows[2]
@@ -1332,6 +1409,38 @@ def test_build_oa_item_values_allocates_header_weight_by_quantity() -> None:
 
     assert [item["material_code"] for item in items] == ["MHA101290", "MHA201290"]
     assert [item["gross_weight_kg"] for item in items] == [16.6, 16.6]
+
+
+def test_build_oa_item_values_keeps_spec_model_for_air_approval() -> None:
+    approval = {
+        "source_approval_no": "202608140001",
+        "source_instance_id": "PROC-AIR-SPEC",
+        "transport_mode_raw": "空运",
+        "logistics_no": "AIR-001",
+        "form_fields": {
+            "货物信息Bienes": [
+                {
+                    "rowValue": [
+                        {"label": "物料编码 Código de material", "value": "AIR001"},
+                        {"label": "物料名称（中文）Nombre del material (chino)", "value": "空运测试物料"},
+                        {"label": "物料名称（西语）Nombre del material (español)", "value": "Material de prueba"},
+                        {"label": "规格型号Especificación / Modelo", "value": "AIR-SPEC-01"},
+                        {"label": "数量Cantidad", "value": "3"},
+                        {"label": "单位Unidad", "value": "pieza"},
+                    ],
+                    "rowNumber": "ROW-1",
+                }
+            ],
+        },
+    }
+
+    items = build_oa_item_values_from_approval(approval)
+
+    assert len(items) == 1
+    assert items[0]["transport_mode"] == "AIR"
+    assert items[0]["spec_model"] == "AIR-SPEC-01"
+    assert items[0]["unit"] == "个"
+    assert items[0]["waybill_no"] == "AIR-001"
 
 
 def test_save_sea_approvals_to_erp_dry_run_returns_trace_preview() -> None:
@@ -1632,6 +1741,66 @@ def test_sync_oa_logistics_allocation_rule_creates_rule_and_recalculates(monkeyp
     assert recalculate_calls == [{"batch_name": "BATCH-001", "version_name": "VER-001"}]
 
 
+def test_sync_express_single_quote_creates_freight_rule(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    inserted_rules = []
+
+    class FakeDoc:
+        def __init__(self, payload):
+            self.payload = dict(payload)
+            self.name = payload.get("name") or f"RULE-{len(inserted_rules) + 1}"
+
+        def insert(self, **_kwargs):
+            self.name = f"RULE-{len(inserted_rules) + 1}"
+            self.payload["name"] = self.name
+            inserted_rules.append(self.payload)
+            return self
+
+    class FakeDB:
+        @staticmethod
+        def get_value(doctype, name_or_filters, fields=None, as_dict=False, **_kwargs):
+            if doctype == "Overseas Cost Allocation Rule":
+                return None
+            return None
+
+    class FakeFrappe:
+        db = FakeDB()
+
+        @staticmethod
+        def get_doc(payload):
+            return FakeDoc(payload)
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+
+    rule_result = _sync_oa_logistics_allocation_rule(
+        batch_name="202608131523000315085",
+        version_name="VER-EXPRESS",
+        approval_item={
+            "transport_mode": "EXPRESS",
+            "transport_mode_raw": "Express快递",
+            "logistics_quote_candidates": extract_logistics_quote_candidates_from_approval(
+                {
+                    "form_fields": {
+                        "物流报价Cotización de logística": (
+                            "DHL报价：\n"
+                            "运费=4075*（1+燃油附加费）+重量+155*（1+燃油附加费）+超过25kg的箱数+附加费\n"
+                            "50.22*1.3975*43.2KG+155*1.3975*1+155*1=3403.49434元\n"
+                            "每kg单价：78.7845912元"
+                        )
+                    }
+                }
+            ),
+        },
+    )
+
+    assert rule_result["action"] == "created"
+    assert rule_result["rule"]["amount"] == 3403.49434
+    assert rule_result["rule"]["currency"] == "RMB"
+    assert rule_result["rule"]["rule_code"] == "oa_logistics_freight"
+    assert inserted_rules[0]["expense_category"] == "国际物流费用"
+
+
 def test_refresh_existing_oa_logistics_details_repulls_missing_trace(monkeypatch) -> None:
     from overseas_costing.scripts import import_oa_logistics
 
@@ -1748,6 +1917,111 @@ def test_refresh_existing_oa_logistics_details_repulls_missing_trace(monkeypatch
     assert save_calls[0]["items"][0]["linked_purchase_approvals"][0]["source_instance_id"] == "PROC-PURCHASE-001"
     assert result["skipped_count"] == 2
     assert {item["batch_name"] for item in result["skipped_items"]} == {"BATCH-MISSING-ID", "BATCH-REVOKED"}
+
+
+def test_refresh_existing_oa_logistics_details_can_target_one_batch(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    query_calls = []
+    detail_calls = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            query_calls.append((doctype, kwargs))
+            return [
+                {
+                    "name": "BATCH-TARGET",
+                    "batch_no": "2k3o4tgh3e",
+                    "waybill_no": "2k3o4tgh3e",
+                    "current_version": "VER-TARGET",
+                    "source_approval_no": "202608051608000144099",
+                    "source_instance_id": "PROC-TARGET",
+                    "source_dingtalk_url": "",
+                    "extra_json": "{}",
+                }
+            ]
+
+    def fake_get_process_instance_detail(**kwargs):
+        detail_calls.append(kwargs)
+        return {"processInstanceId": kwargs["process_instance_id"]}
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_oa_logistics, "resolve_dingtalk_env_file", lambda env_file=None: "")
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "TOKEN")
+    monkeypatch.setattr(import_oa_logistics, "get_process_instance_detail", fake_get_process_instance_detail)
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "summarize_approval",
+        lambda detail, **_kwargs: {
+            "source_instance_id": detail["processInstanceId"],
+            "source_approval_no": "202608051608000144099",
+            "approval_status": "COMPLETED",
+            "form_fields": {"物流方式": "海运"},
+            "transport_mode_raw": "海运",
+            "logistics_no": "2k3o4tgh3e",
+        },
+    )
+    monkeypatch.setattr(
+        import_oa_logistics,
+        "save_sea_approvals_to_erp",
+        lambda result: {
+            "ok": True,
+            "created_count": 0,
+            "updated_count": 1,
+            "unchanged_count": 0,
+            "skipped_count": 0,
+            "items": [],
+            "skipped_items": [],
+        },
+    )
+
+    result = import_oa_logistics.refresh_existing_oa_logistics_details(
+        batch_no="2k3o4tgh3e",
+        source_approval_no="202608051608000144099",
+    )
+
+    assert result["ok"] is True
+    assert result["target"] == {
+        "target": "",
+        "batch_name": "",
+        "batch_no": "2k3o4tgh3e",
+        "source_approval_no": "202608051608000144099",
+    }
+    assert query_calls[0][0] == "Overseas Cost Batch"
+    assert query_calls[0][1]["filters"]["source_type"] == "oa_logistics"
+    assert query_calls[0][1]["or_filters"] == [
+        {"batch_no": "2k3o4tgh3e"},
+        {"source_approval_no": "202608051608000144099"},
+    ]
+    assert [call["process_instance_id"] for call in detail_calls] == ["PROC-TARGET"]
+
+
+def test_refresh_oa_logistics_detail_matches_target_across_identifiers(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    query_calls = []
+
+    class FakeFrappe:
+        @staticmethod
+        def get_all(doctype, **kwargs):
+            query_calls.append((doctype, kwargs))
+            return []
+
+    monkeypatch.setattr(import_oa_logistics, "frappe", FakeFrappe)
+    monkeypatch.setattr(import_oa_logistics, "resolve_dingtalk_env_file", lambda env_file=None: "")
+    monkeypatch.setattr(import_oa_logistics, "get_access_token", lambda **_kwargs: "TOKEN")
+
+    result = refresh_oa_logistics_detail("202608051608000144099", limit=10)
+
+    assert result["ok"] is True
+    assert result["target"]["target"] == "202608051608000144099"
+    assert query_calls[0][1]["filters"] == {"source_type": "oa_logistics"}
+    assert query_calls[0][1]["or_filters"] == [
+        {"name": "202608051608000144099"},
+        {"batch_no": "202608051608000144099"},
+        {"source_approval_no": "202608051608000144099"},
+    ]
 
 
 def test_sync_existing_oa_finished_times_backfills_only_empty(monkeypatch) -> None:

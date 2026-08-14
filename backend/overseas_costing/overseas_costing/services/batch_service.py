@@ -23,6 +23,11 @@ from overseas_costing.utils.dingtalk import build_dingtalk_order_payload, extrac
 
 
 DEFAULT_BATCH_RECENT_DAYS = 30
+CLASSIC_HISTORY_BATCH_KEYS = (
+    "HPCU5155607",
+    "FSCU8486789",
+    "MXT959831",
+)
 
 
 def _get_batch_source_meta(batch_name: str) -> dict:
@@ -184,9 +189,11 @@ from overseas_costing.utils.field_mapper import normalize_transport_mode
 EXCEL_COLUMNS = [
     {"excel_col": "A", "fieldname": "material_code", "label": "物料编码"},
     {"excel_col": "B", "fieldname": "product_name", "label": "产品名称"},
-    {"excel_col": "C", "fieldname": "unit_price", "label": "单价"},
+    {"excel_col": "B1", "fieldname": "spec_model", "label": "规格型号 Especificación / Modelo"},
+    {"excel_col": "C", "fieldname": "unit_price", "label": "采购单价"},
     {"excel_col": "C1", "fieldname": "purchase_currency", "label": "采购币种"},
-    {"excel_col": "D", "fieldname": "quantity", "label": "数量"},
+    {"excel_col": "D", "fieldname": "quantity", "label": "采购数量"},
+    {"excel_col": "D1", "fieldname": "unit", "label": "单位"},
     {"excel_col": "E", "fieldname": "goods_value", "label": "总货值"},
     {"excel_col": "F", "fieldname": "import_name", "label": "海关进口名称"},
     {"excel_col": "G", "fieldname": "hs_code", "label": "海关分类编码"},
@@ -237,7 +244,7 @@ EXCEL_COLUMNS = [
     {"excel_col": "AZ", "fieldname": "total_logistics_mxn", "label": "运输+清关+杂费 MXN"},
     {"excel_col": "BA", "fieldname": "alloc_price_mxn", "label": "分摊物流价格 MXN"},
     {"excel_col": "BB", "fieldname": "total_cost_rmb", "label": "综合成本 RMB"},
-    {"excel_col": "BC", "fieldname": "total_unit_rmb", "label": "综合物品单价 RMB"},
+    {"excel_col": "BC", "fieldname": "total_unit_rmb", "label": "综合单价 RMB"},
     {"excel_col": "BD", "fieldname": "project_collection", "label": "项目归集"},
     {"excel_col": "BE", "fieldname": "transport_mode", "label": "运输方式"},
 ]
@@ -597,6 +604,49 @@ def _quote_candidate_summary(candidate: dict) -> dict:
     }
 
 
+def _public_logistics_text_summary(summary: dict) -> dict:
+    if not isinstance(summary, dict):
+        return {}
+    allowed_fields = (
+        "transport_mode",
+        "transport_mode_raw",
+        "logistics_no",
+        "pre_delivery_date",
+        "destination",
+        "gross_weight_kg",
+        "logistics_quote_amount",
+        "logistics_quote_currency",
+        "logistics_quote_carrier",
+        "ai_used",
+        "ai_model",
+        "ai_confidence",
+        "ai_reason",
+    )
+    public_summary = {
+        key: summary.get(key)
+        for key in allowed_fields
+        if summary.get(key) not in (None, "")
+    }
+    evidence = str(summary.get("logistics_quote_evidence") or "").strip()
+    if evidence:
+        public_summary["logistics_quote_evidence"] = evidence[:180]
+    return public_summary
+
+
+def _logistics_text_summary(trace: dict) -> dict:
+    summary = trace.get("logistics_text_summary")
+    if isinstance(summary, dict):
+        return _public_logistics_text_summary(summary)
+    if isinstance(trace.get("form_fields"), dict):
+        try:
+            from overseas_costing.scripts.import_oa_logistics import extract_logistics_text_summary_from_approval
+
+            return _public_logistics_text_summary(extract_logistics_text_summary_from_approval(trace))
+        except Exception:
+            return {}
+    return {}
+
+
 def _build_batch_source_status(batch: dict, attachments: list[dict] | None = None) -> dict:
     """按业务资料链路汇总批次来源状态，供前端数据检查展示。"""
 
@@ -638,6 +688,7 @@ def _build_batch_source_status(batch: dict, attachments: list[dict] | None = Non
     quote_candidates = [_quote_candidate_summary(row) for row in quote_candidates if isinstance(row, dict)]
     confirmed_quote = trace.get("confirmed_logistics_quote")
     confirmed_quote = _quote_candidate_summary(confirmed_quote) if isinstance(confirmed_quote, dict) else {}
+    logistics_text_summary = _logistics_text_summary(trace)
 
     return {
         "source_no": source_no,
@@ -655,6 +706,7 @@ def _build_batch_source_status(batch: dict, attachments: list[dict] | None = Non
         "logistics_quote_candidate_count": len(quote_candidates),
         "logistics_quote_candidates": quote_candidates,
         "confirmed_logistics_quote": confirmed_quote,
+        "logistics_text_summary": logistics_text_summary,
         "has_confirmed_logistics_quote": bool(confirmed_quote.get("amount")),
         "latest_tax_certificate_reconciliation": _latest_tax_certificate_reconciliation(attachment_rows),
         "source_priority_policy": source_priority_service.get_source_priority_policy(),
@@ -747,15 +799,74 @@ def _to_int(value, default: int) -> int:
         return default
 
 
-def _build_recent_batch_filters(filters: dict) -> tuple[list, int, bool]:
+def _classic_history_or_filters() -> list[list[str]]:
+    or_filters: list[list[str]] = []
+    for key in CLASSIC_HISTORY_BATCH_KEYS:
+        or_filters.extend(
+            [
+                ["name", "=", key],
+                ["batch_no", "=", key],
+                ["source_approval_no", "=", key],
+            ]
+        )
+    return or_filters
+
+
+def _recent_start(recent_days: int) -> str:
+    start = datetime.now() - timedelta(days=max(recent_days, 1))
+    return start.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _build_default_batch_time_filters(filters: dict) -> tuple[list, list, int, bool]:
     recent_days = max(_to_int(filters.get("recent_days"), DEFAULT_BATCH_RECENT_DAYS), 1)
     include_history = _to_bool(filters.get("include_history"))
     has_keyword = bool(str(filters.get("keyword") or "").strip())
     if include_history or has_keyword:
-        return [], recent_days, False
+        return [], [], recent_days, False
 
-    start_date = (datetime.now() - timedelta(days=recent_days)).strftime("%Y-%m-%d %H:%M:%S")
-    return [["source_created_at", ">=", start_date]], recent_days, True
+    return [["source_created_at", ">=", _recent_start(recent_days)]], [], recent_days, True
+
+
+def _dedupe_batches(rows: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    items: list[dict] = []
+    for row in rows:
+        name = row.get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        items.append(row)
+    return items
+
+
+def _keyword_item_batch_names(keyword: str) -> list[str]:
+    if not keyword:
+        return []
+    like_keyword = f"%{keyword}%"
+    rows = frappe.get_all(
+        "Overseas Cost Item",
+        or_filters=[
+            ["material_code", "like", like_keyword],
+            ["product_name", "like", like_keyword],
+            ["product_name_es", "like", like_keyword],
+            ["import_name", "like", like_keyword],
+            ["hs_code", "like", like_keyword],
+            ["category", "like", like_keyword],
+            ["customs_no", "like", like_keyword],
+            ["waybill_no", "like", like_keyword],
+            ["source_doc_no", "like", like_keyword],
+        ],
+        fields=["batch"],
+        limit_page_length=200,
+    )
+    names: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        name = row.get("batch")
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
 
 
 def get_batch_list(filters: dict) -> dict:
@@ -774,40 +885,41 @@ def get_batch_list(filters: dict) -> dict:
         db_filters.append(["transport_mode", "=", filters["transport_mode"]])
     if filters.get("status"):
         db_filters.append(["status", "=", filters["status"]])
-    recent_filters, recent_days, recent_only = _build_recent_batch_filters(filters)
+    recent_filters, default_or_filters, recent_days, recent_only = _build_default_batch_time_filters(filters)
     db_filters.extend(recent_filters)
 
     keyword = filters.get("keyword")
+    fields = [
+        "name",
+        "batch_no",
+        "customs_no",
+        "waybill_no",
+        "transport_mode",
+        "project_collection",
+        "source_type",
+        "source_file_name",
+        "source_sheet",
+        "source_range",
+        "source_approval_no",
+        "source_instance_id",
+        "source_dingtalk_url",
+        "source_approval_status",
+        "source_attachment_count",
+        "source_created_at",
+        "status",
+        "current_version",
+        "item_count",
+        "total_goods_value",
+        "total_gross_weight_kg",
+        "estimated_total_cost_rmb",
+        "actual_total_cost_rmb",
+        "extra_json",
+        "modified",
+    ]
     query_kwargs = {
         "filters": db_filters,
-        "fields": [
-            "name",
-            "batch_no",
-            "customs_no",
-            "waybill_no",
-            "transport_mode",
-            "project_collection",
-            "source_type",
-            "source_file_name",
-            "source_sheet",
-            "source_range",
-            "source_approval_no",
-            "source_instance_id",
-            "source_dingtalk_url",
-            "source_approval_status",
-            "source_attachment_count",
-            "source_created_at",
-            "status",
-            "current_version",
-            "item_count",
-            "total_goods_value",
-            "total_gross_weight_kg",
-            "estimated_total_cost_rmb",
-            "actual_total_cost_rmb",
-            "extra_json",
-            "modified",
-        ],
-        "order_by": "modified desc",
+        "fields": fields,
+        "order_by": "source_created_at desc, modified desc",
         "limit_page_length": 200,
     }
     if keyword:
@@ -821,11 +933,51 @@ def get_batch_list(filters: dict) -> dict:
             ["project_collection", "like", like_keyword],
         ]
 
-    items = [
-        item
-        for item in frappe.get_all("Overseas Cost Batch", **query_kwargs)
-        if not is_hidden_approval_status(item.get("source_approval_status"))
-    ]
+    items = frappe.get_all("Overseas Cost Batch", **query_kwargs)
+    if keyword:
+        item_batch_names = _keyword_item_batch_names(str(keyword).strip())
+        if item_batch_names:
+            item_filters = []
+            if filters.get("transport_mode"):
+                item_filters.append(["transport_mode", "=", filters["transport_mode"]])
+            if filters.get("status"):
+                item_filters.append(["status", "=", filters["status"]])
+            item_filters.append(["name", "in", item_batch_names])
+            item_batches = frappe.get_all(
+                "Overseas Cost Batch",
+                filters=item_filters,
+                fields=fields,
+                order_by="source_created_at desc, modified desc",
+                limit_page_length=200,
+            )
+            items = _dedupe_batches(items + item_batches)
+    if default_or_filters:
+        classic_filters = []
+        if filters.get("transport_mode"):
+            classic_filters.append(["transport_mode", "=", filters["transport_mode"]])
+        if filters.get("status"):
+            classic_filters.append(["status", "=", filters["status"]])
+        classic_items = frappe.get_all(
+            "Overseas Cost Batch",
+            filters=classic_filters,
+            or_filters=default_or_filters,
+            fields=fields,
+            order_by="source_created_at desc, modified desc",
+            limit_page_length=50,
+        )
+        for item in classic_items:
+            item["is_classic_sample"] = 1
+            item["sample_note"] = "历史样本"
+        items = _dedupe_batches(items + classic_items)
+        items.sort(key=lambda row: (str(row.get("source_created_at") or ""), str(row.get("modified") or "")), reverse=True)
+
+    classic_keys = set(CLASSIC_HISTORY_BATCH_KEYS)
+    for item in items:
+        if item.get("batch_no") in classic_keys or item.get("source_approval_no") in classic_keys or item.get("name") in classic_keys:
+            item["is_classic_sample"] = 1
+            item["sample_note"] = "历史样本"
+
+    items = [item for item in items if not is_hidden_approval_status(item.get("source_approval_status"))]
     items = _attach_batch_source_status(items)
     items = _attach_batch_calculation_snapshot(items)
     for item in items:
@@ -1101,9 +1253,14 @@ EXPORT_MERGE_FIELDNAMES = {
     "project_collection",
     "transport_mode",
 }
+EXPORT_ZERO_AS_EMPTY_FIELDNAMES = {
+    "limpieza_contenedor",
+}
 EXPORT_MIN_COLUMN_WIDTHS = {
     "material_code": 14,
     "product_name": 28,
+    "spec_model": 28,
+    "unit": 12,
     "import_name": 34,
     "hs_code": 16,
     "category": 20,
@@ -1114,6 +1271,8 @@ EXPORT_MIN_COLUMN_WIDTHS = {
 }
 EXPORT_MAX_COLUMN_WIDTHS = {
     "product_name": 42,
+    "spec_model": 42,
+    "unit": 16,
     "import_name": 48,
     "category": 34,
     "customs_no": 30,
@@ -1123,6 +1282,7 @@ EXPORT_MAX_COLUMN_WIDTHS = {
 }
 EXPORT_WRAP_FIELDNAMES = {
     "product_name",
+    "spec_model",
     "import_name",
     "category",
     "customs_no",
@@ -1131,6 +1291,10 @@ EXPORT_WRAP_FIELDNAMES = {
     "transport_mode",
 }
 EXPORT_HEADER_LABELS = {
+    "spec_model": "规格型号\nEspecificación / Modelo",
+    "unit_price": "采购单价",
+    "quantity": "采购数量\n按采购单位",
+    "unit": "单位\nUnidad",
     "waybill_no": "中国到墨西哥\n运单号",
     "china_misc_rmb": "中国运输及\n相关杂费\nRMB",
     "china_misc_mxn": "中国运输及\n相关杂费\n折合MXN PESOS",
@@ -1160,7 +1324,7 @@ EXPORT_HEADER_LABELS = {
     "total_logistics_mxn": "中国到墨西哥\n运输+清关+杂费\nMXN PESOS",
     "alloc_price_mxn": "分摊运输+物流+杂费\n到产品的价格\nMXN PESOS",
     "total_cost_rmb": "综合成本\nRMB",
-    "total_unit_rmb": "综合物品单价\nRMB",
+    "total_unit_rmb": "综合单价\nRMB\n按采购单位",
 }
 EXPORT_HEADER_COLOR_GROUPS = {
     "tax": {
@@ -1242,6 +1406,12 @@ def _export_cell_value(item: dict, batch: dict, column: dict):
         value = _transport_label(value)
     if value in (None, ""):
         return ""
+    if fieldname in EXPORT_ZERO_AS_EMPTY_FIELDNAMES:
+        try:
+            if float(value) == 0:
+                return ""
+        except (TypeError, ValueError):
+            pass
     if fieldname in EXPORT_TEXT_FIELDS:
         return str(value)
     try:

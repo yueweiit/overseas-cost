@@ -612,6 +612,10 @@ def parse_packing_list_attachment(
 @frappe.whitelist()
 def refresh_existing_oa_logistics_details(
     limit: int | None = 200,
+    target: str | None = None,
+    batch_name: str | None = None,
+    batch_no: str | None = None,
+    source_approval_no: str | None = None,
     env_file: str | None = None,
     api_style: str = "auto",
     include_non_sea=0,
@@ -623,6 +627,34 @@ def refresh_existing_oa_logistics_details(
 
     include_non_sea_flag = str(include_non_sea or "").strip().lower() in ("1", "true", "yes", "y")
     return import_oa_logistics.refresh_existing_oa_logistics_details(
+        limit=limit,
+        target=target or "",
+        batch_name=batch_name or "",
+        batch_no=batch_no or "",
+        source_approval_no=source_approval_no or "",
+        env_file=env_file,
+        api_style=api_style,
+        include_non_sea=include_non_sea_flag,
+        access_token=access_token or "",
+    )
+
+
+@frappe.whitelist()
+def refresh_oa_logistics_detail(
+    target: str,
+    limit: int | None = 50,
+    env_file: str | None = None,
+    api_style: str = "auto",
+    include_non_sea=0,
+    access_token: str | None = None,
+) -> dict:
+    """按内部批次名、批次号或钉钉审批编号精准重拉一张国际物流 OA。"""
+
+    from overseas_costing.scripts import import_oa_logistics
+
+    include_non_sea_flag = str(include_non_sea or "").strip().lower() in ("1", "true", "yes", "y")
+    return import_oa_logistics.refresh_oa_logistics_detail(
+        target=target,
         limit=limit,
         env_file=env_file,
         api_style=api_style,

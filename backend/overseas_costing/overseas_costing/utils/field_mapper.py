@@ -26,6 +26,17 @@ TRANSPORT_MODE_MAP = {
     "express": "EXPRESS",
 }
 
+UNIT_MAP = {
+    "pieza": "个",
+    "piezas": "个",
+    "pza": "个",
+    "pzas": "个",
+    "pc": "个",
+    "pcs": "个",
+    "piece": "个",
+    "pieces": "个",
+}
+
 EXCEL_BLOCK_FIELD_MAP = {
     "sourceSheet": "source_sheet",
     "sourceRange": "source_range",
@@ -99,7 +110,22 @@ def _first_value(row: dict, *keys: str):
     for key in keys:
         if key in row and row.get(key) not in (None, ""):
             return row.get(key)
+    normalized_row = {}
+    for key, value in row.items():
+        normalized_key = _normalize_field_key(key)
+        if normalized_key and normalized_key not in normalized_row:
+            normalized_row[normalized_key] = value
+    for key in keys:
+        value = normalized_row.get(_normalize_field_key(key))
+        if value not in (None, ""):
+            return value
     return None
+
+
+def _normalize_field_key(value) -> str:
+    if value is None:
+        return ""
+    return "".join(char.lower() for char in str(value) if char.isalnum() or "\u4e00" <= char <= "\u9fff")
 
 
 def _clean_text(value):
@@ -109,6 +135,18 @@ def _clean_text(value):
         cleaned = value.strip()
         return cleaned or None
     return value
+
+
+def normalize_unit(value):
+    """把常见外语单位归一成财务页面使用的中文单位。"""
+
+    cleaned = _clean_text(value)
+    if not cleaned:
+        return None
+
+    normalized = str(cleaned).replace("\xa0", " ").strip()
+    key = normalized.lower().replace(" ", "").strip(".。")
+    return UNIT_MAP.get(key, normalized)
 
 
 def normalize_transport_mode(value):
@@ -136,45 +174,120 @@ def normalize_transport_mode(value):
     return None
 
 
+def _is_number_like(value) -> bool:
+    if value in (None, ""):
+        return False
+    try:
+        float(str(value).replace(",", "").strip())
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _looks_like_dimension(value) -> bool:
+    text = str(value or "").strip().lower().replace("×", "*").replace("x", "*")
+    parts = [part.strip() for part in text.split("*") if part.strip()]
+    return len(parts) >= 2 and all(_is_number_like(part) for part in parts)
+
+
+def _split_chinese_latin_name(value) -> tuple[str | None, str | None]:
+    text = str(value or "").strip()
+    if not text:
+        return None, None
+    for index in range(1, len(text)):
+        previous = text[index - 1]
+        current = text[index]
+        if "\u4e00" <= previous <= "\u9fff" and current.isalpha() and not ("\u4e00" <= current <= "\u9fff"):
+            return text[:index].strip() or None, text[index:].strip() or None
+    return text, None
+
+
+def _repair_shifted_oa_goods_row(mapped: dict) -> dict:
+    """修正钉钉表格偶发的列位移：规格->数量、数量->单位、单位->收件人。"""
+
+    quantity_as_unit = normalize_unit(mapped.get("quantity"))
+    if (
+        quantity_as_unit
+        and quantity_as_unit != str(mapped.get("quantity") or "").strip()
+        and _is_number_like(mapped.get("spec_model"))
+        and _looks_like_dimension(mapped.get("product_name_es"))
+    ):
+        shifted_recipient = mapped.get("unit")
+        if shifted_recipient and not mapped.get("recipient"):
+            mapped["recipient"] = shifted_recipient
+        mapped["unit"] = quantity_as_unit
+        mapped["quantity"] = mapped.get("spec_model")
+        mapped["spec_model"] = mapped.get("product_name_es")
+
+        product_name, product_name_es = _split_chinese_latin_name(mapped.get("product_name"))
+        mapped["product_name"] = product_name
+        mapped["product_name_es"] = product_name_es
+
+    return mapped
+
+
 def map_oa_row_to_item(row: dict) -> dict:
     """把 OA 国际物流单一行基础字段映射为系统明细结构。"""
 
-    return {
-        "material_code": _first_value(row, "物料编码 Código de material", "物料编码", "material_code"),
+    mapped = {
+        "material_code": _first_value(
+            row,
+            "物料编码 Código de material",
+            "物料编码",
+            "Código de material",
+            "Codigo de material",
+            "Código",
+            "Codigo",
+            "material_code",
+        ),
         "product_name": _first_value(
             row,
             "物料名称（中文）Nombre del material (chino)",
             "物料名称（中文）",
             "物料名称",
             "产品名称",
+            "Nombre del material (chino)",
+            "Nombre del material chino",
             "product_name",
         ),
         "product_name_es": _first_value(
             row,
             "物料名称（西语）Nombre del material (español)",
             "物料名称（西语）",
+            "Nombre del material (español)",
+            "Nombre del material espanol",
             "product_name_es",
         ),
-        "spec_model": _first_value(row, "规格型号Especificación / Modelo", "规格型号", "spec_model"),
-        "unit": _first_value(row, "单位Unidad", "单位", "unit"),
-        "recipient": _first_value(row, "收件人Destinatario", "收件人", "recipient"),
-        "category": _first_value(row, "物料类别TIPO", "大类", "category"),
-        "project_collection": _first_value(row, "项目proyecto", "项目", "project_collection"),
-        "quantity": _first_value(row, "数量Cantidad", "数量", "quantity"),
-        "gross_weight_kg": _first_value(row, "重量Peso（KG）", "重量", "gross_weight_kg"),
+        "spec_model": _first_value(
+            row,
+            "规格型号Especificación / Modelo",
+            "规格型号",
+            "Especificación / Modelo",
+            "Especificacion / Modelo",
+            "spec_model",
+        ),
+        "unit": normalize_unit(_first_value(row, "单位Unidad", "单位", "Unidad", "unit")),
+        "recipient": _first_value(row, "收件人Destinatario", "收件人", "Destinatario", "recipient"),
+        "category": _first_value(row, "物料类别TIPO", "大类", "TIPO", "category"),
+        "project_collection": _first_value(row, "项目proyecto", "项目", "proyecto", "project_collection"),
+        "quantity": _first_value(row, "数量Cantidad", "数量", "Cantidad", "Qty", "QTY", "quantity"),
+        "gross_weight_kg": _first_value(row, "重量Peso（KG）", "重量", "Peso（KG）", "Peso KG", "Peso", "gross_weight_kg"),
         "waybill_no": _first_value(
             row,
             "柜号/单号Número DE Logística",
             "柜号/单号",
+            "Número DE Logística",
+            "Numero DE Logistica",
             "运单号",
             "waybill_no",
         ),
         "transport_mode": normalize_transport_mode(
-            _first_value(row, "物流方式Camino Envío", "物流方式", "transport_mode")
+            _first_value(row, "物流方式Camino Envío", "物流方式", "Camino Envío", "Camino Envio", "transport_mode")
         ),
-        "source_remark": _first_value(row, "备注otro", "备注", "source_remark"),
+        "source_remark": _first_value(row, "备注otro", "备注", "otro", "source_remark"),
         "source_type": "OA_LOGISTICS",
     }
+    return _repair_shifted_oa_goods_row(mapped)
 
 
 def map_purchase_expense_row_to_item(row: dict) -> dict:
@@ -184,8 +297,8 @@ def map_purchase_expense_row_to_item(row: dict) -> dict:
         "material_code": _first_value(row, "物品编码Código", "物料编码", "material_code"),
         "product_name": _first_value(row, "物品名称Nombre del artículo", "物料名称", "product_name"),
         "spec_model": _first_value(row, "物品规格Especificacion", "规格型号", "spec_model"),
-        "quantity": _first_value(row, "数量Cantidad", "数量", "quantity"),
-        "unit": _first_value(row, "单位Unidad", "单位", "unit"),
+        "quantity": _first_value(row, "数量Cantidad", "数量", "Cantidad", "Qty", "QTY", "quantity"),
+        "unit": normalize_unit(_first_value(row, "单位Unidad", "单位", "Unidad", "unit")),
         "unit_price": _first_value(row, "单价Precio", "采购单价", "unit_price"),
         "goods_value": _first_value(row, "总金额Monto Total", "总货值", "goods_value"),
         "purchase_currency": _first_value(row, "币种Moneda", "采购币种", "purchase_currency"),
@@ -214,6 +327,7 @@ def map_packing_list_row_to_item(row: dict) -> dict:
             "qty",
             "actual_shipped_qty",
         ),
+        "unit": normalize_unit(_first_value(row, "单位", "Unidad", "unit", "申报单位")),
         "gross_weight_kg": _first_value(
             row,
             "毛重KG",
@@ -271,6 +385,9 @@ def map_yuewei_excel_block_item_to_item(block: dict, item_row, row_index: int | 
         value = extra.get(source_field)
         if value not in (None, ""):
             mapped[target_field] = value
+
+    if mapped.get("unit"):
+        mapped["unit"] = normalize_unit(mapped.get("unit"))
 
     if mapped.get("row_no") is None and mapped.get("excel_row_no"):
         mapped["row_no"] = mapped["excel_row_no"]

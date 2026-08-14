@@ -43,7 +43,7 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from overseas_costing.utils.dingtalk import build_dingtalk_order_payload, extract_dingtalk_instance_id
-from overseas_costing.utils.field_mapper import map_oa_row_to_item, map_purchase_expense_row_to_item
+from overseas_costing.utils.field_mapper import map_oa_row_to_item, map_purchase_expense_row_to_item, normalize_unit
 
 NEW_TOKEN_PATH = "/v1.0/oauth2/{corp_id}/token"
 NEW_LIST_INSTANCE_IDS_PATH = "/v1.0/workflow/processes/instanceIds/query"
@@ -126,6 +126,22 @@ LOGISTICS_WEIGHT_FIELD_ALIASES = (
     "Peso",
     "Peso KG",
 )
+LOGISTICS_PRE_DELIVERY_FIELD_ALIASES = (
+    "预计发货日期Fecha de Pre-entrega",
+    "预计发货日期",
+    "Fecha de Pre-entrega",
+    "Fecha de Pre entrega",
+    "Pre-entrega",
+)
+LOGISTICS_DESTINATION_FIELD_ALIASES = (
+    "目标地区Países destinatarios",
+    "目标地区Paises destinatarios",
+    "目标地区",
+    "Países destinatarios",
+    "Paises destinatarios",
+    "目的地",
+    "目的国",
+)
 GOODS_TABLE_FIELD_ALIASES = ("货物信息", "Bienes")
 PURCHASE_DETAIL_TABLE_FIELD_ALIASES = (
     "需求明细",
@@ -169,6 +185,7 @@ DEFAULT_LOGISTICS_PROCESS_CODE = "PROC-RIYJTXWV-CN52YRK70C5499JG0TJ03-3GSSHZQJ-5
 DEFAULT_FX_RMB_TO_MXN = 2.6
 DEFAULT_FX_USD_TO_RMB = round(1 / 0.1393, 6)
 MAX_AUDIT_TEXT_LENGTH = 20000
+MAX_AI_LOGISTICS_TEXT_LENGTH = 6000
 DINGTALK_ENV_FILE_CANDIDATES = (
     "/mnt/e/Yuewei开发/预算管理系统/dingtalk-expense-sync-main/.env",
     "/mnt/e/Yuewei开发/预算管理系统/dingtalk-budget-main/server/.env",
@@ -1945,6 +1962,199 @@ def extract_logistics_quote_candidates_from_approval(item: dict) -> list[dict]:
     return candidates
 
 
+def _build_logistics_ai_source_text(form_fields: dict[str, Any]) -> str:
+    """把审批正文的普通字段整理给 AI 兜底识别，避开附件/明细表等大块数据。"""
+
+    lines: list[str] = []
+    for fieldname, value in (form_fields or {}).items():
+        if isinstance(value, (dict, list)):
+            continue
+        text = _clean(value)
+        if not text:
+            continue
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        if len(text) > 1200:
+            text = f"{text[:1200]}..."
+        lines.append(f"{_clean(fieldname)}: {text}")
+    return "\n".join(lines)[:MAX_AI_LOGISTICS_TEXT_LENGTH]
+
+
+def _should_ai_parse_logistics_text(base_summary: dict, source_text: str) -> bool:
+    if not source_text or not _runtime_config_bool(
+        "OVERSEAS_COST_AI_TEXT_PARSE_ENABLED",
+        "overseas_cost_ai_text_parse_enabled",
+        default=True,
+    ):
+        return False
+    has_quote_marker = bool(re.search(r"(报价|运费|物流费|quote|cotizaci|dhl|fedex|ups|合计|总计)", source_text, re.IGNORECASE))
+    has_logistics_marker = bool(
+        re.search(r"(物流方式|camino|重量|peso|预计发货|pre[- ]?entrega|目标地区|destinat|目的地)", source_text, re.IGNORECASE)
+    )
+    if not (has_quote_marker or has_logistics_marker):
+        return False
+    missing_quote = not base_summary.get("logistics_quote_amount") and has_quote_marker
+    missing_core = not any(
+        base_summary.get(key)
+        for key in ("transport_mode", "gross_weight_kg", "pre_delivery_date", "destination", "logistics_no")
+    )
+    return missing_quote or missing_core
+
+
+def _call_ai_logistics_text_summary(source_text: str, base_summary: dict) -> dict:
+    """调用现有 DeepSeek/OpenAI 兼容配置，兜底识别审批正文基础字段。"""
+
+    try:
+        from overseas_costing.services import allocation_service
+
+        config = allocation_service._ai_config()
+        if not config.get("api_key"):
+            return {}
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是钉钉国际物流审批正文的基础字段识别助手。"
+                    "只能从用户提供的原文中抽取字段，不得猜测、不得改写物料明细、不得新增费用。"
+                    "输出必须是 JSON 对象；没有明确值就返回空字符串或 null。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "task": "从审批正文中识别整票物流基础信息。报价金额只取最终总额，不取每kg单价。",
+                        "output_schema": {
+                            "transport_mode": "SEA/AIR/EXPRESS 或空",
+                            "transport_mode_raw": "原文中的物流方式",
+                            "logistics_no": "柜号、运单号或单号",
+                            "pre_delivery_date": "预计发货日期，保持原文日期即可",
+                            "destination": "目标地区/目的地",
+                            "gross_weight_kg": "整票重量KG，数字",
+                            "logistics_quote_amount": "物流报价最终总金额，数字",
+                            "logistics_quote_currency": "RMB/USD/MXN",
+                            "logistics_quote_carrier": "承运商/货代，例如 DHL",
+                            "logistics_quote_evidence": "能证明报价金额的原文短句",
+                            "confidence": "0-1 数字",
+                            "reason": "一句中文说明",
+                        },
+                        "already_parsed_by_rules": base_summary,
+                        "approval_text": source_text,
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            },
+        ]
+        content = allocation_service._call_chat_completions(config, messages)
+        parsed = allocation_service._extract_json_object(content)
+        if not isinstance(parsed, dict):
+            return {}
+        return _normalize_ai_logistics_text_summary(parsed, config.get("model"))
+    except Exception as exc:
+        return {"ai_used": False, "ai_error": str(exc)[:240]}
+
+
+def _normalize_ai_logistics_text_summary(parsed: dict, model: str | None = "") -> dict:
+    mode_raw = _clean(parsed.get("transport_mode_raw") or parsed.get("transport_mode"))
+    amount = _parse_money_amount(parsed.get("logistics_quote_amount"))
+    weight = _to_number_or_none(parsed.get("gross_weight_kg"))
+    confidence = _to_number_or_none(parsed.get("confidence"))
+    return {
+        "transport_mode": detect_approval_transport_mode(parsed.get("transport_mode") or mode_raw),
+        "transport_mode_raw": mode_raw,
+        "logistics_no": _clean(parsed.get("logistics_no")),
+        "pre_delivery_date": _clean(parsed.get("pre_delivery_date")),
+        "destination": _clean(parsed.get("destination")),
+        "gross_weight_kg": weight,
+        "logistics_quote_amount": amount,
+        "logistics_quote_currency": _normalize_currency_code(parsed.get("logistics_quote_currency")) if parsed.get("logistics_quote_currency") else "",
+        "logistics_quote_carrier": _clean(parsed.get("logistics_quote_carrier")),
+        "logistics_quote_evidence": _clean(parsed.get("logistics_quote_evidence")),
+        "ai_used": True,
+        "ai_model": _clean(model),
+        "ai_confidence": confidence,
+        "ai_reason": _clean(parsed.get("reason")),
+    }
+
+
+def _merge_ai_logistics_text_summary(base_summary: dict, ai_summary: dict) -> dict:
+    if not ai_summary:
+        return base_summary
+
+    merged = dict(base_summary)
+    changed = False
+    fill_fields = (
+        "transport_mode",
+        "transport_mode_raw",
+        "logistics_no",
+        "pre_delivery_date",
+        "destination",
+        "gross_weight_kg",
+        "logistics_quote_amount",
+        "logistics_quote_currency",
+        "logistics_quote_carrier",
+        "logistics_quote_evidence",
+    )
+    for fieldname in fill_fields:
+        current = merged.get(fieldname)
+        candidate = ai_summary.get(fieldname)
+        if current not in (None, "") or candidate in (None, ""):
+            continue
+        merged[fieldname] = candidate
+        changed = True
+
+    if changed:
+        merged["ai_used"] = bool(ai_summary.get("ai_used"))
+        merged["ai_model"] = ai_summary.get("ai_model") or ""
+        merged["ai_confidence"] = ai_summary.get("ai_confidence")
+        merged["ai_reason"] = ai_summary.get("ai_reason") or ""
+    elif ai_summary.get("ai_error"):
+        merged["ai_error"] = ai_summary.get("ai_error")
+    return merged
+
+
+def extract_logistics_text_summary_from_approval(item: dict) -> dict:
+    """提取钉钉国际物流审批正文里的整票基础信息。"""
+
+    form_fields = item.get("form_fields") or {}
+    quote_field, quote_text = _find_field_entry(form_fields, LOGISTICS_QUOTE_FIELD_ALIASES)
+    pre_delivery_field, pre_delivery_date = _find_field_entry(form_fields, LOGISTICS_PRE_DELIVERY_FIELD_ALIASES)
+    destination_field, destination = _find_field_entry(form_fields, LOGISTICS_DESTINATION_FIELD_ALIASES)
+    weight_field, weight_value = _find_field_entry(form_fields, LOGISTICS_WEIGHT_FIELD_ALIASES)
+    transport_mode_raw = item.get("transport_mode_raw") or _find_field_value(form_fields, TRANSPORT_FIELD_ALIASES)
+    logistics_no = item.get("logistics_no") or _find_field_value(form_fields, BATCH_NO_FIELD_ALIASES)
+
+    quote_candidates = item.get("logistics_quote_candidates")
+    if not isinstance(quote_candidates, list):
+        quote_candidates = extract_logistics_quote_candidates_from_approval(item)
+    first_quote = quote_candidates[0] if quote_candidates else {}
+
+    summary = {
+        "transport_mode": detect_approval_transport_mode(transport_mode_raw),
+        "transport_mode_raw": _clean(transport_mode_raw),
+        "logistics_no": _clean(logistics_no),
+        "pre_delivery_date": _clean(pre_delivery_date),
+        "pre_delivery_field": pre_delivery_field,
+        "destination": _clean(destination),
+        "destination_field": destination_field,
+        "gross_weight_kg": _to_number_or_none(weight_value),
+        "gross_weight_field": weight_field,
+        "logistics_quote_field": quote_field,
+        "logistics_quote_text": _clean(quote_text),
+        "logistics_quote_amount": first_quote.get("amount"),
+        "logistics_quote_currency": first_quote.get("currency"),
+        "logistics_quote_carrier": first_quote.get("carrier"),
+        "logistics_quote_evidence": first_quote.get("evidence_line"),
+    }
+    source_text = _build_logistics_ai_source_text(form_fields)
+    if _should_ai_parse_logistics_text(summary, source_text):
+        summary = _merge_ai_logistics_text_summary(
+            summary,
+            _call_ai_logistics_text_summary(source_text, summary),
+        )
+    return summary
+
+
 def _find_component_value(instance: dict, aliases: tuple[str, ...]) -> Any:
     normalized_aliases = [_normalize_key(alias) for alias in aliases]
     for component in _iter_form_components(instance):
@@ -2436,6 +2646,7 @@ def summarize_approval(instance: dict, *, process_instance_id: str = "", include
     }
     summary["logistics_fee"] = extract_logistics_fee_from_approval(summary)
     summary["logistics_quote_candidates"] = extract_logistics_quote_candidates_from_approval(summary)
+    summary["logistics_text_summary"] = extract_logistics_text_summary_from_approval(summary)
     if include_raw:
         summary["raw_instance"] = instance
     return summary
@@ -2661,7 +2872,7 @@ def _parse_oa_goods_text_rows(value: Any) -> list[dict]:
     rows: list[dict] = []
     quantity_pattern = re.compile(
         r"^(?P<body>.+?)\s*(?:[-－—]+\s*)?(?P<quantity>\d+(?:\.\d+)?)\s*"
-        r"(?P<unit>pcs?|件|个|箱|袋|套|卷|支|台|片|kg|kgs|公斤|千克|吨|m3|cbm|方)\s*$",
+        r"(?P<unit>pcs?|pieces?|pzas?|piezas?|件|个|箱|袋|套|卷|支|台|片|kg|kgs|公斤|千克|吨|m3|cbm|方)\s*$",
         re.IGNORECASE,
     )
     material_code_pattern = re.compile(
@@ -2686,7 +2897,7 @@ def _parse_oa_goods_text_rows(value: Any) -> list[dict]:
         row = {
             "product_name": _clean(code_match.group("product_name")) if code_match else body,
             "quantity": quantity_match.group("quantity"),
-            "unit": quantity_match.group("unit"),
+            "unit": normalize_unit(quantity_match.group("unit")),
             "_oa_goods_source": "text",
         }
         if code_match:
@@ -2811,7 +3022,7 @@ def _parse_purchase_text_chunk(chunk: str, *, currency: Any = "", source_field: 
     product_name = _purchase_text_value(text, ("物品名称", "物料名称", "品名", "Nombre del artículo", "Nombre del articulo", "Nombre"))
     spec_model = _purchase_text_value(text, ("物品规格", "规格型号", "规格", "Especificación", "Especificacion"))
     quantity = _purchase_text_number(text, ("数量", "Cantidad", "Qty", "QTY"))
-    unit = _purchase_text_value(text, ("单位", "Unidad"))
+    unit = normalize_unit(_purchase_text_value(text, ("单位", "Unidad")))
     unit_price = _purchase_text_number(text, ("单价", "Precio", "Unit Price"))
     goods_value = _purchase_text_number(text, ("总金额", "Monto Total", "金额", "Total"))
 
@@ -3574,6 +3785,22 @@ def _sync_oa_logistics_allocation_rule(
 
     fee = approval_item.get("logistics_fee") if isinstance(approval_item.get("logistics_fee"), dict) else {}
     fee = fee or extract_logistics_fee_from_approval(approval_item)
+    if not fee and detect_approval_transport_mode(
+        approval_item.get("transport_mode") or approval_item.get("transport_mode_raw") or (approval_item.get("form_fields") or {})
+    ) == "EXPRESS":
+        quote_candidates = approval_item.get("logistics_quote_candidates")
+        if not isinstance(quote_candidates, list):
+            quote_candidates = extract_logistics_quote_candidates_from_approval(approval_item)
+        valid_quotes = [candidate for candidate in quote_candidates if _parse_money_amount(candidate.get("amount")) is not None]
+        if len(valid_quotes) == 1:
+            selected = valid_quotes[0]
+            fee = {
+                "amount": selected.get("amount"),
+                "currency": selected.get("currency") or "RMB",
+                "source_label": "快递物流报价",
+                "source_field": selected.get("source_field") or "物流报价",
+                "source_value": selected.get("evidence_line") or selected.get("source_value") or "",
+            }
     parsed_amount = _parse_money_amount(fee.get("amount")) if fee else None
     if not fee or parsed_amount is None:
         return {
@@ -4143,6 +4370,10 @@ def _resolve_batch_source_instance_id(row: dict, trace: dict) -> str:
 def refresh_existing_oa_logistics_details(
     limit: int | None = 200,
     *,
+    target: str = "",
+    batch_name: str = "",
+    batch_no: str = "",
+    source_approval_no: str = "",
     env_file: str | None = None,
     api_style: str = "auto",
     include_non_sea: bool = False,
@@ -4178,10 +4409,38 @@ def refresh_existing_oa_logistics_details(
     )
 
     page_length = max(1, min(int(limit or 200), 1000))
-    rows = frappe.get_all(
-        "Overseas Cost Batch",
-        filters={"source_type": "oa_logistics"},
-        fields=[
+    target_value = _clean(target)
+    target_batch_name = _clean(batch_name)
+    target_batch_no = _clean(batch_no)
+    target_source_approval_no = _clean(source_approval_no)
+    filters: dict[str, Any] = {"source_type": "oa_logistics"}
+    or_filters: list[dict[str, str]] = []
+    if target_value:
+        or_filters.extend(
+            [
+                {"name": target_value},
+                {"batch_no": target_value},
+                {"source_approval_no": target_value},
+            ]
+        )
+    elif target_batch_name:
+        filters["name"] = target_batch_name
+    else:
+        if target_batch_no and target_source_approval_no:
+            or_filters.extend(
+                [
+                    {"batch_no": target_batch_no},
+                    {"source_approval_no": target_source_approval_no},
+                ]
+            )
+        elif target_batch_no:
+            filters["batch_no"] = target_batch_no
+        elif target_source_approval_no:
+            filters["source_approval_no"] = target_source_approval_no
+
+    query_kwargs: dict[str, Any] = {
+        "filters": filters,
+        "fields": [
             "name",
             "batch_no",
             "waybill_no",
@@ -4191,9 +4450,12 @@ def refresh_existing_oa_logistics_details(
             "source_dingtalk_url",
             "extra_json",
         ],
-        limit_page_length=page_length,
-        order_by="modified desc",
-    )
+        "limit_page_length": page_length,
+        "order_by": "modified desc",
+    }
+    if or_filters and not target_batch_name:
+        query_kwargs["or_filters"] = or_filters
+    rows = frappe.get_all("Overseas Cost Batch", **query_kwargs)
 
     refreshed_items: list[dict] = []
     skipped_items: list[dict] = []
@@ -4278,6 +4540,12 @@ def refresh_existing_oa_logistics_details(
         "dry_run": False,
         "env_file_loaded": bool(resolved_env_file),
         "api_style": resolved_api_style,
+        "target": {
+            "target": target_value,
+            "batch_name": target_batch_name,
+            "batch_no": target_batch_no,
+            "source_approval_no": target_source_approval_no,
+        },
         "scanned_count": len(rows),
         "detail_count": len(refreshed_items),
         "saved_count": len(saved_items),
@@ -4297,6 +4565,97 @@ def refresh_existing_oa_logistics_details(
             f"已重拉 {len(refreshed_items)} 条国际物流 OA 详情，并按关联采购支出 OA 同步采购字段；"
             f"采购字段更新 {purchase_updated_count} 行，变更 {purchase_changed_field_count} 个字段。"
         ),
+    }
+
+
+def refresh_oa_logistics_detail(
+    target: str,
+    limit: int | None = 50,
+    *,
+    env_file: str | None = None,
+    api_style: str = "auto",
+    include_non_sea: bool = False,
+    access_token: str = "",
+) -> dict:
+    """Refresh one OA logistics batch by internal name, batch number, or approval number."""
+
+    return refresh_existing_oa_logistics_details(
+        limit=limit,
+        target=target,
+        env_file=env_file,
+        api_style=api_style,
+        include_non_sea=include_non_sea,
+        access_token=access_token,
+    )
+
+
+def backfill_express_single_quote_freight_rules(limit: int | None = 500) -> dict:
+    """为历史快递单补充“唯一明确物流报价”的运费分摊规则并重算。"""
+
+    if frappe is None:
+        return {"ok": False, "message": "当前未连接 Frappe。", "updated_count": 0, "skipped_count": 0}
+
+    page_length = max(1, min(int(limit or 500), 5000))
+    rows = frappe.get_all(
+        "Overseas Cost Batch",
+        filters={"transport_mode": "EXPRESS"},
+        fields=["name", "batch_no", "current_version", "extra_json"],
+        limit_page_length=page_length,
+        order_by="modified desc",
+    )
+    updated_items: list[dict] = []
+    skipped_items: list[dict] = []
+    for row in rows:
+        version_name = row.get("current_version") or _ensure_oa_trace_version(row["name"], row.get("batch_no") or row["name"])
+        payload = _json_loads_dict(row.get("extra_json"))
+        trace = payload.get("oa_logistics_trace") if isinstance(payload.get("oa_logistics_trace"), dict) else payload
+        if not isinstance(trace, dict):
+            skipped_items.append({"batch_name": row["name"], "reason": "缺少 OA 追溯数据"})
+            continue
+        candidates = trace.get("logistics_quote_candidates")
+        if not isinstance(candidates, list):
+            candidates = extract_logistics_quote_candidates_from_approval({"form_fields": trace.get("form_fields") or {}})
+        valid_candidates = [candidate for candidate in candidates if _parse_money_amount((candidate or {}).get("amount")) is not None]
+        if len(valid_candidates) != 1:
+            skipped_items.append({"batch_name": row["name"], "reason": f"报价候选数量不是 1：{len(valid_candidates)}"})
+            continue
+
+        result = _sync_oa_logistics_allocation_rule(
+            batch_name=row["name"],
+            version_name=version_name,
+            approval_item={
+                "transport_mode": "EXPRESS",
+                "logistics_quote_candidates": valid_candidates,
+            },
+        )
+        recalculate_result = _recalculate_after_purchase_sync(
+            batch_name=row["name"],
+            version_name=version_name,
+            purchase_sync={"ok": True, "updated_count": 0},
+            logistics_fee_sync=result,
+        )
+        if result.get("action") in {"created", "updated"}:
+            updated_items.append(
+                {
+                    "batch_name": row["name"],
+                    "batch_no": row.get("batch_no"),
+                    "rule_result": result,
+                    "recalculate_result": recalculate_result,
+                }
+            )
+        else:
+            skipped_items.append({"batch_name": row["name"], "batch_no": row.get("batch_no"), "reason": result.get("reason") or result.get("action")})
+
+    if updated_items and hasattr(frappe.db, "commit"):
+        frappe.db.commit()
+
+    return {
+        "ok": True,
+        "scanned_count": len(rows),
+        "updated_count": len(updated_items),
+        "skipped_count": len(skipped_items),
+        "updated_items": updated_items[:50],
+        "skipped_items": skipped_items[:50],
     }
 
 
@@ -5418,7 +5777,7 @@ def _build_scheduled_pull_window() -> tuple[str, str]:
         _runtime_config_int(
             "DINGTALK_SCHEDULE_LOOKBACK_DAYS",
             "overseas_costing_dingtalk_schedule_lookback_days",
-            default=7,
+            default=30,
         ),
         1,
     )
