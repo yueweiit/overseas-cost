@@ -3928,6 +3928,52 @@ def _sync_oa_logistics_allocation_rule(
     }
 
 
+def _is_database_connection_lost(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "server has gone away",
+            "lost connection",
+            "connection already closed",
+            "mysql server has gone away",
+            "(2006",
+            "(2013",
+        )
+    )
+
+
+def _reset_database_connection() -> None:
+    if frappe is None:
+        return
+    try:
+        frappe.db.rollback()
+    except Exception:
+        pass
+    try:
+        frappe.db.close()
+    except Exception:
+        pass
+    if hasattr(frappe.db, "connect"):
+        frappe.db.connect()
+
+
+def _run_with_database_retry(operation):
+    try:
+        return operation()
+    except Exception as exc:
+        if not _is_database_connection_lost(exc):
+            raise
+        _reset_database_connection()
+        return operation()
+
+
+def _commit_oa_pull_progress() -> None:
+    if frappe is None or not hasattr(frappe.db, "commit"):
+        return
+    frappe.db.commit()
+
+
 def _recalculate_after_purchase_sync(
     *,
     batch_name: str,
@@ -4933,11 +4979,44 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
         if not values.get("batch_no"):
             skipped_items.append({"reason": "缺少批次号、审批编号和实例ID", "source_instance_id": item.get("source_instance_id")})
             continue
-        existing_name = _resolve_existing_batch_name(values)
-        if existing_name:
-            saved = _update_oa_trace_batch(existing_name, values)
-        else:
-            saved = _create_oa_trace_batch(values)
+        def save_one_approval():
+            existing_name = _resolve_existing_batch_name(values)
+            if existing_name:
+                saved_row = _update_oa_trace_batch(existing_name, values)
+            else:
+                saved_row = _create_oa_trace_batch(values)
+
+            item_sync = _sync_oa_goods_items(
+                batch_name=saved_row["batch_name"],
+                version_name=saved_row.get("version_name") or "",
+                approval_item=item,
+                only_when_empty=True,
+            )
+            attachment_sync = _sync_oa_form_attachments(
+                batch_name=saved_row["batch_name"],
+                version_name=saved_row.get("version_name") or "",
+                approval_item=item,
+            )
+            purchase_sync = _sync_linked_purchase_fields(
+                batch_name=saved_row["batch_name"],
+                version_name=saved_row.get("version_name") or "",
+                approval_item=item,
+            )
+            logistics_fee_sync = _sync_oa_logistics_allocation_rule(
+                batch_name=saved_row["batch_name"],
+                version_name=saved_row.get("version_name") or "",
+                approval_item=item,
+            )
+            recalculate_sync = _recalculate_after_purchase_sync(
+                batch_name=saved_row["batch_name"],
+                version_name=saved_row.get("version_name") or "",
+                purchase_sync=purchase_sync,
+                logistics_fee_sync=logistics_fee_sync,
+            )
+            _commit_oa_pull_progress()
+            return saved_row, item_sync, attachment_sync, purchase_sync, logistics_fee_sync, recalculate_sync
+
+        saved, item_sync, attachment_sync, purchase_sync, logistics_fee_sync, recalculate_sync = _run_with_database_retry(save_one_approval)
 
         if saved["action"] == "created":
             created_count += 1
@@ -4945,33 +5024,6 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
             updated_count += 1
         else:
             unchanged_count += 1
-        item_sync = _sync_oa_goods_items(
-            batch_name=saved["batch_name"],
-            version_name=saved.get("version_name") or "",
-            approval_item=item,
-            only_when_empty=True,
-        )
-        attachment_sync = _sync_oa_form_attachments(
-            batch_name=saved["batch_name"],
-            version_name=saved.get("version_name") or "",
-            approval_item=item,
-        )
-        purchase_sync = _sync_linked_purchase_fields(
-            batch_name=saved["batch_name"],
-            version_name=saved.get("version_name") or "",
-            approval_item=item,
-        )
-        logistics_fee_sync = _sync_oa_logistics_allocation_rule(
-            batch_name=saved["batch_name"],
-            version_name=saved.get("version_name") or "",
-            approval_item=item,
-        )
-        recalculate_sync = _recalculate_after_purchase_sync(
-            batch_name=saved["batch_name"],
-            version_name=saved.get("version_name") or "",
-            purchase_sync=purchase_sync,
-            logistics_fee_sync=logistics_fee_sync,
-        )
         saved.update(
             {
                 "batch_no": values.get("batch_no"),
@@ -4987,8 +5039,7 @@ def save_sea_approvals_to_erp(result: dict) -> dict:
         )
         saved_items.append(saved)
 
-    if hasattr(frappe.db, "commit"):
-        frappe.db.commit()
+    _commit_oa_pull_progress()
 
     return {
         "ok": True,
