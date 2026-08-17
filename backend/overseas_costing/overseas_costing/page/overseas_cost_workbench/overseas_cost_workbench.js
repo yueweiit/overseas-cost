@@ -1610,6 +1610,8 @@ class OverseasCostWorkbench {
       const message = `钉钉拉取完成：新增 ${save.created_count || 0}，更新 ${save.updated_count || 0}，已存在 ${save.unchanged_count || 0}，跳过 ${save.skipped_count || 0}`;
       frappe.show_alert({ message, indicator: "green" });
       this.resetFilterValues();
+      this.updateBatchUrl("", { replace: true, view: "" });
+      this.focusedBatchName = "";
       await this.loadBatches();
       dialog.$wrapper.data("ocw-pull-completed", true);
       this.setOaPullPrimaryState(dialog, "completed");
