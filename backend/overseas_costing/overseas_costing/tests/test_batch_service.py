@@ -97,7 +97,7 @@ def test_sea_air_express_share_same_item_columns() -> None:
     assert {"spec_model", "product_name_es", "unit", "purchase_currency"}.issubset(set(EXTRA_ITEM_FIELDS + fieldnames))
 
 
-def test_get_batch_list_defaults_to_recent_days_without_classic_samples(monkeypatch) -> None:
+def test_get_batch_list_defaults_to_recent_days_with_classic_samples(monkeypatch) -> None:
     from overseas_costing.services import batch_service
 
     calls = []
@@ -106,6 +106,18 @@ def test_get_batch_list_defaults_to_recent_days_without_classic_samples(monkeypa
         @staticmethod
         def get_all(doctype, **kwargs):
             calls.append((doctype, kwargs))
+            if kwargs.get("or_filters"):
+                return [
+                    {
+                        "name": "BATCH-HPCU",
+                        "batch_no": "HPCU5155607",
+                        "transport_mode": "SEA",
+                        "source_created_at": "2026-01-29 10:20:00",
+                        "source_approval_status": "COMPLETED",
+                        "extra_json": "{}",
+                        "modified": "2026-08-10 10:00:00",
+                    }
+                ]
             return [
                 {
                     "name": "BATCH-RECENT",
@@ -126,10 +138,14 @@ def test_get_batch_list_defaults_to_recent_days_without_classic_samples(monkeypa
     result = get_batch_list({"transport_mode": "", "recent_days": 30})
 
     assert result["ok"] is True
-    assert result["total"] == 1
-    assert len(calls) == 1
+    assert result["total"] == 2
+    assert len(calls) == 2
     assert calls[0][1]["filters"] == [["source_created_at", ">=", "2026-07-15 00:00:00"]]
-    assert all(not item.get("is_classic_sample") for item in result["items"])
+    assert calls[1][1]["filters"] == []
+    assert ["batch_no", "=", "HPCU5155607"] in calls[1][1]["or_filters"]
+    classic_item = next(item for item in result["items"] if item["batch_no"] == "HPCU5155607")
+    assert classic_item["is_classic_sample"] == 1
+    assert classic_item["sample_note"]
 
 
 def test_get_batch_list_keyword_can_find_history_batch_by_item_field(monkeypatch) -> None:

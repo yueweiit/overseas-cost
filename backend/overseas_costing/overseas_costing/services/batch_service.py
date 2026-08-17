@@ -832,7 +832,7 @@ def _build_default_batch_time_filters(filters: dict) -> tuple[list, list, int, b
     if include_history or has_keyword:
         return [], [], recent_days, False
 
-    return [["source_created_at", ">=", _recent_start(recent_days)]], [], recent_days, True
+    return [["source_created_at", ">=", _recent_start(recent_days)]], _classic_history_or_filters(), recent_days, True
 
 
 def _dedupe_batches(rows: list[dict]) -> list[dict]:
