@@ -44,6 +44,7 @@ from overseas_costing.services.import_service import (
     preview_tax_certificate_pdf,
     preview_yuewei_excel_file,
     save_tax_certificate_parse_result,
+    save_manual_logistics_quote,
     apply_packing_list_fillable_fields,
     download_oa_form_attachment,
 )
@@ -105,6 +106,13 @@ def test_resolve_attachment_user_id_prefers_configured_active_user(monkeypatch) 
 
 def test_confirm_logistics_quote_candidate_requires_frappe_environment() -> None:
     result = confirm_logistics_quote_candidate(batch_name="BATCH-001", candidate_index=0)
+
+    assert result["ok"] is False
+    assert result["dry_run"] is True
+
+
+def test_save_manual_logistics_quote_requires_frappe_environment() -> None:
+    result = save_manual_logistics_quote(batch_name="BATCH-001", amount=6160.615461)
 
     assert result["ok"] is False
     assert result["dry_run"] is True

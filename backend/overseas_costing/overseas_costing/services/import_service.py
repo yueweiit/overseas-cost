@@ -2849,6 +2849,13 @@ def _logistics_quote_snapshot(candidate: dict) -> dict:
         "amount": _to_float(candidate.get("amount")),
         "currency": str(candidate.get("currency") or "RMB").strip() or "RMB",
         "volume_m3": candidate.get("volume_m3"),
+        "gross_weight_kg": candidate.get("gross_weight_kg"),
+        "chargeable_weight_kg": candidate.get("chargeable_weight_kg"),
+        "unit_freight_per_kg": candidate.get("unit_freight_per_kg"),
+        "billing_method": str(candidate.get("billing_method") or "").strip(),
+        "allocation_basis": str(candidate.get("allocation_basis") or "").strip(),
+        "pre_delivery_date": str(candidate.get("pre_delivery_date") or "").strip(),
+        "destination": str(candidate.get("destination") or "").strip(),
         "evidence_line": str(candidate.get("evidence_line") or "").strip(),
         "source_field": str(candidate.get("source_field") or "").strip(),
     }
@@ -2952,6 +2959,137 @@ def confirm_logistics_quote_candidate(
         frappe.db.commit()
 
     message = f"已确认使用 {carrier_label} 报价 {selected['amount']:g} {selected['currency']}，并生成物流费用分摊规则。"
+    return {
+        "ok": True,
+        "batch_name": batch_doc_name,
+        "version_name": resolved_version_name,
+        "confirmed_quote": confirmed,
+        "rule_result": rule_result,
+        "recalculate_result": recalculate_result,
+        "message": _message_with_recalculate_result(message, recalculate_result),
+    }
+
+
+def _normalize_manual_allocation_basis(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"goods_value", "gross_weight", "volume", "chargeable_weight"}:
+        return text
+    if "计费" in text or "charge" in text:
+        return "chargeable_weight"
+    if "体积" in text or "volume" in text or "cbm" in text:
+        return "volume"
+    if "货值" in text or "金额" in text or "goods" in text or "value" in text:
+        return "goods_value"
+    return "gross_weight"
+
+
+def save_manual_logistics_quote(
+    *,
+    batch_name: str,
+    amount,
+    version_name: str | None = None,
+    carrier: str | None = None,
+    currency: str | None = "RMB",
+    allocation_basis: str | None = "gross_weight",
+    gross_weight_kg=None,
+    chargeable_weight_kg=None,
+    unit_freight_per_kg=None,
+    billing_method: str | None = None,
+    evidence_text: str | None = None,
+    pre_delivery_date: str | None = None,
+    destination: str | None = None,
+    note: str | None = None,
+) -> dict:
+    """手工补录物流报价，写入整票物流费用分摊规则并保留来源痕迹。"""
+
+    if frappe is None:
+        return {
+            "ok": False,
+            "dry_run": True,
+            "message": "当前未连接 Frappe，不能保存物流报价补录。",
+        }
+
+    batch_doc_name = _resolve_batch_name(batch_name)
+    if not batch_doc_name:
+        return {"ok": False, "message": "未找到当前批次，无法保存物流报价补录。"}
+    resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
+    if not resolved_version_name:
+        return {"ok": False, "message": "当前批次没有可用成本版本，无法保存物流报价补录。"}
+
+    quote_amount = _to_float(amount)
+    if quote_amount <= 0:
+        return {"ok": False, "message": "请填写大于 0 的物流费用金额。"}
+
+    from overseas_costing.scripts import import_oa_logistics
+
+    normalized_currency = _normalize_currency_code(currency)
+    normalized_basis = _normalize_manual_allocation_basis(allocation_basis)
+    carrier_label = str(carrier or "").strip() or "未标注承运商/货代"
+    evidence_line = str(evidence_text or note or "").strip()
+    source_value = evidence_line or f"{carrier_label} {quote_amount:g} {normalized_currency}"
+    fee = {
+        "carrier": carrier_label,
+        "amount": quote_amount,
+        "currency": normalized_currency,
+        "allocation_basis": normalized_basis,
+        "gross_weight_kg": _to_float(gross_weight_kg) if gross_weight_kg not in (None, "") else None,
+        "chargeable_weight_kg": _to_float(chargeable_weight_kg) if chargeable_weight_kg not in (None, "") else None,
+        "unit_freight_per_kg": _to_float(unit_freight_per_kg) if unit_freight_per_kg not in (None, "") else None,
+        "billing_method": str(billing_method or "").strip(),
+        "pre_delivery_date": str(pre_delivery_date or "").strip(),
+        "destination": str(destination or "").strip(),
+        "evidence_line": evidence_line,
+        "source_label": "物流报价人工补录",
+        "source_field": "人工补录",
+        "source_value": source_value,
+    }
+    rule_result = import_oa_logistics._sync_oa_logistics_allocation_rule(
+        batch_name=batch_doc_name,
+        version_name=resolved_version_name,
+        approval_item={"logistics_fee": fee, "allocation_basis": normalized_basis},
+    )
+    if not rule_result.get("ok"):
+        return {"ok": False, "message": rule_result.get("message") or "物流费用分摊规则保存失败。"}
+
+    batch_row = _get_batch_trace_row(batch_doc_name)
+    payload, trace, is_root_trace = _get_oa_trace_storage(batch_row.get("extra_json"))
+    old_confirmed = trace.get("confirmed_logistics_quote") if isinstance(trace.get("confirmed_logistics_quote"), dict) else {}
+    operator = str(getattr(getattr(frappe, "session", None), "user", "") or "").strip()
+    confirmed = {
+        **_logistics_quote_snapshot(fee),
+        "source": "manual_logistics_quote",
+        "confirmation_note": str(note or "").strip(),
+        "confirmed_by": operator,
+        "confirmed_at": str(frappe.utils.now_datetime()),
+    }
+    trace["confirmed_logistics_quote"] = confirmed
+    trace["manual_logistics_quote"] = confirmed
+    frappe.db.set_value(
+        "Overseas Cost Batch",
+        batch_doc_name,
+        "extra_json",
+        _save_oa_trace_storage(payload, trace, is_root_trace),
+        update_modified=True,
+    )
+    _create_audit_log(
+        batch_doc_name=batch_doc_name,
+        version_name=resolved_version_name,
+        row_no=None,
+        field_name="manual_logistics_quote",
+        old_value=old_confirmed,
+        new_value=confirmed,
+        action_remark="人工补录物流报价并生成国际物流费用分摊规则",
+    )
+    _mark_batch_dirty(batch_doc_name)
+    recalculate_result = _recalculate_after_writeback(
+        batch_doc_name=batch_doc_name,
+        version_name=resolved_version_name,
+        enabled=True,
+    )
+    if hasattr(frappe.db, "commit"):
+        frappe.db.commit()
+
+    message = f"已保存 {carrier_label} 物流报价 {quote_amount:g} {normalized_currency}，并生成物流费用分摊规则。"
     return {
         "ok": True,
         "batch_name": batch_doc_name,

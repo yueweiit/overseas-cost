@@ -470,6 +470,43 @@ def confirm_logistics_quote_candidate(
 
 
 @frappe.whitelist()
+def save_manual_logistics_quote(
+    batch_name: str,
+    amount,
+    version_name: str | None = None,
+    carrier: str | None = None,
+    currency: str | None = "RMB",
+    allocation_basis: str | None = "gross_weight",
+    gross_weight_kg=None,
+    chargeable_weight_kg=None,
+    unit_freight_per_kg=None,
+    billing_method: str | None = None,
+    evidence_text: str | None = None,
+    pre_delivery_date: str | None = None,
+    destination: str | None = None,
+    note: str | None = None,
+) -> dict:
+    """手工补录物流报价后，生成/更新对应的整票物流费用分摊规则。"""
+
+    return import_service.save_manual_logistics_quote(
+        batch_name=batch_name,
+        version_name=version_name,
+        carrier=carrier,
+        amount=amount,
+        currency=currency,
+        allocation_basis=allocation_basis,
+        gross_weight_kg=gross_weight_kg,
+        chargeable_weight_kg=chargeable_weight_kg,
+        unit_freight_per_kg=unit_freight_per_kg,
+        billing_method=billing_method,
+        evidence_text=evidence_text,
+        pre_delivery_date=pre_delivery_date,
+        destination=destination,
+        note=note,
+    )
+
+
+@frappe.whitelist()
 def preview_packing_list_attachment(
     batch_name: str,
     attachment_name: str | None = None,
@@ -635,6 +672,37 @@ def refresh_existing_oa_logistics_details(
         env_file=env_file,
         api_style=api_style,
         include_non_sea=include_non_sea_flag,
+        access_token=access_token or "",
+    )
+
+
+@frappe.whitelist()
+def pull_latest_oa_logistics_approvals(
+    start: str | None = None,
+    end: str | None = None,
+    transport_modes: str | None = "ALL",
+    limit: int | None = 200,
+    env_file: str | None = None,
+    api_style: str = "auto",
+    list_api: str = "auto",
+    access_token: str | None = None,
+) -> dict:
+    """手动拉取最近国际物流 OA 审批单，并保存/更新成本批次。"""
+
+    from overseas_costing.scripts import import_oa_logistics
+
+    try:
+        normalized_limit = int(limit or 0) or None
+    except (TypeError, ValueError):
+        normalized_limit = 200
+    return import_oa_logistics.pull_latest_logistics_approvals_to_erp(
+        start=start or "",
+        end=end or "",
+        transport_modes=transport_modes or "ALL",
+        limit=normalized_limit,
+        env_file=env_file,
+        api_style=api_style or "auto",
+        list_api=list_api or "auto",
         access_token=access_token or "",
     )
 

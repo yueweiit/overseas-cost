@@ -32,6 +32,15 @@ data/*.xlsm
 data/*.xls
 data/*.csv
 data/*.json
+backend/overseas_costing/data/
+tmp/
+*.sql
+*.sql.gz
+*.tar
+*.tar.gz
+site_config*.json
+*_site_config*.json
+*site_config_backup*.json
 
 # Local prototype reference kept outside first delivery repo because it has its own Git history
 frontend-demo/

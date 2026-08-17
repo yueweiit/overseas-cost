@@ -15,6 +15,7 @@ from overseas_costing.utils.dingtalk import (
 from overseas_costing.scripts.import_oa_logistics import (
     DEFAULT_LOGISTICS_PROCESS_CODE,
     _merge_oa_extra_json,
+    _normalize_allocation_basis,
     _recalculate_after_purchase_sync,
     _sync_oa_form_attachments,
     _sync_oa_logistics_allocation_rule,
@@ -37,6 +38,7 @@ from overseas_costing.scripts.import_oa_logistics import (
     is_hidden_approval_status,
     is_sea_approval,
     load_env_file,
+    pull_latest_logistics_approvals_to_erp,
     refresh_missing_oa_finished_times,
     refresh_oa_logistics_detail,
     resolve_logistics_process_code,
@@ -74,6 +76,13 @@ def test_build_dingtalk_order_payload_prefers_desktop_protocol() -> None:
     assert payload["desktop_url"].startswith("dingtalk://")
     assert payload["open_url"] == payload["desktop_url"]
     assert payload["can_open"] is True
+
+
+def test_normalize_allocation_basis_accepts_business_words() -> None:
+    assert _normalize_allocation_basis("按计费重") == "chargeable_weight"
+    assert _normalize_allocation_basis("体积分摊") == "volume"
+    assert _normalize_allocation_basis("货值比例") == "goods_value"
+    assert _normalize_allocation_basis("") == "gross_weight"
 
 
 def test_build_dingtalk_order_payload_fallback_to_official_url() -> None:
@@ -2276,3 +2285,56 @@ def test_revoked_approval_is_skipped_when_saving_oa_trace() -> None:
     assert result["valid_count"] == 0
     assert result["skipped_count"] == 1
     assert result["skipped_items"][0]["reason"] == "审批单已撤销或终止，不进入成本表格"
+
+
+def test_pull_latest_logistics_approvals_to_erp_reuses_pull_and_save(monkeypatch) -> None:
+    from overseas_costing.scripts import import_oa_logistics
+
+    calls = {}
+
+    def fake_pull_logistics_approvals(**kwargs):
+        calls["pull"] = kwargs
+        return {
+            "ok": True,
+            "transport_modes": ["SEA", "AIR"],
+            "total_instance_count": 3,
+            "detail_count": 3,
+            "filtered_count": 2,
+            "transport_counts": {"SEA": 1, "AIR": 1, "EXPRESS": 0},
+            "items": [{"source_approval_no": "OA-1"}, {"source_approval_no": "OA-2"}],
+        }
+
+    def fake_save_sea_approvals_to_erp(result):
+        calls["save"] = result
+        return {
+            "ok": True,
+            "created_count": 1,
+            "updated_count": 1,
+            "unchanged_count": 0,
+            "skipped_count": 0,
+            "items": [{"batch_no": "NEW-SEA"}, {"batch_no": "NEW-AIR"}],
+            "skipped_items": [],
+            "message": "saved",
+        }
+
+    monkeypatch.setattr(import_oa_logistics, "resolve_dingtalk_env_file", lambda env_file=None: "")
+    monkeypatch.setattr(import_oa_logistics, "_has_dingtalk_pull_credentials", lambda: True)
+    monkeypatch.setattr(import_oa_logistics, "pull_logistics_approvals", fake_pull_logistics_approvals)
+    monkeypatch.setattr(import_oa_logistics, "save_sea_approvals_to_erp", fake_save_sea_approvals_to_erp)
+
+    result = pull_latest_logistics_approvals_to_erp(
+        start="2026-08-01",
+        end="2026-08-17",
+        transport_modes="SEA,AIR",
+        limit=50,
+    )
+
+    assert result["ok"] is True
+    assert result["start"] == "2026-08-01"
+    assert result["end"] == "2026-08-17"
+    assert result["pull"]["filtered_count"] == 2
+    assert result["save"]["created_count"] == 1
+    assert result["save"]["updated_count"] == 1
+    assert calls["pull"]["transport_modes"] == "SEA,AIR"
+    assert calls["pull"]["limit"] == 50
+    assert calls["save"]["items"][0]["source_approval_no"] == "OA-1"
