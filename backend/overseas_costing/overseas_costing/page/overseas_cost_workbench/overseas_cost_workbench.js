@@ -56,6 +56,7 @@ class OverseasCostWorkbench {
   }
 
   init() {
+    $(this.wrapper).empty();
     this.page = frappe.ui.make_app_page({
       parent: this.wrapper,
       title: "海外采购综合成本核算",
