@@ -681,7 +681,7 @@ def pull_latest_oa_logistics_approvals(
     start: str | None = None,
     end: str | None = None,
     transport_modes: str | None = "ALL",
-    limit: int | None = 200,
+    limit: int | None = 80,
     env_file: str | None = None,
     api_style: str = "auto",
     list_api: str = "auto",
@@ -694,7 +694,9 @@ def pull_latest_oa_logistics_approvals(
     try:
         normalized_limit = int(limit or 0) or None
     except (TypeError, ValueError):
-        normalized_limit = 200
+        normalized_limit = 80
+    if normalized_limit:
+        normalized_limit = max(1, min(normalized_limit, 80))
     return import_oa_logistics.pull_latest_logistics_approvals_to_erp(
         start=start or "",
         end=end or "",
