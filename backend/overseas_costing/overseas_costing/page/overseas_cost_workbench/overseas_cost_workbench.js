@@ -5157,9 +5157,10 @@ class OverseasCostWorkbench {
     const sourcePrioritySummary = this.getSourcePrioritySummary(batch);
     const body = rows.length
       ? rows
-          .map(
-            (row) => `
-              <div class="ocw-allocation-row">
+          .map((row) => {
+            const rowClass = row.className ? ` ${this.escape(row.className)}` : "";
+            return `
+              <div class="ocw-allocation-row${rowClass}">
                 <div>
                   <strong>${this.escape(row.amountTitle)}</strong>
                   <span>${this.escape(row.amountText)}</span>
@@ -5168,8 +5169,8 @@ class OverseasCostWorkbench {
                 <div>${this.escape(row.basis)}</div>
                 <div>${this.escape(row.result)}</div>
               </div>
-            `
-          )
+            `;
+          })
           .join("")
       : `
         <div class="ocw-allocation-empty">
@@ -5214,6 +5215,9 @@ class OverseasCostWorkbench {
     const rows = Array.from(buckets.values()).map((bucket) => this.formatAllocationBucket(bucket));
     const customsRow = this.buildDirectCustomsAllocationRow(items);
     if (customsRow) rows.push(customsRow);
+    const hasLogisticsRow = rows.some((row) => /物流|运输|运费|freight|logistics/i.test(`${row.amountTitle || ""} ${row.source || ""}`));
+    const logisticsQuoteRow = hasLogisticsRow ? null : this.buildLogisticsQuoteAllocationRow(batch);
+    if (logisticsQuoteRow) rows.unshift(logisticsQuoteRow);
 
     if (!rows.length) {
       const freightAlloc = this.sumRowsNumber(items, "freight_alloc_rmb");
@@ -5233,6 +5237,50 @@ class OverseasCostWorkbench {
     }
 
     return rows;
+  }
+
+  buildLogisticsQuoteAllocationRow(batch = {}) {
+    const sourceStatus = batch.source_status || {};
+    const confirmed = sourceStatus.confirmed_logistics_quote || {};
+    const confirmedAmount = this.numericOrNull(confirmed.amount);
+    if (this.isPositive(confirmedAmount)) {
+      const carrier = String(confirmed.carrier || "").trim();
+      const currency = this.normalizeCurrencyCode(confirmed.currency || "RMB");
+      const basis = confirmed.allocation_basis || confirmed.basis || "gross_weight";
+      return {
+        amountTitle: "国际运输费用",
+        amountText: `${carrier ? `${carrier} ` : ""}${this.formatNumber(confirmedAmount)} ${currency}`,
+        source: "钉钉国际物流 OA/已确认报价",
+        basis: this.allocationBasisLabel(basis),
+        result: "已进入费用池，重新试算后分摊到物料",
+        className: "is-confirmed",
+      };
+    }
+
+    const candidates = Array.isArray(sourceStatus.logistics_quote_candidates) ? sourceStatus.logistics_quote_candidates : [];
+    const validCandidates = candidates
+      .map((candidate) => ({
+        carrier: String(candidate.carrier || "").trim(),
+        amount: this.numericOrNull(candidate.amount),
+        currency: this.normalizeCurrencyCode(candidate.currency || "RMB"),
+      }))
+      .filter((candidate) => this.isPositive(candidate.amount));
+    if (!validCandidates.length) return null;
+
+    const sorted = validCandidates.slice().sort((a, b) => Number(a.amount || 0) - Number(b.amount || 0));
+    const lowest = sorted[0];
+    const lowestCount = sorted.filter(
+      (candidate) => candidate.currency === lowest.currency && Math.abs(Number(candidate.amount || 0) - Number(lowest.amount || 0)) < 0.000001
+    ).length;
+    const carrierLabel = lowestCount > 1 ? `${lowestCount} 家最低` : lowest.carrier || "最低报价";
+    return {
+      amountTitle: "国际运输费用候选",
+      amountText: `${carrierLabel} ${this.formatNumber(lowest.amount)} ${lowest.currency}；共 ${validCandidates.length} 份待确认`,
+      source: "钉钉国际物流 OA 报价文本/附件",
+      basis: "待人工确认后进入费用池",
+      result: "确认报价并重新试算后分摊到物料",
+      className: "is-pending",
+    };
   }
 
   getSourcePrioritySummary(batch = {}) {

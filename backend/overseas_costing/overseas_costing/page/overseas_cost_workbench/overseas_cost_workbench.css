@@ -1238,6 +1238,22 @@
   font-weight: 800;
 }
 
+.ocw-allocation-row.is-pending {
+  background: #fff8e8;
+}
+
+.ocw-allocation-row.is-pending strong {
+  color: #8a4b04;
+}
+
+.ocw-allocation-row.is-confirmed {
+  background: #f0fbf5;
+}
+
+.ocw-allocation-row.is-confirmed strong {
+  color: #14683a;
+}
+
 .ocw-allocation-empty {
   min-width: 620px;
   padding: 10px;
