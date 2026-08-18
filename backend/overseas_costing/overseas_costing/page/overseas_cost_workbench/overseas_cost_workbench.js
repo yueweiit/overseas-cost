@@ -56,6 +56,7 @@ class OverseasCostWorkbench {
   }
 
   init() {
+    this.resetDeskLayoutClasses();
     $(this.wrapper).empty();
     this.page = frappe.ui.make_app_page({
       parent: this.wrapper,
@@ -69,13 +70,17 @@ class OverseasCostWorkbench {
     this.loadBatches();
   }
 
+  resetDeskLayoutClasses() {
+    $(".ocw-desk-fullwidth, .ocw-desk-wide-node, .ocw-desk-layout, .ocw-desk-section-wrapper, .ocw-desk-main").removeClass(
+      "ocw-desk-fullwidth ocw-desk-wide-node ocw-desk-layout ocw-desk-section-wrapper ocw-desk-main"
+    );
+  }
+
   applyDeskLayout() {
+    this.resetDeskLayoutClasses();
     const $wrapper = $(this.wrapper);
-    const $pageContainer = $wrapper.closest(".page-container");
-    const $scope = $pageContainer.length ? $pageContainer : $wrapper;
     const $mainSection = $(this.page.main);
 
-    $scope.addClass("ocw-desk-fullwidth");
     $wrapper.addClass("ocw-desk-fullwidth");
     $mainSection
       .addClass("ocw-desk-main")
@@ -87,12 +92,6 @@ class OverseasCostWorkbench {
     $mainSection.closest(".page-body").addClass("full-width");
     $mainSection.closest(".layout-main").addClass("ocw-desk-layout");
     $mainSection.closest(".layout-main-section-wrapper").addClass("ocw-desk-section-wrapper");
-
-    $scope
-      .find(
-        ".page-head .container, .page-body, .page-body > .container, .page-content, .page-wrapper, .layout-main, .layout-main-section, .layout-main-section-wrapper"
-      )
-      .addClass("ocw-desk-wide-node");
   }
 
   addActions() {
