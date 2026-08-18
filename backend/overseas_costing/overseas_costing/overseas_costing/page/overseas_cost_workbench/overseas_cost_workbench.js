@@ -79,7 +79,14 @@ class OverseasCostWorkbench {
     $wrapper.empty();
   }
 
+  resetDeskLayoutClasses() {
+    $(".ocw-desk-fullwidth, .ocw-desk-wide-node, .ocw-desk-layout, .ocw-desk-section-wrapper, .ocw-desk-main").removeClass(
+      "ocw-desk-fullwidth ocw-desk-wide-node ocw-desk-layout ocw-desk-section-wrapper ocw-desk-main"
+    );
+  }
+
   applyDeskLayout() {
+    this.resetDeskLayoutClasses();
     const $wrapper = $(this.wrapper);
     const $mainSection = $(this.page.main);
 
@@ -94,12 +101,6 @@ class OverseasCostWorkbench {
     $mainSection.closest(".page-body").addClass("full-width");
     $mainSection.closest(".layout-main").addClass("ocw-desk-layout");
     $mainSection.closest(".layout-main-section-wrapper").addClass("ocw-desk-section-wrapper");
-  }
-
-  resetDeskLayoutClasses() {
-    $(".ocw-desk-fullwidth, .ocw-desk-wide-node, .ocw-desk-layout, .ocw-desk-section-wrapper, .ocw-desk-main").removeClass(
-      "ocw-desk-fullwidth ocw-desk-wide-node ocw-desk-layout ocw-desk-section-wrapper ocw-desk-main"
-    );
   }
 
   addActions() {
@@ -1563,8 +1564,8 @@ class OverseasCostWorkbench {
           fieldtype: "Int",
           fieldname: "limit",
           label: "最多读取审批单数",
-          default: 200,
-          description: "用于限制本次读取详情数量，避免时间范围过大时等待太久。",
+          default: 80,
+          description: "默认读取近一个月内最多 80 条审批详情，避免一次拉取过多导致等待太久。",
         },
         {
           fieldtype: "HTML",
@@ -1604,7 +1605,7 @@ class OverseasCostWorkbench {
           start,
           end,
           transport_modes: this.normalizePullTransportMode(values.transport_modes),
-          limit: Number(values.limit || 200) || 200,
+          limit: Number(values.limit || 80) || 80,
         },
         true
       );
@@ -1618,6 +1619,8 @@ class OverseasCostWorkbench {
       const message = `钉钉拉取完成：新增 ${save.created_count || 0}，更新 ${save.updated_count || 0}，已存在 ${save.unchanged_count || 0}，跳过 ${save.skipped_count || 0}`;
       frappe.show_alert({ message, indicator: "green" });
       this.resetFilterValues();
+      this.updateBatchUrl("", { replace: true, view: "" });
+      this.focusedBatchName = "";
       await this.loadBatches();
       dialog.$wrapper.data("ocw-pull-completed", true);
       this.setOaPullPrimaryState(dialog, "completed");
@@ -1960,15 +1963,32 @@ class OverseasCostWorkbench {
 
   extractServerMessage(data) {
     if (!data) return "";
+    if (typeof data === "string") {
+      try {
+        return this.extractServerMessage(JSON.parse(data));
+      } catch (_error) {
+        return data;
+      }
+    }
     if (data.message && typeof data.message === "string") return data.message;
     if (data._server_messages) {
       try {
-        const messages = JSON.parse(data._server_messages).map((item) => JSON.parse(item).message || item);
+        const messages = JSON.parse(data._server_messages).map((item) => {
+          try {
+            const parsed = JSON.parse(item);
+            return parsed.message || item;
+          } catch (_error) {
+            return item;
+          }
+        });
         return messages.join("；");
       } catch (_error) {
         return String(data._server_messages);
       }
     }
+    if (data.exception) return String(data.exception);
+    if (data.exc) return String(data.exc);
+    if (data.statusText) return String(data.statusText);
     return "";
   }
 
@@ -7855,7 +7875,7 @@ class OverseasCostWorkbench {
   }
 
   normalizeErrorMessage(error) {
-    const raw = error && error.message ? error.message : error;
+    const raw = this.extractReadableError(error);
     let message = raw ? String(raw) : "操作失败";
     message = message.replace(/^Server Error\s*/i, "").trim() || "操作失败";
     message = message.replace(/^ValueError:\s*/i, "");
@@ -7863,5 +7883,24 @@ class OverseasCostWorkbench {
       message += "\n\n建议：工作表名称可以留空，由系统自动识别；只有一个工作表的文件会自动使用该工作表。";
     }
     return message;
+  }
+
+  extractReadableError(error) {
+    if (!error) return "";
+    if (typeof error === "string") return error;
+    if (error.message && typeof error.message === "string" && error.message !== "[object Object]") {
+      return error.message;
+    }
+    const response = error.responseJSON || error.responseText || error.xhr?.responseJSON || error.xhr?.responseText;
+    const serverMessage = this.extractServerMessage(response);
+    if (serverMessage) return serverMessage;
+    if (error._server_messages || error.exception || error.exc || error.statusText) {
+      return this.extractServerMessage(error) || error.exception || error.exc || error.statusText;
+    }
+    try {
+      return JSON.stringify(error);
+    } catch (_error) {
+      return "操作失败";
+    }
   }
 }

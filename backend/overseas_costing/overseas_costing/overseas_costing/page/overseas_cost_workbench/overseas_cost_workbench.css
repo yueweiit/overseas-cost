@@ -439,6 +439,8 @@
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 2px 8px;
   width: 100%;
+  min-height: 0;
+  max-height: none;
   padding: 8px;
   text-align: left;
   border: 1px solid #d7e2df;
