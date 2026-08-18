@@ -57,7 +57,7 @@ class OverseasCostWorkbench {
 
   init() {
     this.resetDeskLayoutClasses();
-    $(this.wrapper).empty();
+    this.prepareWorkbenchContainer();
     this.page = frappe.ui.make_app_page({
       parent: this.wrapper,
       title: "海外采购综合成本核算",
@@ -68,6 +68,15 @@ class OverseasCostWorkbench {
     this.renderShell();
     this.bindEvents();
     this.loadBatches();
+  }
+
+  prepareWorkbenchContainer() {
+    const $wrapper = $(this.wrapper);
+    const $pageContainer = $wrapper.closest(".page-container");
+    if ($pageContainer.length) {
+      $pageContainer.children().not($wrapper).remove();
+    }
+    $wrapper.empty();
   }
 
   resetDeskLayoutClasses() {
