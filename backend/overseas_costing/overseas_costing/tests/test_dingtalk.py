@@ -31,6 +31,7 @@ from overseas_costing.scripts.import_oa_logistics import (
     extract_oa_goods_rows,
     extract_form_fields,
     extract_linked_purchase_approvals,
+    extract_subsidiary_from_approval,
     extract_purchase_expense_rows,
     get_access_token,
     get_process_attachment_download_url,
@@ -842,7 +843,77 @@ def test_extract_form_attachments_ignores_comment_attachments() -> None:
     assert "评论里的凭证.pdf" not in [row["file_name"] for row in attachments]
     assert summary["oa_form_attachment_count"] == 2
     assert values["source_attachment_count"] == 2
+    assert values["subsidiary_code"] == "YW MOLDES MX模具"
     assert extra["oa_form_attachments"][0]["file_id"] == "FILE-001"
+    assert extra["subsidiary"]["subsidiary_code"] == "YW MOLDES MX模具"
+
+
+def test_extract_subsidiary_from_approval_uses_business_entity_name() -> None:
+    subsidiary = extract_subsidiary_from_approval(
+        {
+            "form_fields": {
+                "业务主体Entidad comercial": {
+                    "deptName": "YW MOLDES MX模具",
+                    "itemId": "1089528309",
+                    "name": "YW MOLDES MX模具",
+                }
+            }
+        }
+    )
+
+    assert subsidiary == {
+        "subsidiary_code": "YW MOLDES MX模具",
+        "business_entity_name": "YW MOLDES MX模具",
+        "business_entity_id": "1089528309",
+        "source_field": "业务主体Entidad comercial",
+        "source": "dingtalk_form_business_entity",
+    }
+
+
+def test_extract_subsidiary_from_empresas_prefers_display_value() -> None:
+    instance = {
+        "formComponentValues": [
+            {
+                "componentType": "DepartmentField",
+                "name": "业务主体Empresas",
+                "value": "1089528309",
+                "extValue": json.dumps(
+                    {"deptName": "YW MOLDES MX MOLDE", "itemId": "1089528309"},
+                    ensure_ascii=False,
+                ),
+            }
+        ]
+    }
+
+    fields = extract_form_fields(instance)
+    subsidiary = extract_subsidiary_from_approval({"form_fields": fields})
+
+    assert subsidiary["subsidiary_code"] == "YW MOLDES MX MOLDE"
+    assert subsidiary["business_entity_id"] == "1089528309"
+    assert subsidiary["source_field"] == "业务主体Empresas"
+
+
+def test_extract_subsidiary_falls_back_to_raw_form_components() -> None:
+    subsidiary = extract_subsidiary_from_approval(
+        {
+            "form_fields": {},
+            "raw_form_components": [
+                {
+                    "componentType": "DepartmentField",
+                    "name": "业务主体Empresas",
+                    "value": "1089528309",
+                    "extValue": json.dumps(
+                        {"deptName": "YW MOLDES MX", "itemId": "1089528309"},
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
+        }
+    )
+
+    assert subsidiary["subsidiary_code"] == "YW MOLDES MX"
+    assert subsidiary["business_entity_id"] == "1089528309"
+    assert subsidiary["source_field"] == "业务主体Empresas"
 
 
 def test_extract_purchase_expense_rows_keeps_first_non_empty_currency() -> None:

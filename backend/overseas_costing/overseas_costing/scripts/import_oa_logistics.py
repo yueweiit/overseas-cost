@@ -143,6 +143,18 @@ LOGISTICS_DESTINATION_FIELD_ALIASES = (
     "目的国",
 )
 GOODS_TABLE_FIELD_ALIASES = ("货物信息", "Bienes")
+BUSINESS_ENTITY_FIELD_ALIASES = (
+    "业务主体",
+    "业务主体Empresas",
+    "Entidad comercial",
+    "Empresas",
+    "Empresa",
+    "Business Entity",
+    "Company",
+    "公司主体",
+    "归属公司",
+    "子公司",
+)
 PURCHASE_DETAIL_TABLE_FIELD_ALIASES = (
     "需求明细",
     "Desglose de los gastos",
@@ -1705,6 +1717,13 @@ def extract_form_fields(instance: dict) -> dict[str, Any]:
         ext_value = _parse_json_text(component.get("ext_value") or component.get("extValue"))
         if name:
             resolved_value = value if value not in (None, "") else ext_value
+            if _field_matches_alias(name, BUSINESS_ENTITY_FIELD_ALIASES):
+                ext_entity = _extract_dingtalk_entity_value(ext_value)
+                value_entity = _extract_dingtalk_entity_value(value)
+                if ext_entity.get("name"):
+                    resolved_value = ext_value
+                elif value_entity.get("name"):
+                    resolved_value = value
             if name not in fields or fields[name] in (None, ""):
                 fields[name] = resolved_value
         for key in ("details", "children", "items"):
@@ -1748,23 +1767,209 @@ def _flatten_detail_row(row: dict) -> list[dict]:
 
 
 def _find_field_value(fields: dict[str, Any], aliases: tuple[str, ...]) -> Any:
-    normalized_aliases = [_normalize_key(alias) for alias in aliases]
     for key, value in fields.items():
-        normalized_key = _normalize_key(key)
-        if any(alias and alias in normalized_key for alias in normalized_aliases):
+        if _field_matches_alias(key, aliases):
             if value not in (None, ""):
                 return value
     return ""
 
 
 def _find_field_entry(fields: dict[str, Any], aliases: tuple[str, ...]) -> tuple[str, Any]:
-    normalized_aliases = [_normalize_key(alias) for alias in aliases]
     for key, value in fields.items():
-        normalized_key = _normalize_key(key)
-        if any(alias and alias in normalized_key for alias in normalized_aliases):
+        if _field_matches_alias(key, aliases):
             if value not in (None, ""):
                 return key, value
     return "", ""
+
+
+def _field_matches_alias(fieldname: Any, aliases: tuple[str, ...]) -> bool:
+    normalized_fieldname = _normalize_key(fieldname)
+    normalized_aliases = [_normalize_key(alias) for alias in aliases]
+    return any(alias and alias in normalized_fieldname for alias in normalized_aliases)
+
+
+def _extract_dingtalk_entity_value(value: Any) -> dict[str, str]:
+    parsed = _parse_json_text(value)
+    if isinstance(parsed, list):
+        for item in parsed:
+            entity = _extract_dingtalk_entity_value(item)
+            if entity.get("name") or entity.get("id"):
+                return entity
+        return {"name": "", "id": ""}
+    if isinstance(parsed, dict):
+        for key in ("selectedOptions", "selected_options", "options", "items", "list", "data"):
+            nested_value = parsed.get(key)
+            if isinstance(nested_value, str):
+                nested_value = _parse_json_text(nested_value)
+            if isinstance(nested_value, (list, dict)):
+                nested_entity = _extract_dingtalk_entity_value(nested_value)
+                if nested_entity.get("name") or nested_entity.get("id"):
+                    return nested_entity
+        name = _clean(
+            parsed.get("deptName")
+            or parsed.get("name")
+            or parsed.get("label")
+            or parsed.get("displayName")
+            or parsed.get("displayValue")
+            or parsed.get("optionName")
+            or parsed.get("orgName")
+            or parsed.get("corpName")
+            or parsed.get("companyName")
+            or parsed.get("businessName")
+            or parsed.get("title")
+            or parsed.get("text")
+            or parsed.get("value")
+        )
+        entity_id = _clean(
+            parsed.get("itemId")
+            or parsed.get("deptId")
+            or parsed.get("id")
+            or parsed.get("value")
+        )
+        return {"name": name, "id": entity_id}
+    text = _clean(parsed)
+    return {"name": text, "id": ""}
+
+
+def _extract_subsidiary_from_form_components(components: Any) -> dict[str, str]:
+    if not isinstance(components, list):
+        return {"subsidiary_code": "", "business_entity_name": "", "business_entity_id": "", "source_field": "", "source": ""}
+
+    stack = list(reversed(components))
+    while stack:
+        component = stack.pop()
+        if not isinstance(component, dict):
+            continue
+        for child_key in ("details", "children", "items"):
+            children = component.get(child_key)
+            if isinstance(children, str):
+                children = _parse_json_text(children)
+            if isinstance(children, list):
+                stack.extend(reversed(children))
+        source_field = _clean(
+            component.get("name")
+            or component.get("label")
+            or component.get("bizAlias")
+            or component.get("componentName")
+            or component.get("id")
+        )
+        component_type = _clean(component.get("componentType") or component.get("component_type")).lower()
+        value = component.get("value")
+        ext_value = component.get("ext_value") or component.get("extValue")
+        raw_value = ext_value if ext_value not in (None, "") else value
+        entity = _extract_dingtalk_entity_value(raw_value)
+        if not (entity.get("name") or entity.get("id")):
+            continue
+
+        if _field_matches_alias(source_field, BUSINESS_ENTITY_FIELD_ALIASES):
+            name = entity.get("name") or entity.get("id") or ""
+        elif component_type in {"departmentfield", "deptfield", "organizationfield", "companyfield"}:
+            name = entity.get("name") or entity.get("id") or ""
+        else:
+            continue
+
+        if not name:
+            continue
+        return {
+            "subsidiary_code": name,
+            "business_entity_name": entity.get("name") or "",
+            "business_entity_id": entity.get("id") or "",
+            "source_field": source_field,
+            "source": "dingtalk_form_business_entity" if source_field else "",
+        }
+
+    return {"subsidiary_code": "", "business_entity_name": "", "business_entity_id": "", "source_field": "", "source": ""}
+
+
+def extract_subsidiary_from_approval(item: dict) -> dict[str, str]:
+    """从钉钉表单提取归属子公司/业务主体，当前直接使用中文主体名称。"""
+
+    form_fields = item.get("form_fields") or {}
+    source_field, raw_value = _find_field_entry(form_fields, BUSINESS_ENTITY_FIELD_ALIASES)
+    entity = _extract_dingtalk_entity_value(raw_value)
+    name = entity.get("name") or entity.get("id") or ""
+    if not name:
+        raw_components = item.get("raw_form_components") or item.get("form_component_values") or item.get("formComponentValues") or []
+        fallback = _extract_subsidiary_from_form_components(raw_components)
+        if fallback.get("subsidiary_code"):
+            return fallback
+    return {
+        "subsidiary_code": name,
+        "business_entity_name": entity.get("name") or "",
+        "business_entity_id": entity.get("id") or "",
+        "source_field": source_field,
+        "source": "dingtalk_form_business_entity" if source_field else "",
+    }
+
+
+def _component_name_matches_business_entity(name: Any) -> bool:
+    normalized = _normalize_key(name)
+    if not normalized:
+        return False
+    extra_tokens = ("empresa", "entidad", "businessentity", "company", "公司", "主体")
+    return _field_matches_alias(name, BUSINESS_ENTITY_FIELD_ALIASES) or any(token in normalized for token in extra_tokens)
+
+
+def _collect_business_entity_debug_candidates(item: dict, *, max_count: int = 12) -> list[dict]:
+    candidates: list[dict] = []
+    form_fields = item.get("form_fields") or {}
+    for fieldname, value in form_fields.items():
+        if not _component_name_matches_business_entity(fieldname):
+            continue
+        entity = _extract_dingtalk_entity_value(value)
+        candidates.append(
+            {
+                "source": "form_fields",
+                "field": _clean(fieldname),
+                "entity_name": entity.get("name") or "",
+                "entity_id": entity.get("id") or "",
+                "raw_type": type(value).__name__,
+                "raw_preview": _clean(value)[:160],
+            }
+        )
+        if len(candidates) >= max_count:
+            return candidates
+
+    stack = list(reversed(item.get("raw_form_components") or item.get("form_component_values") or item.get("formComponentValues") or []))
+    while stack and len(candidates) < max_count:
+        component = stack.pop()
+        if not isinstance(component, dict):
+            continue
+        for child_key in ("details", "children", "items"):
+            children = component.get(child_key)
+            if isinstance(children, str):
+                children = _parse_json_text(children)
+            if isinstance(children, list):
+                stack.extend(reversed(children))
+        name = _clean(
+            component.get("name")
+            or component.get("label")
+            or component.get("bizAlias")
+            or component.get("componentName")
+            or component.get("id")
+        )
+        component_type = _clean(component.get("componentType") or component.get("component_type"))
+        if not _component_name_matches_business_entity(name) and _clean(component_type).lower() not in {
+            "departmentfield",
+            "deptfield",
+            "organizationfield",
+            "companyfield",
+        }:
+            continue
+        raw_value = component.get("ext_value") or component.get("extValue") or component.get("value")
+        entity = _extract_dingtalk_entity_value(raw_value)
+        candidates.append(
+            {
+                "source": "raw_form_components",
+                "field": name,
+                "component_type": component_type,
+                "entity_name": entity.get("name") or "",
+                "entity_id": entity.get("id") or "",
+                "raw_type": type(raw_value).__name__,
+                "raw_preview": _clean(raw_value)[:160],
+            }
+        )
+    return candidates
 
 
 def _normalize_currency_code(value: Any) -> str:
@@ -2657,6 +2862,7 @@ def summarize_approval(instance: dict, *, process_instance_id: str = "", include
         "linked_purchase_approvals": linked_purchase_approvals,
         "oa_form_attachment_count": len(oa_form_attachments),
         "oa_form_attachments": oa_form_attachments,
+        "raw_form_components": _get_form_components(instance),
         "form_fields": fields,
     }
     summary["logistics_fee"] = extract_logistics_fee_from_approval(summary)
@@ -3314,11 +3520,13 @@ def build_batch_values_from_approval(item: dict) -> dict:
     oa_form_attachments = item.get("oa_form_attachments") or extract_attachments_from_form_fields(form_fields)
     attachment_count = len(oa_form_attachments) if oa_form_attachments else _count_dingtalk_attachments(form_fields)
     transport_mode = _normalize_transport_mode(item.get("transport_mode")) or detect_approval_transport_mode(item.get("transport_mode_raw")) or "SEA"
+    subsidiary = extract_subsidiary_from_approval(item)
     values = {
         "batch_no": batch_no,
         "waybill_no": logistics_no,
         "container_no": logistics_no if _looks_like_container_no(logistics_no) else "",
         "transport_mode": transport_mode,
+        "subsidiary_code": subsidiary.get("subsidiary_code") or "",
         "source_type": "oa_logistics",
         "source_data_id": source_instance_id or source_approval_no,
         "source_approval_no": source_approval_no,
@@ -3348,6 +3556,7 @@ def build_batch_values_from_approval(item: dict) -> dict:
                 "logistics_quote_candidates": item.get("logistics_quote_candidates") or extract_logistics_quote_candidates_from_approval(item),
                 "linked_purchase_approvals": item.get("linked_purchase_approvals") or [],
                 "oa_form_attachments": oa_form_attachments,
+                "subsidiary": subsidiary,
                 "form_fields": form_fields,
             }
         ),
@@ -5760,6 +5969,49 @@ def pull_from_env() -> dict:
     if csv_output:
         save_csv(result["items"], csv_output)
     return result
+
+
+def diagnose_business_entity_from_env() -> dict:
+    """只拉取钉钉审批详情并诊断业务主体字段，不写入数据库。"""
+
+    load_env_file(os.environ.get("DINGTALK_ENV_FILE"))
+    result = pull_logistics_approvals(
+        process_code=resolve_logistics_process_code(),
+        start=_clean(os.environ.get("DINGTALK_PULL_START")),
+        end=_clean(os.environ.get("DINGTALK_PULL_END")),
+        api_style=_clean(os.environ.get("DINGTALK_API_STYLE")) or "auto",
+        list_api=_clean(os.environ.get("DINGTALK_LIST_API")) or "auto",
+        page_size=int(os.environ.get("DINGTALK_PAGE_SIZE") or 20),
+        max_pages=int(os.environ.get("DINGTALK_MAX_PAGES") or 20),
+        chunk_days=int(os.environ.get("DINGTALK_CHUNK_DAYS") or 30),
+        limit=int(os.environ.get("DINGTALK_LIMIT") or 1) or 1,
+        include_raw=True,
+        include_all=True,
+        transport_modes=os.environ.get("DINGTALK_TRANSPORT_MODES") or os.environ.get("DINGTALK_TRANSPORT_MODE") or "SEA",
+    )
+    items = result.get("items") or []
+    first = items[0] if items else {}
+    extra_json = first.get("extra_json") or {}
+    subsidiary = extra_json.get("subsidiary") if isinstance(extra_json, dict) else {}
+    return {
+        "ok": bool(result.get("ok")),
+        "total_instance_count": result.get("total_instance_count", 0),
+        "detail_count": result.get("detail_count", 0),
+        "filtered_count": result.get("filtered_count", 0),
+        "first_item": {
+            "source_instance_id": first.get("source_instance_id") or "",
+            "source_approval_no": first.get("source_approval_no") or "",
+            "approval_title": first.get("approval_title") or "",
+            "transport_mode": first.get("transport_mode") or "",
+            "subsidiary_code": first.get("subsidiary_code") or "",
+            "business_entity_name": subsidiary.get("business_entity_name") or "",
+            "business_entity_id": subsidiary.get("business_entity_id") or "",
+            "source_field": subsidiary.get("source_field") or "",
+            "form_field_keys": sorted((first.get("form_fields") or {}).keys())[:80],
+            "business_entity_candidates": _collect_business_entity_debug_candidates(first),
+            "raw_form_component_count": len(first.get("raw_form_components") or []),
+        },
+    }
 
 
 def pull_purchase_expenses_from_env() -> dict:

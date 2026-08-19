@@ -17,6 +17,7 @@
     "commercial_invoice_no",
     "transport_mode",
     "project_collection",
+    "subsidiary_code",
     "source_type",
     "source_file_name",
     "source_sheet",
@@ -100,6 +101,12 @@
       "fieldname": "project_collection",
       "fieldtype": "Data",
       "label": "项目归集"
+    },
+    {
+      "fieldname": "subsidiary_code",
+      "fieldtype": "Data",
+      "label": "归属业务主体",
+      "in_list_view": 1
     },
     {
       "fieldname": "source_type",
