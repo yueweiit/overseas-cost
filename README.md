@@ -44,6 +44,20 @@
 | `frontend-demo` | 本地早期前端 Demo，已加入 `.gitignore`，不作为正式交付代码 |
 | `00_目录与文件中文说明.md` | 本地目录说明 |
 
+工作台前端的源码片段位于：
+
+```text
+backend/overseas_costing/overseas_costing/page/overseas_cost_workbench/parts/
+```
+
+Frappe 仍然加载合并后的单个 JS / CSS 文件。修改片段后，在项目根目录执行：
+
+```bash
+node tools/build_workbench_assets.js
+```
+
+构建脚本会按固定顺序合并片段，并同步到标准页面目录和 Frappe 实际运行的嵌套页面目录。
+
 ## 安装
 
 本项目不是独立网站，需要安装到已有 Frappe bench 中。
@@ -120,6 +134,7 @@ bench --site development.localhost migrate
 前端语法检查：
 
 ```bash
+node tools/build_workbench_assets.js
 node --check backend/overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js
 node --check backend/overseas_costing/overseas_costing/overseas_costing/page/overseas_cost_workbench/overseas_cost_workbench.js
 ```
@@ -133,7 +148,7 @@ python -m pytest backend/overseas_costing/overseas_costing/tests/test_dingtalk.p
 ## 开发注意事项
 
 - 提交信息统一使用中文。
-- 页面文件目前有两份重复路径，修改工作台 JS / CSS 时需要保持同步。
+- 页面文件目前有两份输出路径，统一修改 `parts/` 后运行构建脚本保持同步，不要直接编辑生成文件。
 - `docs/`、`frontend-demo/`、本地测试数据、`.env` 和密钥不上传 GitHub。
 - 杂乱图片、截图、合同、聊天记录等附件只做归集和人工复核，不直接自动写入金额字段。
 - 测试数据不要作为正式数据长期保留。

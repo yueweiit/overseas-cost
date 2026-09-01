@@ -1,0 +1,145 @@
+@media (max-width: 760px) {
+  .ocw-page .ocw-shell,
+  .ocw-page .ocw-shell.is-transport-sidebar-collapsed {
+    grid-template-columns: 1fr;
+  }
+
+  .ocw-page .ocw-shell.is-transport-sidebar-collapsed .ocw-sidebar {
+    min-height: 40px;
+    max-height: 40px;
+  }
+
+  .ocw-page .ocw-hierarchy-wrap {
+    height: min(620px, calc(100dvh - 420px));
+    min-height: 320px;
+    max-height: none;
+  }
+
+  .ocw-batch-drawer {
+    max-width: 100vw;
+    width: 100vw;
+  }
+
+  .ocw-desk-fullwidth .page-head .container,
+  .ocw-desk-fullwidth .page-body {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+  }
+
+  .ocw-page .ocw-workbench-head {
+    display: block;
+  }
+
+  .ocw-page .ocw-head-actions {
+    justify-content: flex-start;
+    margin-top: 10px;
+  }
+
+  .ocw-page .ocw-filter-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ocw-page .ocw-bottom-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ocw-purchase-summary,
+  .ocw-purchase-target {
+    grid-template-columns: 1fr;
+  }
+
+  .ocw-purchase-apply {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ocw-source-document-review-controls {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .ocw-purchase-order-entry {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .ocw-purchase-order-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ocw-manual-doc-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ocw-manual-doc-card {
+    min-height: auto;
+  }
+
+  .ocw-packing-conflict-value {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .ocw-purchase-source-row,
+  .ocw-purchase-source-row div {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+    flex-direction: column;
+  }
+
+  .ocw-purchase-target em {
+    grid-column: auto;
+  }
+
+  .ocw-batch-drawer-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ocw-batch-drawer-head-actions {
+    width: 100%;
+  }
+
+  .ocw-batch-drawer-head-actions .ocw-mini-btn:first-child {
+    margin-right: auto;
+  }
+
+  .ocw-batch-drawer-field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ocw-batch-drawer-overview-brief .ocw-batch-drawer-field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ocw-profit-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Keep the primary filters on one baseline until the compact breakpoint. */
+@media (min-width: 761px) {
+  .ocw-page .ocw-filter-grid {
+    grid-template-columns: minmax(128px, 0.9fr) minmax(128px, 0.9fr) minmax(210px, 1.45fr) minmax(128px, 0.9fr) auto;
+    align-items: end;
+  }
+
+  .ocw-page .ocw-toolbar-field {
+    height: 58px;
+  }
+
+  .ocw-page .ocw-filter-actions {
+    align-items: center;
+    align-self: end;
+    height: 34px;
+    min-height: 34px;
+    margin: 0;
+    white-space: nowrap;
+  }
+
+  .ocw-page .ocw-filter-actions button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+}

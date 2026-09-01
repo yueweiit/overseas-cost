@@ -39,6 +39,7 @@ from overseas_costing.utils.field_mapper import (
     map_packing_list_row_to_item,
     map_purchase_expense_row_to_item,
     map_yuewei_excel_block_item_to_item,
+    normalize_business_type,
     normalize_transport_mode,
     normalize_unit,
 )
@@ -51,11 +52,13 @@ PURCHASE_WRITEBACK_FIELDS = (
     "unit_price",
     "purchase_currency",
     "goods_value",
+    "supplier",
 )
 PURCHASE_ORDER_FIELD_LABELS = {
     "unit_price": "采购单价",
     "purchase_currency": "采购币种",
     "goods_value": "采购货值",
+    "supplier": "供应商",
     "source_type": "价格来源",
     "source_file_name": "来源文件",
     "source_attachment_id": "来源附件 ID",
@@ -73,6 +76,7 @@ PURCHASE_FIELD_LABELS = {
     "unit_price": "单价Precio",
     "purchase_currency": "币种Moneda",
     "goods_value": "总金额Monto Total",
+    "supplier": "供应商",
     "source_type": "来源类型",
     "source_doc_no": "来源审批编号",
     "dingtalk_instance_id": "钉钉实例ID",
@@ -575,6 +579,7 @@ def list_manual_document_attachments(
                 "slot_label": manual_meta.get("slot_label") or row.get("source_doc_no") or "",
                 "logistics_type": row_logistics_type,
                 "required": bool(manual_meta.get("required")),
+                "manual_note": manual_meta.get("manual_note") or row.get("remark") or "",
                 "remark": row.get("remark") or "",
                 "creation": row.get("creation"),
                 "modified": row.get("modified"),
@@ -602,6 +607,7 @@ def register_manual_document_attachment(
     file_name: str | None = None,
     version_name: str | None = None,
     remark: str | None = None,
+    manual_note: str | None = None,
     required=0,
 ) -> dict:
     """登记人工上传资料，只保留来源，不参与自动解析写入。"""
@@ -610,8 +616,6 @@ def register_manual_document_attachment(
     resolved_slot_code = str(slot_code or "").strip()
     resolved_slot_label = str(slot_label or "").strip() or resolved_slot_code
     resolved_logistics_type = str(logistics_type or "").strip().upper()
-    if not resolved_file_url:
-        return {"ok": False, "message": "缺少文件地址，请先上传文件。"}
     if not resolved_slot_code:
         return {"ok": False, "message": "缺少资料类型，请重新选择上传位置。"}
     if not resolved_logistics_type:
@@ -623,7 +627,7 @@ def register_manual_document_attachment(
             "dry_run": True,
             "batch_name": batch_name,
             "file_url": resolved_file_url,
-            "message": "当前未连接 Frappe，仅返回上传登记预览。",
+            "message": "当前未连接 Frappe，仅返回资料登记预览。",
         }
 
     batch_doc_name = _resolve_batch_name(batch_name)
@@ -631,7 +635,12 @@ def register_manual_document_attachment(
         return {"ok": False, "batch_name": batch_name, "message": f"未找到批次：{batch_name}"}
 
     resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
-    resolved_file_name = str(file_name or "").strip() or Path(resolved_file_url.split("?")[0]).name or resolved_slot_label
+    resolved_file_name = str(file_name or "").strip()
+    if not resolved_file_name:
+        if resolved_file_url:
+            resolved_file_name = Path(resolved_file_url.split("?")[0]).name or resolved_slot_label
+        else:
+            resolved_file_name = resolved_slot_label
     safe_attachment_type = str(attachment_type or "").strip() or "Other"
     is_required = to_bool(required)
     manual_meta = {
@@ -640,6 +649,7 @@ def register_manual_document_attachment(
             "slot_label": resolved_slot_label,
             "logistics_type": resolved_logistics_type,
             "required": is_required,
+            "manual_note": str(manual_note or "").strip(),
             "registered_at": datetime.now().isoformat(timespec="seconds"),
         }
     }
@@ -658,7 +668,8 @@ def register_manual_document_attachment(
             "remark": str(remark or "").strip(),
         }
     ).insert(ignore_permissions=True)
-    _attach_existing_file_to_attachment(resolved_file_url, doc.name)
+    if resolved_file_url:
+        _attach_existing_file_to_attachment(resolved_file_url, doc.name)
     frappe.db.commit()
     return {
         "ok": True,
@@ -674,7 +685,7 @@ def register_manual_document_attachment(
             "file_url": resolved_file_url,
             "required": is_required,
         },
-        "message": "资料已上传并登记。",
+        "message": "资料已登记。",
     }
 
 
@@ -1550,6 +1561,7 @@ def preview_oa_purchase_order_match(
         source_rows.append(
             {
                 **row,
+                "supplier": row.get("supplier") or purchase_order.get("supplier") or "",
                 "source_type": "PURCHASE_ORDER_ATTACHMENT",
                 "source_attachment_id": attachment_name,
                 "source_file_name": source_preview.get("source_name") or "",
@@ -1655,6 +1667,8 @@ def apply_oa_purchase_order_fillable_fields(
             continue
 
         field_updates.update(provenance)
+        if purchase_order.get("supplier") and not field_updates.get("supplier"):
+            field_updates["supplier"] = purchase_order.get("supplier")
         changed_fields = _update_item_fields(
             item_name=target_item_name,
             batch_doc_name=batch_doc_name,
@@ -1731,6 +1745,7 @@ def _compact_purchase_order_row(row: dict) -> dict:
         "material_code": row.get("material_code") or "",
         "product_name": row.get("product_name") or "",
         "spec_model": row.get("spec_model") or "",
+        "supplier": row.get("supplier") or "",
         "quantity": row.get("quantity"),
         "unit_price": row.get("unit_price"),
         "purchase_currency": row.get("purchase_currency") or "",
@@ -2438,6 +2453,10 @@ def _build_excel_block_preview(block: dict) -> dict:
         "customs_no": block.get("customsNo"),
         "waybill_no": block.get("waybillNo"),
         "transport_mode": normalize_transport_mode(block.get("transportMode")),
+        "business_type": normalize_business_type(
+            block.get("businessType") or block.get("business_type") or block.get("transportMode"),
+            transport_mode=block.get("transportMode"),
+        ),
         "item_count": len(items),
         "mapped_preview_items": mapped_preview_items,
     }
@@ -2463,6 +2482,10 @@ def _resolve_or_create_excel_batch(
         "customs_no": block.get("customsNo") or "",
         "waybill_no": waybill_no,
         "transport_mode": normalize_transport_mode(block.get("transportMode") or transport_mode) or "SEA",
+        "business_type": normalize_business_type(
+            block.get("businessType") or block.get("business_type") or block.get("transportMode"),
+            transport_mode=block.get("transportMode") or transport_mode,
+        ) or normalize_business_type(transport_mode, transport_mode=transport_mode) or "SEA_STANDARD",
         "project_collection": project_collection or block.get("projectCollection") or "",
         "source_type": "excel",
         "source_file_name": source_name,
@@ -2803,6 +2826,15 @@ def _get_linked_purchase_approvals_from_extra(extra_json: str | dict | None) -> 
         payload.get("linked_purchase_approvals"),
         trace.get("linked_purchase_approvals"),
     ]
+    purchase_sync = trace.get("purchase_sync")
+    if isinstance(purchase_sync, dict):
+        candidates.extend(
+            [
+                purchase_sync.get("linked_purchase_approvals"),
+                purchase_sync.get("purchase_summaries"),
+                purchase_sync.get("items"),
+            ]
+        )
     linked: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for value in candidates:
@@ -3138,6 +3170,7 @@ def _build_purchase_summary_preview_row(summary: dict) -> dict:
         "source_dingtalk_url": official_url,
         "approval_title": summary.get("approval_title"),
         "approval_status": summary.get("approval_status"),
+        "message": summary.get("message") or "",
         "purchase_currency": summary.get("purchase_currency"),
         "detail_row_count": summary.get("detail_row_count"),
         "open_url": dingtalk_payload.get("open_url") or "",
@@ -4486,6 +4519,7 @@ def _build_packing_updates_for_preview(mapped_row: dict, _target: dict) -> dict:
         "chargeable_weight_kg": mapped_row.get("chargeable_weight_kg"),
         "unit_price": mapped_row.get("unit_price"),
         "purchase_currency": mapped_row.get("purchase_currency"),
+        "supplier": mapped_row.get("supplier"),
         "goods_value": mapped_row.get("goods_value"),
         "hs_code": mapped_row.get("hs_code"),
         "source_type": mapped_row.get("source_type") or "PACKING_LIST",

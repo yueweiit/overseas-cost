@@ -5,6 +5,7 @@ import json
 from overseas_costing.services.calculate_service import (
     batch_update_items,
     calculate_item_rows,
+    confirm_actual_shipped_qty_from_quantity,
     create_item,
     delete_batch,
     delete_item,
@@ -331,6 +332,29 @@ def test_batch_update_items_dry_run_counts_success_and_errors() -> None:
     assert result["error_count"] == 1
     assert result["results"][0]["ok"] is True
     assert result["results"][1]["edit_mode"] == "readonly_calc"
+
+
+def test_confirm_actual_shipped_qty_from_quantity_dry_run_counts_fillable_rows() -> None:
+    items = [
+        {"name": "ITEM-1", "quantity": "12", "actual_shipped_qty": ""},
+        {"name": "ITEM-2", "quantity": "3", "actual_shipped_qty": "2"},
+        {"name": "ITEM-3", "quantity": "", "actual_shipped_qty": ""},
+    ]
+
+    result = confirm_actual_shipped_qty_from_quantity(
+        batch_name="BATCH-001",
+        version_name="VERSION-001",
+        preview_items=json.dumps(items, ensure_ascii=False),
+    )
+
+    assert result["ok"] is True
+    assert result["dry_run"] is True
+    assert result["changed_count"] == 1
+    assert result["skipped_count"] == 2
+    assert result["missing_quantity_count"] == 1
+    assert result["results"][0]["value"] == 12
+    assert result["results"][1]["skip_reason"] == "actual_qty_exists"
+    assert result["results"][2]["skip_reason"] == "quantity_missing"
 
 
 def test_create_item_dry_run_builds_insert_payload() -> None:

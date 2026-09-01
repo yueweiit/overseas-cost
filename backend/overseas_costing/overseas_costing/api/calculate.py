@@ -56,6 +56,21 @@ def batch_update_items(
 
 
 @frappe.whitelist()
+def confirm_actual_shipped_qty_from_quantity(
+    batch_name: str,
+    version_name: str | None = None,
+    remark: str | None = None,
+) -> dict:
+    """按采购数量批量确认缺失的实际发货数量。"""
+
+    return calculate_service.confirm_actual_shipped_qty_from_quantity(
+        batch_name=batch_name,
+        version_name=version_name,
+        remark=remark,
+    )
+
+
+@frappe.whitelist()
 def create_item(
     batch_name: str,
     item_payload: str | None = None,

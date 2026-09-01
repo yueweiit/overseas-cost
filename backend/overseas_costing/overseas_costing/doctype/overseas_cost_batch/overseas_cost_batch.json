@@ -16,6 +16,7 @@
     "sea_bill_no",
     "commercial_invoice_no",
     "transport_mode",
+    "business_type",
     "project_collection",
     "subsidiary_code",
     "source_type",
@@ -95,6 +96,13 @@
       "label": "运输方式",
       "options": "SEA\nAIR\nEXPRESS",
       "default": "SEA",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "business_type",
+      "fieldtype": "Select",
+      "label": "业务类型",
+      "options": "SEA_STANDARD\nSEA_DDP\nAIR_DDP\nAIR_STANDARD\nEXPRESS",
       "in_list_view": 1
     },
     {
@@ -300,6 +308,16 @@
       "print": 1,
       "email": 1,
       "export": 1
+    },
+    {
+      "role": "海外成本核算用户",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "print": 1,
+      "email": 1,
+      "export": 1,
+      "report": 1
     }
   ]
 }

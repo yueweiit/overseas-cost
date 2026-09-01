@@ -166,6 +166,7 @@ def register_manual_document_attachment(
     file_name: str | None = None,
     version_name: str | None = None,
     remark: str | None = None,
+    manual_note: str | None = None,
     required=0,
 ) -> dict:
     """登记人工上传资料，只做归档和回溯，不触发字段解析。"""
@@ -180,6 +181,7 @@ def register_manual_document_attachment(
         file_name=file_name,
         version_name=version_name,
         remark=remark,
+        manual_note=manual_note,
         required=required,
     )
 

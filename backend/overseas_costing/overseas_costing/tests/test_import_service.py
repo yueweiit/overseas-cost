@@ -279,7 +279,7 @@ def test_preview_purchase_order_match_builds_price_rows_without_writing(monkeypa
     def fake_writeback_preview(**kwargs):
         captured.update(kwargs)
         updates = kwargs["update_builder"](kwargs["mapped_rows"][0], {})
-        assert updates == {"unit_price": 0.619, "purchase_currency": "USD", "goods_value": 742.8}
+        assert updates == {"unit_price": 0.619, "purchase_currency": "USD", "goods_value": 742.8, "supplier": "HUAFON"}
         return {"version_name": "VER-PO", "matched_count": 1, "fillable_row_count": 1, "message": "预览完成"}
 
     monkeypatch.setattr(import_service, "preview_oa_source_attachment", fake_source_preview)
@@ -291,6 +291,7 @@ def test_preview_purchase_order_match_builds_price_rows_without_writing(monkeypa
     assert result["purchase_order"]["purchase_order_no"] == "PO2026050901"
     assert result["purchase_order"]["recognized_line_count"] == 1
     assert result["source_rows"][0]["material_code"] == "S890"
+    assert result["source_rows"][0]["supplier"] == "HUAFON"
     assert captured["batch_name"] == "BATCH-PO"
     assert captured["trust_unique_material_code"] is True
 

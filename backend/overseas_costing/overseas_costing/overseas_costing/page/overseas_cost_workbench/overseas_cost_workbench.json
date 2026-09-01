@@ -7,6 +7,9 @@
   "roles": [
     {
       "role": "System Manager"
+    },
+    {
+      "role": "海外成本核算用户"
     }
   ]
 }

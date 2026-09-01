@@ -18,22 +18,35 @@ from overseas_costing.services import batch_service
 @frappe.whitelist()
 def get_batch_list(
     transport_mode: str = "SEA",
+    business_type: str | None = None,
     status: str | None = None,
     keyword: str | None = None,
     recent_days: int | str | None = None,
     include_history: int | str | bool | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict:
     """返回批次列表。"""
 
     return batch_service.get_batch_list(
         {
             "transport_mode": transport_mode,
+            "business_type": business_type,
             "status": status,
             "keyword": keyword,
             "recent_days": recent_days,
             "include_history": include_history,
+            "start_date": start_date,
+            "end_date": end_date,
         }
     )
+
+
+@frappe.whitelist()
+def get_batch_filter_options() -> dict:
+    """返回工作台筛选框使用的固定选项。"""
+
+    return batch_service.get_batch_filter_options()
 
 
 @frappe.whitelist()

@@ -1,0 +1,176 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost ERP Settings",
+  "module": "Overseas Costing",
+  "issingle": 1,
+  "track_changes": 1,
+  "field_order": [
+    "enabled",
+    "connection_section",
+    "base_url",
+    "authorization",
+    "push_mode",
+    "standard_module_section",
+    "company",
+    "supplier",
+    "cost_center",
+    "item_group",
+    "stock_uom",
+    "default_currency",
+    "schedule_date",
+    "generic_section",
+    "target_doctype",
+    "http_method",
+    "timeout",
+    "payload_field",
+    "advanced_section",
+    "field_map_json",
+    "remark"
+  ],
+  "fields": [
+    {
+      "fieldname": "enabled",
+      "fieldtype": "Check",
+      "label": "启用 ERP 推送",
+      "default": "1"
+    },
+    {
+      "fieldname": "connection_section",
+      "fieldtype": "Section Break",
+      "label": "连接配置"
+    },
+    {
+      "fieldname": "base_url",
+      "fieldtype": "Data",
+      "label": "接口地址",
+      "description": "例如：https://deeplinkerp.com/api/resource"
+    },
+    {
+      "fieldname": "authorization",
+      "fieldtype": "Password",
+      "label": "鉴权 Token",
+      "description": "例如：token api_key:api_secret"
+    },
+    {
+      "fieldname": "push_mode",
+      "fieldtype": "Select",
+      "label": "推送模式",
+      "options": "标准模块（物料+采购订单）\n通用单据",
+      "default": "标准模块（物料+采购订单）",
+      "description": "默认直接推送 ERPNext 标准模块：物料 Item + 采购订单 Purchase Order。"
+    },
+    {
+      "fieldname": "standard_module_section",
+      "fieldtype": "Section Break",
+      "label": "标准模块默认值"
+    },
+    {
+      "fieldname": "company",
+      "fieldtype": "Link",
+      "label": "默认公司",
+      "options": "Company",
+      "description": "可选。为空时使用批次业务主体/子公司作为采购订单公司。"
+    },
+    {
+      "fieldname": "supplier",
+      "fieldtype": "Link",
+      "label": "默认供应商",
+      "options": "Supplier",
+      "description": "创建采购订单时必填。先用一个确认过的默认供应商，后续再按采购单来源细分。"
+    },
+    {
+      "fieldname": "cost_center",
+      "fieldtype": "Link",
+      "label": "默认成本中心",
+      "options": "Cost Center"
+    },
+    {
+      "fieldname": "item_group",
+      "fieldtype": "Link",
+      "label": "默认物料组",
+      "options": "Item Group",
+      "default": "All Item Groups"
+    },
+    {
+      "fieldname": "stock_uom",
+      "fieldtype": "Link",
+      "label": "默认计量单位",
+      "options": "UOM",
+      "default": "Nos"
+    },
+    {
+      "fieldname": "default_currency",
+      "fieldtype": "Link",
+      "label": "默认币种",
+      "options": "Currency",
+      "default": "CNY"
+    },
+    {
+      "fieldname": "schedule_date",
+      "fieldtype": "Date",
+      "label": "默认交付日期",
+      "description": "可选。为空时使用当天日期。"
+    },
+    {
+      "fieldname": "generic_section",
+      "fieldtype": "Section Break",
+      "label": "通用单据兜底"
+    },
+    {
+      "fieldname": "target_doctype",
+      "fieldtype": "Data",
+      "label": "目标 DocType",
+      "description": "例如：Item、Purchase Order，或 DeepLinkERP 提供的自定义单据"
+    },
+    {
+      "fieldname": "http_method",
+      "fieldtype": "Select",
+      "label": "请求方式",
+      "options": "POST\nPUT\nPATCH",
+      "default": "POST"
+    },
+    {
+      "fieldname": "timeout",
+      "fieldtype": "Int",
+      "label": "超时时间（秒）",
+      "default": "20"
+    },
+    {
+      "fieldname": "payload_field",
+      "fieldtype": "Data",
+      "label": "完整报文字段名",
+      "default": "payload_json",
+      "description": "未配置字段映射时，完整 JSON 报文会写入这个字段"
+    },
+    {
+      "fieldname": "advanced_section",
+      "fieldtype": "Section Break",
+      "label": "高级映射"
+    },
+    {
+      "fieldname": "field_map_json",
+      "fieldtype": "Code",
+      "label": "字段映射 JSON",
+      "options": "JSON",
+      "description": "可选。格式：{\"erp_field\": \"local.payload.path\"}"
+    },
+    {
+      "fieldname": "remark",
+      "fieldtype": "Small Text",
+      "label": "备注"
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "share": 1,
+      "print": 1,
+      "email": 1,
+      "export": 1
+    }
+  ]
+}

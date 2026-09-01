@@ -17,6 +17,7 @@ from overseas_costing.constants import (
     BATCH_SOURCE_TYPES,
     BATCH_STATUSES,
     BATCH_WRITEBACK_STATUSES,
+    BUSINESS_TYPES,
     TRANSPORT_MODES,
 )
 from overseas_costing.utils.validators import require_in, require_value
@@ -29,6 +30,8 @@ class OverseasCostBatch(Document):
         require_value(self.batch_no, "批次号")
         if self.transport_mode:
             require_in(self.transport_mode, TRANSPORT_MODES, "运输方式")
+        if self.business_type:
+            require_in(self.business_type, BUSINESS_TYPES, "业务类型")
         if self.source_type:
             require_in(self.source_type, BATCH_SOURCE_TYPES, "来源类型")
         if self.status:

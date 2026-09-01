@@ -12,6 +12,21 @@ TRANSPORT_MODE_LABELS = {
     "EXPRESS": "快递",
 }
 
+BUSINESS_TYPES = (
+    "SEA_STANDARD",
+    "SEA_DDP",
+    "AIR_DDP",
+    "AIR_STANDARD",
+    "EXPRESS",
+)
+BUSINESS_TYPE_LABELS = {
+    "SEA_STANDARD": "海运正报正清",
+    "SEA_DDP": "海运 DDP（双清包税）",
+    "AIR_DDP": "空运 DDP（双清包税）",
+    "AIR_STANDARD": "正常空运",
+    "EXPRESS": "快递",
+}
+
 BATCH_STATUSES = (
     "Draft",
     "Imported",
@@ -48,3 +63,21 @@ AUDIT_ACTION_TYPES = (
     "UPLOAD_ATTACHMENT",
     "WRITEBACK",
 )
+
+USAGE_ACTION_TYPES = (
+    "PAGE_VIEW",
+    "BATCH_VIEW",
+    "DINGTALK_PULL",
+    "EXCEL_IMPORT",
+    "FILE_PARSE",
+    "RECALCULATE",
+    "CONFIRM_RESULT",
+    "PREVIEW_ERP",
+    "PUSH_ERP",
+    "EXPORT",
+    "DATA_CHECK",
+    "ATTACHMENT_VIEW",
+    "OTHER",
+)
+
+USAGE_STATUSES = ("Success", "Failed")

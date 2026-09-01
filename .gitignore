@@ -51,3 +51,8 @@ sites/
 logs/
 env/
 assets/
+
+# Local operation notes, URLs, and deployment commands
+LOCAL_ERP_COMMANDS_AND_URLS.md
+LOCAL_ERP_RECOVERY_NOTES.md
+LOCAL_TEST_AND_DEPLOY.ps1

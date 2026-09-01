@@ -1398,6 +1398,126 @@ def batch_update_items(
     }
 
 
+def confirm_actual_shipped_qty_from_quantity(
+    batch_name: str,
+    version_name: str | None = None,
+    remark: str | None = None,
+    preview_items: str | list[dict] | None = None,
+) -> dict:
+    edit_remark = remark or "人工确认采购数量等于实际发货数量"
+
+    if _frappe is None:
+        try:
+            items = _load_updates_payload(preview_items) if preview_items not in (None, "") else []
+        except (TypeError, ValueError, _json.JSONDecodeError) as exc:
+            return {
+                "ok": False,
+                "dry_run": True,
+                "batch_name": batch_name,
+                "version_name": version_name,
+                "changed_count": 0,
+                "skipped_count": 0,
+                "missing_quantity_count": 0,
+                "results": [],
+                "message": f"预览明细参数解析失败：{exc}",
+            }
+        return _build_confirm_actual_qty_preview(batch_name, version_name, items, edit_remark)
+
+    batch_doc_name = _resolve_batch_name(batch_name)
+    if not batch_doc_name:
+        return {"ok": False, "message": f"未找到批次：{batch_name}"}
+
+    resolved_version_name = _resolve_version_name(batch_doc_name, version_name)
+    if not resolved_version_name:
+        return {"ok": False, "batch_name": batch_doc_name, "message": "当前批次没有可更新的版本。"}
+
+    items = _frappe.get_all(
+        "Overseas Cost Item",
+        filters={"batch": batch_doc_name, "version": resolved_version_name},
+        fields=["name", "row_no", "material_code", "product_name", "quantity", "actual_shipped_qty"],
+        order_by="row_no asc",
+        limit_page_length=10000,
+    )
+    preview = _build_confirm_actual_qty_preview(batch_doc_name, resolved_version_name, items, edit_remark)
+    updates = [
+        {
+            "item_name": result["item_name"],
+            "fieldname": "actual_shipped_qty",
+            "value": result["value"],
+            "remark": edit_remark,
+        }
+        for result in preview["results"]
+        if result.get("ok") and result.get("changed")
+    ]
+
+    if not updates:
+        return {
+            **preview,
+            "dry_run": False,
+            "message": preview.get("message") or "没有可按采购数量确认的实际发货数量。",
+        }
+
+    result = batch_update_items(
+        batch_name=batch_doc_name,
+        version_name=resolved_version_name,
+        updates=_json_dumps(updates),
+        remark=edit_remark,
+    )
+    return {
+        **result,
+        "missing_quantity_count": preview["missing_quantity_count"],
+        "message": f"已按采购数量确认实际发货数量 {result.get('changed_count', 0)} 行；请重新试算后再校验结果。",
+    }
+
+
+def _build_confirm_actual_qty_preview(
+    batch_name: str,
+    version_name: str | None,
+    items: list[dict],
+    remark: str,
+) -> dict:
+    results = []
+    changed_count = 0
+    skipped_count = 0
+    missing_quantity_count = 0
+    for item in items:
+        item_name = item.get("name") or item.get("item_name")
+        quantity = _to_float(item.get("quantity"))
+        actual_qty = _to_float(item.get("actual_shipped_qty"))
+        base = {
+            "ok": True,
+            "item_name": item_name,
+            "row_no": item.get("row_no") or item.get("excel_row_no"),
+            "material_code": item.get("material_code"),
+            "product_name": item.get("product_name"),
+            "fieldname": "actual_shipped_qty",
+            "manual_override_reason": remark,
+        }
+        if actual_qty > 0:
+            skipped_count += 1
+            results.append({**base, "changed": False, "value": actual_qty, "skip_reason": "actual_qty_exists"})
+            continue
+        if quantity <= 0:
+            skipped_count += 1
+            missing_quantity_count += 1
+            results.append({**base, "changed": False, "value": actual_qty, "skip_reason": "quantity_missing"})
+            continue
+        changed_count += 1
+        results.append({**base, "changed": True, "value": quantity, "source_fieldname": "quantity"})
+
+    return {
+        "ok": True,
+        "dry_run": _frappe is None,
+        "batch_name": batch_name,
+        "version_name": version_name,
+        "changed_count": changed_count,
+        "skipped_count": skipped_count,
+        "missing_quantity_count": missing_quantity_count,
+        "results": results,
+        "message": f"可按采购数量确认实际发货数量 {changed_count} 行，采购数量也缺失 {missing_quantity_count} 行。",
+    }
+
+
 def create_item(
     batch_name: str,
     item_payload: str | dict | None = None,

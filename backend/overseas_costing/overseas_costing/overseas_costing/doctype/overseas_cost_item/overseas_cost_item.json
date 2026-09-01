@@ -81,7 +81,20 @@
     "alloc_price_mxn",
     "total_cost_rmb",
     "total_unit_rmb",
+    "sales_quantity",
+    "sales_unit_price",
+    "sales_currency",
+    "sales_fx_rate",
+    "sales_amount",
+    "sales_amount_rmb",
+    "sales_cost_rmb",
+    "other_sales_expense_rmb",
+    "gross_profit_rmb",
+    "profit_rmb",
+    "profit_margin",
+    "profit_status",
     "project_collection",
+    "supplier",
     "transport_mode",
     "source_type",
     "source_doc_no",
@@ -478,9 +491,85 @@
       "read_only": 1
     },
     {
+      "fieldname": "sales_quantity",
+      "fieldtype": "Float",
+      "label": "销售数量"
+    },
+    {
+      "fieldname": "sales_unit_price",
+      "fieldtype": "Currency",
+      "label": "销售单价"
+    },
+    {
+      "fieldname": "sales_currency",
+      "fieldtype": "Select",
+      "label": "销售币种",
+      "options": "RMB\nUSD\nMXN",
+      "default": "RMB"
+    },
+    {
+      "fieldname": "sales_fx_rate",
+      "fieldtype": "Float",
+      "label": "销售汇率（折合RMB）"
+    },
+    {
+      "fieldname": "sales_amount",
+      "fieldtype": "Currency",
+      "label": "销售金额（原币）",
+      "read_only": 1
+    },
+    {
+      "fieldname": "sales_amount_rmb",
+      "fieldtype": "Currency",
+      "label": "销售金额RMB",
+      "read_only": 1
+    },
+    {
+      "fieldname": "sales_cost_rmb",
+      "fieldtype": "Currency",
+      "label": "销售数量对应综合成本RMB",
+      "read_only": 1
+    },
+    {
+      "fieldname": "other_sales_expense_rmb",
+      "fieldtype": "Currency",
+      "label": "其他销售费用RMB"
+    },
+    {
+      "fieldname": "gross_profit_rmb",
+      "fieldtype": "Currency",
+      "label": "毛利RMB",
+      "read_only": 1
+    },
+    {
+      "fieldname": "profit_rmb",
+      "fieldtype": "Currency",
+      "label": "利润RMB",
+      "read_only": 1
+    },
+    {
+      "fieldname": "profit_margin",
+      "fieldtype": "Percent",
+      "label": "利润率",
+      "read_only": 1
+    },
+    {
+      "fieldname": "profit_status",
+      "fieldtype": "Select",
+      "label": "利润测算状态",
+      "options": "PENDING\nCALCULATED",
+      "default": "PENDING",
+      "read_only": 1
+    },
+    {
       "fieldname": "project_collection",
       "fieldtype": "Data",
       "label": "项目归集"
+    },
+    {
+      "fieldname": "supplier",
+      "fieldtype": "Data",
+      "label": "供应商"
     },
     {
       "fieldname": "transport_mode",
@@ -568,6 +657,16 @@
       "print": 1,
       "email": 1,
       "export": 1
+    },
+    {
+      "role": "海外成本核算用户",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "print": 1,
+      "email": 1,
+      "export": 1,
+      "report": 1
     }
   ]
 }

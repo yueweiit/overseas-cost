@@ -1,0 +1,510 @@
+  async exportCurrentResult() {
+    const { batches, label } = this.getExportCurrentBatches();
+    if (!batches.length) {
+      frappe.msgprint("当前没有可导出的批次。");
+      return;
+    }
+    const result = await this.call(
+      "overseas_costing.api.batch.export_current_result_xlsx",
+      {
+        batch_names_json: JSON.stringify(batches.map((batch) => batch.name)),
+        transport_label: label,
+      },
+      true
+    );
+    if (!result.ok) throw new Error(result.message || "导出失败");
+    this.downloadBase64File(result.content_base64, result.file_name, result.mime_type);
+    this.recordUsage("EXPORT", { remark: `导出当前全部批次结果：${label || "全部"}，${result.total || 0} 行`, extra: { total: result.total || 0 } });
+    frappe.show_alert({ message: result.message || `已导出 ${result.total || 0} 行 SKU 明细。`, indicator: "green" });
+  }
+
+  async exportDrawerBatch() {
+    const batch = this.drawerBatchName ? this.findBatch(this.drawerBatchName) : null;
+    if (!batch) {
+      frappe.msgprint("当前没有可导出的批次。");
+      return;
+    }
+    const result = await this.call(
+      "overseas_costing.api.batch.export_current_result_xlsx",
+      {
+        batch_names_json: JSON.stringify([batch.name]),
+        transport_label: this.batchReferenceLabel(batch),
+      },
+      true
+    );
+    if (!result.ok) throw new Error(result.message || "导出失败");
+    this.downloadBase64File(result.content_base64, result.file_name, result.mime_type);
+    this.recordUsage("EXPORT", { batch, remark: `导出当前批次：${result.total || 0} 行`, extra: { total: result.total || 0 } });
+    frappe.show_alert({ message: result.message || `已导出当前批次 ${result.total || 0} 行 SKU 明细。`, indicator: "green" });
+  }
+
+  async openBatchDrawer(batchName = "", options = {}) {
+    const batch = batchName ? this.findBatch(batchName) : this.getActiveBatch();
+    if (!batch) {
+      this.showPendingFeature("当前没有可查看详情的批次。");
+      return;
+    }
+    this.activeBatchName = batch.name;
+    this.exportPinnedBatchName = batch.name;
+    this.dataCheckBatchName = batch.name;
+    this.drawerBatchName = batch.name;
+    this.drawerTab = "overview";
+    if (options.updateUrl !== false) {
+      this.updateBatchUrl(this.batchUrlKey(batch), { view: "drawer" });
+    }
+    const $drawer = this.$root.find("[data-area='batch-drawer']");
+    const $mask = this.$root.find("[data-area='batch-drawer-mask']");
+    $drawer.attr("aria-hidden", "false").addClass("is-open");
+    $mask.addClass("is-visible");
+    this.renderBatchDrawerLoading();
+    try {
+      await this.loadBatchItems(batch.name, batch.current_version);
+      await this.loadAuditLogs(batch.name, batch.current_version);
+      await this.loadUsageLogs(batch.name);
+      this.recordUsage("BATCH_VIEW", { batch, remark: "打开批次详情抽屉" });
+      this.renderBatchDrawer();
+    } catch (error) {
+      this.renderBatchDrawerError(error);
+      this.showError(error);
+    }
+  }
+
+  closeBatchDrawer(options = {}) {
+    const $drawer = this.$root.find("[data-area='batch-drawer']");
+    const $mask = this.$root.find("[data-area='batch-drawer-mask']");
+    $drawer.attr("aria-hidden", "true").removeClass("is-open");
+    $mask.removeClass("is-visible");
+    if (options.updateUrl !== false) {
+      const batch = this.findBatch(this.focusedBatchName) || this.findBatch(this.drawerBatchName);
+      this.updateBatchUrl(this.batchUrlKey(batch), { view: "" });
+    }
+  }
+
+  switchBatchDrawerTab(tab = "overview") {
+    const allowedTabs = new Set(["overview", "items", "audit", "usage", "allocation"]);
+    this.drawerTab = allowedTabs.has(tab) ? tab : "overview";
+    if (this.drawerTab === "usage" && this.drawerBatchName) {
+      this.loadUsageLogs(this.drawerBatchName).catch((error) => this.showError(error));
+    }
+    this.renderBatchDrawer();
+  }
+
+  renderBatchDrawerLoading() {
+    this.$root.find("[data-area='batch-drawer-body']").html(`
+      <div class="ocw-batch-drawer-loading">
+        <span class="spinner-border spinner-border-sm"></span>
+        <span>正在加载批次详情...</span>
+      </div>
+    `);
+  }
+
+  renderBatchDrawerError(error) {
+    this.$root.find("[data-area='batch-drawer-body']").html(`
+      <div class="ocw-batch-drawer-empty">
+        <strong>批次详情加载失败</strong>
+        <span>${this.escape(error && error.message ? error.message : "请刷新后重试")}</span>
+      </div>
+    `);
+  }
+
+  renderBatchDrawer() {
+    const batch = this.findBatch(this.drawerBatchName);
+    if (!batch) return;
+    const items = this.batchItems[batch.name] || [];
+    const $drawer = this.$root.find("[data-area='batch-drawer']");
+    const title = batch.waybill_no || batch.customs_no || batch.batch_no || batch.name;
+    $drawer.find("[data-area='batch-drawer-title']").text(title);
+    $drawer.find("[data-action='switch-batch-drawer-tab']").each((_, node) => {
+      $(node).toggleClass("active", $(node).attr("data-tab") === this.drawerTab);
+    });
+    $drawer.find("[data-area='batch-drawer-body']").html(this.renderBatchDrawerTab(batch, items));
+  }
+
+  renderBatchDrawerTab(batch, items) {
+    if (this.drawerTab === "audit") {
+      const auditHtml = this.auditEvents.length
+        ? this.buildAuditSummaryEvents(this.auditEvents).map((event) => this.renderAuditEvent(event)).join("")
+        : `<li class="ocw-audit-empty"><span class="ocw-audit-text">当前批次暂无修改记录</span></li>`;
+      return `<ul class="ocw-audit-list ocw-batch-drawer-audit-list">${auditHtml}</ul>`;
+    }
+    if (this.drawerTab === "usage") {
+      return this.renderUsageDrawer(batch);
+    }
+    if (this.drawerTab === "allocation") {
+      return this.renderBatchDrawerAllocation(batch, items);
+    }
+    if (this.drawerTab === "profit") {
+      return this.renderBatchDrawerProfit(batch, items);
+    }
+    if (this.drawerTab === "items") {
+      return this.renderBatchDrawerItems(batch, items);
+    }
+    return this.renderBatchDrawerOverview(batch, items);
+  }
+
+  renderBatchDrawerOverview(batch, items) {
+    const sourceStatus = batch.source_status || {};
+    const logisticsTextSummary = sourceStatus.logistics_text_summary || {};
+    const logisticsTextBrief = this.formatLogisticsTextSummary(logisticsTextSummary);
+    const summary = batch.summary_snapshot || {};
+    const itemCount = items.length || Number(batch.item_count || 0);
+    const goodsValue = items.length ? this.sumRowsNumber(items, "goods_value") : Number(batch.total_goods_value || 0);
+    const totalCost = items.length
+      ? this.sumRowsNumber(items, "total_cost_rmb")
+      : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || 0);
+    const fields = [
+      ["报关/来源单号", batch.customs_no || batch.source_approval_no || batch.batch_no || "--"],
+      ["运单/柜号", batch.waybill_no || "--"],
+      ["运输方式", this.transportLabel(batch.transport_mode)],
+      ["业务类型", this.businessTypeLabel(batch.business_type)],
+      ["状态", this.batchStatusInfo(batch.status, batch, itemCount).label],
+      ["物料行数", itemCount],
+      ["采购货值", `${this.formatNumber(goodsValue)} RMB`],
+      ["综合成本", `${this.formatNumber(totalCost || summary.total_cost_rmb)} RMB`],
+      ["采购审批", this.purchaseApprovalStatusLabel(sourceStatus)],
+      ["资料情况", this.sourceStatusLabel(sourceStatus, batch)],
+    ];
+    const logisticsTextHtml = logisticsTextBrief
+      ? `
+        <div class="ocw-batch-drawer-note">
+          <span>审批正文识别</span>
+          <strong>${this.escape(logisticsTextBrief)}</strong>
+        </div>
+      `
+      : "";
+    const erpFlowHtml = this.renderErpFlowPanel(batch, items);
+    return `
+      <div class="ocw-batch-drawer-section ocw-batch-drawer-overview-brief">
+        <div class="ocw-batch-drawer-field-grid">
+          ${fields.map(([label, value]) => `<div><span>${this.escape(label)}</span><strong>${this.escape(this.formatValue(value))}</strong></div>`).join("")}
+        </div>
+        ${this.renderPurchaseApprovalStatusAlert(sourceStatus)}
+        ${logisticsTextHtml}
+      </div>
+      ${erpFlowHtml}
+    `;
+  }
+
+  renderBatchDrawerItems(batch, items) {
+    const rows = (items || []).map((item, index) => `
+      <tr>
+        <td>${this.escape(String(index + 1))}</td>
+        <td>${this.escape(this.formatValue(item.material_code || "--"))}</td>
+        <td>${this.escape(this.formatValue(item.product_name || item.product_name_es || "--"))}</td>
+        <td>${this.escape(this.formatValue(item.quantity))}</td>
+        <td>${this.escape(this.formatValue(item.unit_price))}</td>
+        <td>${this.escape(this.formatValue(item.purchase_currency || "--"))}</td>
+        <td>${this.escape(this.formatValue(item.total_unit_rmb || "--"))}</td>
+      </tr>
+    `).join("");
+    return `
+      <div class="ocw-batch-drawer-section">
+        <div class="ocw-batch-drawer-section-head"><h4>物料明细</h4><span>${items.length} 行，完整展示</span></div>
+        ${rows ? `
+          <div class="ocw-batch-drawer-table-wrap"><table class="ocw-batch-drawer-table"><thead><tr><th>#</th><th>物料编码</th><th>物料名称</th><th>采购数量</th><th>采购单价</th><th>采购币种</th><th>综合单价 RMB</th></tr></thead><tbody>${rows}</tbody></table></div>
+        ` : `<div class="ocw-batch-drawer-empty"><span>当前批次暂无物料明细</span></div>`}
+      </div>
+    `;
+  }
+
+  formatProfitNumber(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return value === undefined || value === null ? "" : String(value);
+    return number.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
+  }
+
+  profitDefaultFx(currency, item = {}) {
+    const code = String(currency || item.sales_currency || "RMB").trim().toUpperCase();
+    const saved = Number(item.sales_fx_rate);
+    if (Number.isFinite(saved) && saved > 0) return saved;
+    return code === "RMB" ? 1 : 0;
+  }
+
+  calculateProfitPreviewRow(item, values = {}) {
+    const quantity = Number(values.sales_quantity ?? item.sales_quantity ?? 0) || 0;
+    const unitPrice = Number(values.sales_unit_price ?? item.sales_unit_price ?? 0) || 0;
+    const currency = String(values.sales_currency ?? item.sales_currency ?? "RMB").trim().toUpperCase() || "RMB";
+    const fxRate = Number(values.sales_fx_rate ?? this.profitDefaultFx(currency, item)) || 0;
+    const otherExpense = Number(values.other_sales_expense_rmb ?? item.other_sales_expense_rmb ?? 0) || 0;
+    const costUnit = Number(item.total_unit_rmb) || 0;
+    const salesAmount = quantity * unitPrice;
+    const salesAmountRmb = salesAmount * fxRate;
+    const salesCost = quantity * costUnit;
+    const grossProfit = salesAmountRmb - salesCost;
+    const profit = grossProfit - otherExpense;
+    const margin = salesAmountRmb ? (profit / salesAmountRmb) * 100 : 0;
+    const missing = [];
+    if (quantity <= 0) missing.push("销售数量");
+    if (unitPrice <= 0) missing.push("销售单价");
+    if (fxRate <= 0) missing.push("销售汇率");
+    if (costUnit <= 0) missing.push("综合成本单价");
+    return {
+      sales_quantity: quantity,
+      sales_unit_price: unitPrice,
+      sales_currency: currency,
+      sales_fx_rate: fxRate,
+      sales_amount: salesAmount,
+      sales_amount_rmb: salesAmountRmb,
+      sales_cost_rmb: salesCost,
+      other_sales_expense_rmb: otherExpense,
+      gross_profit_rmb: grossProfit,
+      profit_rmb: profit,
+      profit_margin: margin,
+      profit_status: missing.length ? "PENDING" : "CALCULATED",
+      profit_status_label: missing.length ? "待补销售数据" : "已测算",
+      profit_missing_fields: missing,
+    };
+  }
+
+  calculateProfitPreview(items, valuesByItem = {}) {
+    const rows = (items || []).map((item) => this.calculateProfitPreviewRow(item, valuesByItem[item.name] || {}));
+    const complete = rows.filter((row) => row.profit_status === "CALCULATED");
+    const salesAmount = this.sumRowsNumber(complete, "sales_amount_rmb");
+    const profit = this.sumRowsNumber(complete, "profit_rmb");
+    return {
+      item_count: rows.length,
+      calculated_count: complete.length,
+      pending_count: rows.length - complete.length,
+      sales_amount_rmb: salesAmount,
+      sales_cost_rmb: this.sumRowsNumber(complete, "sales_cost_rmb"),
+      gross_profit_rmb: this.sumRowsNumber(complete, "gross_profit_rmb"),
+      other_sales_expense_rmb: this.sumRowsNumber(complete, "other_sales_expense_rmb"),
+      profit_rmb: profit,
+      profit_margin: salesAmount ? (profit / salesAmount) * 100 : 0,
+      rows,
+    };
+  }
+
+  renderBatchDrawerProfit(batch, items, valuesByItem = {}) {
+    const preview = this.calculateProfitPreview(items, valuesByItem);
+    const summaryCards = [
+      ["销售金额 RMB", preview.sales_amount_rmb],
+      ["综合成本 RMB", preview.sales_cost_rmb],
+      ["毛利 RMB", preview.gross_profit_rmb],
+      ["其他销售费用 RMB", preview.other_sales_expense_rmb],
+      ["利润 RMB", preview.profit_rmb],
+      ["利润率", preview.calculated_count ? `${this.formatProfitNumber(preview.profit_margin)}%` : "--"],
+    ]
+      .map(([label, value]) => `<div class="ocw-profit-summary-card"><span>${label}</span><strong>${this.escape(typeof value === "number" ? this.formatProfitNumber(value) : value)}</strong></div>`)
+      .join("");
+    const rows = (items || []).map((item, index) => {
+      const values = valuesByItem[item.name] || {};
+      const row = this.calculateProfitPreviewRow(item, values);
+      const savedCurrency = values.sales_currency ?? item.sales_currency ?? "RMB";
+      const savedFx = values.sales_fx_rate ?? item.sales_fx_rate ?? (savedCurrency === "RMB" ? 1 : "");
+      const input = (field, value) => `<input class="ocw-profit-input" data-profit-input="${field}" type="number" value="${this.escape(value === null || value === undefined ? "" : String(value))}" />`;
+      return `
+        <tr data-profit-row data-item-name="${this.escape(item.name || "")}">
+          <td>${this.escape(String(index + 1))}</td>
+          <td><strong>${this.escape(item.material_code || "--")}</strong><small>${this.escape(item.product_name || item.product_name_es || "")}</small></td>
+          <td>${input("sales_quantity", values.sales_quantity ?? item.sales_quantity ?? "")}</td>
+          <td>${input("sales_unit_price", values.sales_unit_price ?? item.sales_unit_price ?? "")}</td>
+          <td><select class="ocw-profit-input" data-profit-input="sales_currency"><option value="RMB"${savedCurrency === "RMB" ? " selected" : ""}>RMB</option><option value="USD"${savedCurrency === "USD" ? " selected" : ""}>USD</option><option value="MXN"${savedCurrency === "MXN" ? " selected" : ""}>MXN</option></select></td>
+          <td>${input("sales_fx_rate", savedFx)}</td>
+          <td>${input("other_sales_expense_rmb", values.other_sales_expense_rmb ?? item.other_sales_expense_rmb ?? "")}</td>
+          <td data-profit-result="sales_amount_rmb">${row.profit_status === "CALCULATED" ? this.formatProfitNumber(row.sales_amount_rmb) : "--"}</td>
+          <td data-profit-result="sales_cost_rmb">${row.profit_status === "CALCULATED" ? this.formatProfitNumber(row.sales_cost_rmb) : "--"}</td>
+          <td data-profit-result="gross_profit_rmb">${row.profit_status === "CALCULATED" ? this.formatProfitNumber(row.gross_profit_rmb) : "--"}</td>
+          <td data-profit-result="profit_rmb">${row.profit_status === "CALCULATED" ? this.formatProfitNumber(row.profit_rmb) : "--"}</td>
+          <td data-profit-result="profit_margin">${row.profit_status === "CALCULATED" ? `${this.formatProfitNumber(row.profit_margin)}%` : "--"}</td>
+          <td data-profit-result="profit_status" class="${row.profit_status === "CALCULATED" ? "is-ok" : "is-pending"}">${row.profit_status_label}</td>
+        </tr>
+      `;
+    }).join("");
+    return `
+      <div class="ocw-batch-drawer-section ocw-profit-panel">
+        <div class="ocw-batch-drawer-section-head"><h4>利润测算</h4><span>销售数据人工录入，结果自动计算</span></div>
+        <div class="ocw-profit-note">综合成本取当前批次的综合单价；物流、清关、关税等已包含在综合成本中的费用不会重复扣除。汇率填写“1销售币种 = 多少人民币”。</div>
+        <div class="ocw-profit-summary">${summaryCards}</div>
+        <div class="ocw-profit-status-line">已测算 ${preview.calculated_count} 行，待补销售数据 ${preview.pending_count} 行。汇总只统计已完成的明细。</div>
+        <div class="ocw-batch-drawer-table-wrap ocw-profit-table-wrap">
+          <table class="ocw-batch-drawer-table ocw-profit-table"><thead><tr><th>#</th><th>SKU</th><th>销售数量</th><th>销售单价</th><th>币种</th><th>汇率</th><th>其他销售费用 RMB</th><th>销售金额 RMB</th><th>综合成本 RMB</th><th>毛利 RMB</th><th>利润 RMB</th><th>利润率</th><th>状态</th></tr></thead><tbody>${rows || `<tr><td colspan="13">当前批次暂无物料明细</td></tr>`}</tbody></table>
+        </div>
+        <div class="ocw-profit-actions"><button class="ocw-primary-btn ocw-mini-btn" type="button" data-action="save-profit-inputs"${items.length ? "" : " disabled"}>保存并测算</button></div>
+      </div>
+    `;
+  }
+
+  readProfitDrawerValues() {
+    const values = {};
+    this.$root.find("[data-profit-row]").each((_, row) => {
+      const $row = $(row);
+      const itemName = $row.attr("data-item-name");
+      if (!itemName) return;
+      values[itemName] = {};
+      $row.find("[data-profit-input]").each((__, input) => {
+        values[itemName][$(input).attr("data-profit-input")] = $(input).val();
+      });
+    });
+    return values;
+  }
+
+  updateProfitDrawerPreview() {
+    if (this.drawerTab !== "profit") return;
+    const batch = this.findBatch(this.drawerBatchName);
+    if (!batch) return;
+    const valuesByItem = this.readProfitDrawerValues();
+    const preview = this.calculateProfitPreview(this.batchItems[batch.name] || [], valuesByItem);
+    preview.rows.forEach((row, index) => {
+      const $row = this.$root.find("[data-profit-row]").eq(index);
+      ["sales_amount_rmb", "sales_cost_rmb", "gross_profit_rmb", "profit_rmb"].forEach((field) => {
+        $row.find(`[data-profit-result="${field}"]`).text(row.profit_status === "CALCULATED" ? this.formatProfitNumber(row[field]) : "--");
+      });
+      $row.find('[data-profit-result="profit_margin"]').text(row.profit_status === "CALCULATED" ? `${this.formatProfitNumber(row.profit_margin)}%` : "--");
+      $row.find('[data-profit-result="profit_status"]').text(row.profit_status_label).toggleClass("is-ok", row.profit_status === "CALCULATED").toggleClass("is-pending", row.profit_status !== "CALCULATED");
+    });
+    const $summary = this.$root.find(".ocw-profit-summary");
+    const values = [preview.sales_amount_rmb, preview.sales_cost_rmb, preview.gross_profit_rmb, preview.other_sales_expense_rmb, preview.profit_rmb, preview.calculated_count ? `${this.formatProfitNumber(preview.profit_margin)}%` : "--"];
+    $summary.find(".ocw-profit-summary-card strong").each((index, node) => $(node).text(typeof values[index] === "number" ? this.formatProfitNumber(values[index]) : values[index]));
+    this.$root.find(".ocw-profit-status-line").text(`已测算 ${preview.calculated_count} 行，待补销售数据 ${preview.pending_count} 行。汇总只统计已完成的明细。`);
+  }
+
+  async saveProfitInputs() {
+    const batch = this.findBatch(this.drawerBatchName);
+    if (!batch) return;
+    const valuesByItem = this.readProfitDrawerValues();
+    const rows = Object.entries(valuesByItem).map(([item_name, values]) => ({ item_name, ...values }));
+    const $button = this.$root.find("[data-action='save-profit-inputs']").prop("disabled", true).text("保存中");
+    try {
+      const result = await this.call("overseas_costing.api.profit.save_profit_inputs", {
+        batch_name: batch.name,
+        version_name: batch.current_version || null,
+        rows_payload: JSON.stringify(rows),
+      }, true);
+      if (!result || !result.ok) throw new Error((result && result.message) || "利润测算保存失败");
+      await this.loadBatchItems(batch.name, batch.current_version, true);
+      await this.loadAuditLogs(batch.name, batch.current_version);
+      this.renderTable();
+      this.renderBatchDrawer();
+      this.recordUsage("EDIT", { batch, remark: "保存利润测算销售数据" });
+      frappe.show_alert({ message: result.message || "利润测算已保存", indicator: "green" });
+    } catch (error) {
+      this.showError(error);
+      $button.prop("disabled", false).text("保存并测算");
+    }
+  }
+
+  renderErpFlowPanel(batch, items) {
+    const summary = batch.summary_snapshot || {};
+    const itemCount = items.length || Number(batch.item_count || 0);
+    const totalCost = items.length
+      ? this.sumRowsNumber(items, "total_cost_rmb")
+      : Number(batch.actual_total_cost_rmb || batch.estimated_total_cost_rmb || summary.total_cost_rmb || 0);
+    const statusInfo = this.batchStatusInfo(batch.status, batch, itemCount);
+    const hasVersion = this.hasText(batch.current_version);
+    const confirmed = String(batch.confirm_status || batch.status || "").toLowerCase().includes("confirmed");
+    const writebackInfo = this.erpWritebackStatusInfo(batch);
+    const writebackLower = String(batch.writeback_status || "Not Started").toLowerCase();
+    const invalidBusiness = Boolean((batch.source_status || {}).invalid_business);
+    const canConfirm = hasVersion && !statusInfo.needsRecalculate && !invalidBusiness;
+    const canPreview = confirmed && !invalidBusiness;
+    const canPush = confirmed && !writebackLower.includes("success") && !invalidBusiness;
+    const note = invalidBusiness
+      ? "关联采购审批已拒绝、撤销或终止，当前批次保留用于追溯，但不会进入成本确认或 ERP 推送。"
+      : confirmed
+      ? "计算结果已通过人工校验，ERP 报文可预览后进入待推送队列。"
+      : statusInfo.needsRecalculate
+        ? "明细或费用池变更后需要重新试算，再进行人工校验。"
+        : "核对费用池、分摊依据和明细结果后，执行人工校验。";
+    const checkpoints = [
+      { label: "综合成本", value: this.isPositive(totalCost) ? `${this.formatNumber(totalCost)} RMB` : "待试算", state: this.isPositive(totalCost) ? "is-ok" : "is-warn" },
+      { label: "确认状态", value: confirmed ? "已确认" : "待确认", state: confirmed ? "is-ok" : "is-warn" },
+      { label: "回写状态", value: writebackInfo.label, state: writebackInfo.state },
+      { label: "业务主体", value: batch.subsidiary_code || "--", state: this.hasText(batch.subsidiary_code) ? "is-ok" : "is-warn" },
+    ];
+    const blockHtml = this.renderErpFlowBlockInline(batch);
+    return `
+      <div class="ocw-batch-drawer-section">
+        <div class="ocw-erp-flow-panel">
+          <div class="ocw-erp-flow-head">
+            <h4>校验计算结果</h4>
+            <span>${this.escape(statusInfo.label || "")}</span>
+          </div>
+          <div class="ocw-erp-flow-grid">
+            ${checkpoints
+              .map(
+                (item) => `
+                  <div class="${this.escape(item.state)}">
+                    <span>${this.escape(item.label)}</span>
+                    <strong>${this.escape(this.formatValue(item.value))}</strong>
+                  </div>
+                `
+              )
+              .join("")}
+          </div>
+          <div class="ocw-erp-flow-actions">
+            <button class="ocw-primary-btn ocw-mini-btn" data-action="confirm-calculation-result"${canConfirm ? "" : " disabled"}>校验计算结果</button>
+            <button class="ocw-outline-btn ocw-mini-btn" data-action="preview-erp-payload"${canPreview ? "" : " disabled"}>预览 ERP 报文</button>
+            <button class="ocw-outline-btn ocw-mini-btn" data-action="writeback-to-erp"${canPush ? "" : " disabled"}>推送 ERP</button>
+          </div>
+          <div class="ocw-erp-flow-note">${this.escape(note)}</div>
+        </div>
+        ${blockHtml}
+      </div>
+    `;
+  }
+
+  renderBatchDrawerAllocation(batch, items) {
+    const rows = this.buildAiReviewRows(batch, items);
+    return `
+      <div class="ocw-batch-drawer-section">
+        <div class="ocw-batch-drawer-section-head"><h4>AI 分摊填入</h4><span>基础金额可在明细中人工调整</span></div>
+        <div class="ocw-diff-table ocw-batch-drawer-diff-table">
+          <div class="ocw-diff-head"><span>复核项</span><span>当前状态</span><span>说明</span></div>
+          ${rows.map((row) => `<div><span>${this.escape(row.label)}</span><b class="${this.escape(row.statusClass)}">${this.escape(row.status)}</b><strong>${this.escape(row.suggestion)}</strong></div>`).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  erpWritebackStatusInfo(batch = {}) {
+    const writebackValue = String(batch.writeback_status || "Not Started");
+    const writebackLower = writebackValue.toLowerCase();
+    if (writebackLower.includes("success")) {
+      return { label: "已完成", state: "is-ok", note: batch.writeback_message || "DeepLinkERP 已返回成功。" };
+    }
+    if (writebackLower.includes("pending")) {
+      return { label: "待接口推送", state: "is-info", note: batch.writeback_message || "已生成报文，当前等待正式接口配置后推送。" };
+    }
+    if (writebackLower.includes("fail")) {
+      return { label: "失败可重试", state: "is-warn", note: batch.writeback_message || "上次推送失败，后续可重试。" };
+    }
+    return { label: "未开始", state: "is-info", note: batch.writeback_message || "当前还没有生成 DeepLinkERP 待推送报文。" };
+  }
+
+  sourceStatusLabel(sourceStatus, batch) {
+    if (sourceStatus.invalid_business) return "采购审批无效";
+    if (Number(sourceStatus.oa_attachment_count || batch.source_attachment_count || 0) > 0) return "已有关联资料";
+    if (batch.source_approval_no || batch.source_instance_id || batch.source_dingtalk_url) return "已关联钉钉审批单";
+    return "待补资料";
+  }
+
+  purchaseApprovalStatusLabel(sourceStatus = {}) {
+    const state = String(sourceStatus.purchase_approval_sync_state || "").trim().toLowerCase();
+    const count = Number(sourceStatus.linked_purchase_count || 0);
+    const statuses = Array.isArray(sourceStatus.linked_purchase_approval_statuses)
+      ? sourceStatus.linked_purchase_approval_statuses.filter(Boolean)
+      : [];
+    if (state === "invalid" || sourceStatus.invalid_business) return "采购审批无效";
+    if (state === "pending") return count ? `${count} 条状态未同步` : "状态未同步";
+    if (state === "missing") return "未关联采购审批";
+    if (state === "valid") return statuses.length ? `${count} 条：${statuses.join("/")}` : `${count} 条已同步`;
+    return "--";
+  }
+
+  downloadBase64File(contentBase64, fileName, mimeType) {
+    const binary = atob(contentBase64 || "");
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    const blob = new Blob([bytes], { type: mimeType || "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName || "海外采购综合成本核算.xlsx";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }

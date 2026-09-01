@@ -12,6 +12,7 @@
 | `recalculate_batch.py` | 批次重算脚本 | 调用正式重算服务，支持 bench execute 或命令行调试单个批次 |
 | `compare_manual_excel_baseline.py` | 人工Excel对照脚本 | 读取人工核算表指定批次，与系统当前批次试算结果生成 xlsx 对照表 |
 | `restore_hpcu_demo.py` | HPCU5155607演示批次恢复脚本 | `restore` 按装箱单解析恢复；`restore_manual_baseline` 按人工核算表 22 行恢复经理演示基准版 |
+| `test_purchase_order_writeback.py` | 本地采购订单写入验证 | `list_complete_candidates` 只读筛选业务主体、采购审批、成本和物料完整的候选批次；`run_complete_batch` 复制指定批次全部明细到本地草稿并回读；不连接线上、不提交、不影响库存估值 |
 | `test_dingtalk_order_link.py` | 钉钉跳转测试脚本 | 本地验证审批实例链接和钉钉唤起链接生成 |
 
 ## 当前约定
@@ -23,6 +24,7 @@
 5. 任意真实 Excel 可先执行 `OVERSEAS_COST_EXCEL_FILE=/path/to/file.xlsx bench --site development.localhost execute overseas_costing.scripts.import_excel_workbook.preview_from_env` 预览，再执行 `import_from_env` 导入
 6. 演示对照表可执行 `OVERSEAS_COST_BATCH=HPCU5155607 bench --site development.localhost execute overseas_costing.scripts.compare_manual_excel_baseline.build_hpcu_manual_comparison_from_env`
 7. 如果经理演示需要和历史人工核算表口径一致，可执行 `bench --site development.localhost execute overseas_costing.scripts.restore_hpcu_demo.restore_manual_baseline`，它会把 HPCU5155607 恢复为人工核算表 22 行基准版，同时保留装箱单、完税凭证和人工表作为追溯附件。
+8. 本地 ERP 正式样本验证先执行 `bench --site development.localhost execute overseas_costing.scripts.test_purchase_order_writeback.list_complete_candidates`，只接受采购审批已完成/已通过的批次；确认候选批次后执行 `run_complete_batch`，脚本默认复用对应的未提交草稿，避免重复创建。
 
 ## 钉钉国际物流审批拉取
 

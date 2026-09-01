@@ -6,6 +6,7 @@ from overseas_costing.utils.field_mapper import (
     map_oa_row_to_item,
     map_packing_list_row_to_item,
     map_purchase_expense_row_to_item,
+    normalize_business_type,
     normalize_transport_mode,
     normalize_unit,
 )
@@ -136,3 +137,14 @@ def test_normalize_transport_mode() -> None:
     assert normalize_transport_mode("contenedor marítimo海运整柜") == "SEA"
     assert normalize_transport_mode("correo express快递") == "EXPRESS"
     assert normalize_transport_mode("华峰正报") is None
+
+
+def test_normalize_business_type_uses_explicit_business_type() -> None:
+    assert normalize_business_type("SEA_DDP") == "SEA_DDP"
+    assert normalize_business_type("空运 DDP（双清包税）") == "AIR_DDP"
+
+
+def test_normalize_business_type_falls_back_to_legacy_transport_mode() -> None:
+    assert normalize_business_type("", transport_mode="SEA") == "SEA_STANDARD"
+    assert normalize_business_type("", transport_mode="AIR") == "AIR_STANDARD"
+    assert normalize_business_type("", transport_mode="EXPRESS") == "EXPRESS"

@@ -53,6 +53,7 @@ EXCEL_EXTRA_FIELD_MAP = {
     "sourceRow": "excel_row_no",
     "sourceDocNo": "source_doc_no",
     "purchaseOrderNo": "purchase_order_no",
+    "supplier": "supplier",
     "purchaseCurrency": "purchase_currency",
     "productNameEs": "product_name_es",
     "specModel": "spec_model",
@@ -170,6 +171,53 @@ def normalize_transport_mode(value):
     if "空运" in normalized or "air" in lowered:
         return "AIR"
     if "快递" in normalized or "express" in lowered or "correo" in lowered:
+        return "EXPRESS"
+    return None
+
+
+def normalize_business_type(value, transport_mode=None):
+    """将业务类型统一为稳定代码；未明确填写时按运输方式兼容旧数据。"""
+
+    cleaned = _clean_text(value)
+    text = str(cleaned or "").strip()
+    upper = text.upper().replace("-", "_").replace(" ", "_")
+    direct_map = {
+        "SEA_STANDARD": "SEA_STANDARD",
+        "SEA_DDP": "SEA_DDP",
+        "AIR_DDP": "AIR_DDP",
+        "AIR_STANDARD": "AIR_STANDARD",
+        "EXPRESS": "EXPRESS",
+        "海运正报正清": "SEA_STANDARD",
+        "海运DDP": "SEA_DDP",
+        "海运 DDP": "SEA_DDP",
+        "空运DDP": "AIR_DDP",
+        "空运 DDP": "AIR_DDP",
+        "正常空运": "AIR_STANDARD",
+        "快递": "EXPRESS",
+    }
+    if upper in direct_map:
+        return direct_map[upper]
+    if text in direct_map:
+        return direct_map[text]
+
+    lowered = text.lower()
+    is_ddp = "ddp" in lowered or "双清" in text or "包税" in text
+    mode = normalize_transport_mode(transport_mode) or normalize_transport_mode(text)
+    if "快递" in text or "express" in lowered or "courier" in lowered or "correo" in lowered:
+        return "EXPRESS"
+    if is_ddp and ("空运" in text or mode == "AIR" or "air" in lowered):
+        return "AIR_DDP"
+    if is_ddp and ("海运" in text or mode == "SEA" or "sea" in lowered or "ocean" in lowered):
+        return "SEA_DDP"
+    if "正报" in text or "正清" in text or "正式报关" in text:
+        return "SEA_STANDARD" if mode != "AIR" else "AIR_STANDARD"
+    if "正常空运" in text:
+        return "AIR_STANDARD"
+    if mode == "SEA":
+        return "SEA_STANDARD"
+    if mode == "AIR":
+        return "AIR_STANDARD"
+    if mode == "EXPRESS":
         return "EXPRESS"
     return None
 
@@ -302,6 +350,7 @@ def map_purchase_expense_row_to_item(row: dict) -> dict:
         "unit_price": _first_value(row, "单价Precio", "采购单价", "unit_price"),
         "goods_value": _first_value(row, "总金额Monto Total", "总货值", "goods_value"),
         "purchase_currency": _first_value(row, "币种Moneda", "采购币种", "purchase_currency"),
+        "supplier": _first_value(row, "供应商", "supplier", "供应商supplier"),
         "source_type": "PURCHASE_EXPENSE_OA",
     }
 
@@ -341,6 +390,7 @@ def map_packing_list_row_to_item(row: dict) -> dict:
         "chargeable_weight_kg": _first_value(row, "计费重KG", "计费重", "chargeable_weight_kg"),
         "unit_price": unit_price,
         "purchase_currency": purchase_currency,
+        "supplier": _first_value(row, "供应商", "supplier", "供应商supplier"),
         "goods_value": goods_value,
         "hs_code": _first_value(row, "海关分类编码", "HS CODE", "hs_code"),
         "source_type": "PACKING_LIST",
@@ -365,6 +415,7 @@ def map_yuewei_excel_block_item_to_item(block: dict, item_row, row_index: int | 
         "alloc_price_mxn": item[8] if len(item) > 8 else None,
         "total_unit_rmb": item[9] if len(item) > 9 else None,
         "goods_value_ratio": item[10] if len(item) > 10 else None,
+        "supplier": extra.get("supplier") or block.get("supplier"),
         "transport_mode": normalize_transport_mode(extra.get("transportMode") or block.get("transportMode")),
         "source_type": extra.get("sourceType") or block.get("sourceType") or "EXCEL_MAIN",
     }

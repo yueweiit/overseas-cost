@@ -1,0 +1,98 @@
+{
+  "doctype": "DocType",
+  "name": "Overseas Cost Usage Log",
+  "module": "Overseas Costing",
+  "autoname": "hash",
+  "title_field": "action_type",
+  "track_changes": 1,
+  "sort_field": "creation",
+  "sort_order": "DESC",
+  "field_order": [
+    "action_type",
+    "status",
+    "batch",
+    "version",
+    "operator_name",
+    "operator_full_name",
+    "route",
+    "action_remark",
+    "extra_json"
+  ],
+  "fields": [
+    {
+      "fieldname": "action_type",
+      "fieldtype": "Select",
+      "label": "动作类型",
+      "options": "PAGE_VIEW\nBATCH_VIEW\nDINGTALK_PULL\nEXCEL_IMPORT\nFILE_PARSE\nRECALCULATE\nCONFIRM_RESULT\nPREVIEW_ERP\nPUSH_ERP\nEXPORT\nDATA_CHECK\nATTACHMENT_VIEW\nOTHER",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "status",
+      "fieldtype": "Select",
+      "label": "执行状态",
+      "options": "Success\nFailed",
+      "default": "Success",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "batch",
+      "fieldtype": "Link",
+      "label": "所属批次",
+      "options": "Overseas Cost Batch",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "version",
+      "fieldtype": "Link",
+      "label": "所属版本",
+      "options": "Overseas Cost Version"
+    },
+    {
+      "fieldname": "operator_name",
+      "fieldtype": "Data",
+      "label": "操作人",
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "operator_full_name",
+      "fieldtype": "Data",
+      "label": "操作人姓名"
+    },
+    {
+      "fieldname": "route",
+      "fieldtype": "Small Text",
+      "label": "页面路径"
+    },
+    {
+      "fieldname": "action_remark",
+      "fieldtype": "Small Text",
+      "label": "动作备注"
+    },
+    {
+      "fieldname": "extra_json",
+      "fieldtype": "Long Text",
+      "label": "扩展信息"
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "share": 1,
+      "print": 1,
+      "email": 1,
+      "export": 1
+    },
+    {
+      "role": "海外成本核算用户",
+      "read": 1,
+      "print": 1,
+      "export": 1,
+      "report": 1
+    }
+  ]
+}

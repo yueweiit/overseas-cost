@@ -21,7 +21,25 @@ def check_writeback_ready(batch_name: str, version_name: str | None = None) -> d
 
 
 @frappe.whitelist()
-def writeback_to_erp(batch_name: str, version_name: str) -> dict:
+def confirm_calculation_result(batch_name: str, version_name: str | None = None, remark: str | None = None) -> dict:
+    """人工确认当前计算结果，通过后才允许组织 ERP 推送报文。"""
+
+    return batch_service.confirm_calculation_result(
+        batch_name=batch_name,
+        version_name=version_name,
+        remark=remark,
+    )
+
+
+@frappe.whitelist()
+def preview_erp_payload(batch_name: str, version_name: str | None = None) -> dict:
+    """预览当前批次将推送给 DeepLinkERP 的报文。"""
+
+    return batch_service.preview_erp_payload(batch_name=batch_name, version_name=version_name)
+
+
+@frappe.whitelist()
+def writeback_to_erp(batch_name: str, version_name: str | None = None) -> dict:
     """执行回写 ERP。"""
 
     return batch_service.writeback_to_erp(batch_name=batch_name, version_name=version_name)

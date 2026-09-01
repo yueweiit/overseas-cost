@@ -16,6 +16,7 @@ app_email = "dev@yuewei.local"
 app_license = "MIT"
 
 after_install = "overseas_costing.install.after_install"
+after_migrate = "overseas_costing.install.after_migrate"
 
 fixtures = []
 
@@ -23,7 +24,9 @@ doctype_js = {}
 doc_events = {}
 
 scheduler_events = {
-    "daily": [
-        "overseas_costing.scripts.import_oa_logistics.scheduled_pull_logistics_approvals",
-    ],
+    "cron": {
+        "0 */6 * * *": [
+            "overseas_costing.scripts.import_oa_logistics.scheduled_pull_logistics_approvals",
+        ],
+    },
 }

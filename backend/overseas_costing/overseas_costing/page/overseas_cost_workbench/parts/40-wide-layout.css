@@ -1,0 +1,15 @@
+@media (min-width: 1600px) {
+  .ocw-desk-fullwidth .page-body {
+    padding-left: 16px !important;
+    padding-right: 16px !important;
+  }
+
+  .ocw-page .ocw-filter-grid {
+    grid-template-columns: repeat(2, minmax(150px, 170px)) minmax(260px, 340px) minmax(140px, 160px) max-content;
+  }
+
+  .ocw-page .ocw-hierarchy-table {
+    min-width: 1010px;
+  }
+}
+
