@@ -7543,7 +7543,6 @@ class OverseasCostWorkbench {
     try {
       await this.loadBatchItems(batch.name, batch.current_version);
       await this.loadAuditLogs(batch.name, batch.current_version);
-      await this.loadUsageLogs(batch.name);
       this.recordUsage("BATCH_VIEW", { batch, remark: "打开批次详情抽屉" });
       this.renderBatchDrawer();
     } catch (error) {

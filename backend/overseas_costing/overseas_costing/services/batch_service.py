@@ -28,6 +28,7 @@ CLASSIC_HISTORY_BATCH_KEYS = (
     "FSCU8486789",
     "MXT959831",
 )
+TAX_COMPONENT_FIELDS = ("igi_amount", "iva_amount", "dta", "prv_duty", "prv_iva")
 
 
 def _get_batch_source_meta(batch_name: str) -> dict:
